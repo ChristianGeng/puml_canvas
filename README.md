@@ -713,11 +713,15 @@ address:
 @endyaml
 ```
 
-Each object renders as a vertical table: the left column holds the
-key (or the integer index for arrays, suffixed with `:`), and the
-right column holds the value. Nested objects and arrays render as
-sub-tables in the right column. Scalar values are color-coded by
-type — strings green, numbers blue, booleans purple, and `null`
+Each object or array renders as its own standalone two-column
+table laid out left-to-right by depth ("linked tables" style): the
+left column holds the key (or the integer index for arrays,
+suffixed with `:`), and the right column holds the value. When a
+value is itself an object or array the parent's value cell shows a
+small connector dot and a dashed line links it to the top of the
+child table. Children stack vertically in their column, centered
+on their parent row when possible. Scalar values are color-coded
+by type — strings green, numbers blue, booleans purple, and `null`
 italic gray — and string values are rendered in double quotes.
 JSON parsing uses `dart:convert`'s `jsonDecode`; YAML parsing uses
 a small built-in subset parser (mappings, block sequences, and

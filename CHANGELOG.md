@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.8
+
+### Changed
+
+- JSON / YAML data diagrams now render in PlantUML's canonical
+  "linked tables" style: every `DataObject` and `DataArray` becomes
+  its own standalone two-column table laid out left-to-right by
+  depth. Where a parent's value is a nested object/array, the
+  parent's value cell shows a small connector dot and a dashed
+  line links it to the top of the child table. Previously every
+  nested value rendered as a recursively indented sub-table inside
+  the parent's value cell, which made deep documents balloon both
+  horizontally and vertically. Existing `json_diagram.png` and
+  `yaml_diagram.png` goldens are regenerated.
+
 ## 0.7.7
 
 ### Fixed

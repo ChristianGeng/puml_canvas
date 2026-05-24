@@ -2935,7 +2935,7 @@ void main() {
       expect(valueTexts, hasLength(2));
     });
 
-    test('nested object renders inner table inside value cell', () {
+    test('nested object renders as a separate linked table', () {
       final scene = layout.layout(
         const DataDiagram(
           format: DataFormat.json,
@@ -2956,6 +2956,60 @@ void main() {
       expect(texts, contains('address'));
       expect(texts, contains('city'));
       expect(texts, contains('"Seoul"'));
+      final outerBoxes = scene.shapes
+          .whereType<SceneBox>()
+          .where((b) => b.strokeWidth > 0)
+          .toList();
+      expect(outerBoxes, hasLength(2));
+      final dots = scene.shapes.whereType<SceneCircle>().toList();
+      expect(dots, hasLength(1));
+      final dashed = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.dashed)
+          .toList();
+      expect(dashed, hasLength(1));
+      final parent = outerBoxes
+          .firstWhere((b) => b.rect.left < outerBoxes[1].rect.left);
+      final child = outerBoxes
+          .firstWhere((b) => b.rect.left > parent.rect.left);
+      expect(child.rect.left, greaterThan(parent.rect.right));
+    });
+
+    test('deeply nested mix produces one table per object/array', () {
+      final scene = layout.layout(
+        const DataDiagram(
+          format: DataFormat.json,
+          root: DataObject([
+            MapEntry(
+              'a',
+              DataObject([
+                MapEntry(
+                  'b',
+                  DataArray([
+                    DataObject([
+                      MapEntry('c',
+                          DataScalar(value: '1', kind: ScalarKind.number)),
+                    ]),
+                  ]),
+                ),
+              ]),
+            ),
+          ]),
+        ),
+        measurer,
+      );
+      final outerBoxes = scene.shapes
+          .whereType<SceneBox>()
+          .where((b) => b.strokeWidth > 0)
+          .toList();
+      expect(outerBoxes, hasLength(4));
+      final dashed = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.dashed)
+          .toList();
+      expect(dashed, hasLength(3));
+      final dots = scene.shapes.whereType<SceneCircle>().toList();
+      expect(dots, hasLength(3));
     });
 
     test('array renders numbered rows', () {
