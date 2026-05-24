@@ -118,40 +118,66 @@ class ComponentLayout implements DiagramLayout {
     final nodeRects = <String, Rect>{};
     final containerRects = <String, Rect>{};
 
-    var x = _padding;
-    var y = _padding;
-    var rowHeight = 0.0;
-    var diagramRight = _padding;
-
+    final items = <_TopItem>[];
     for (final container in diagram.containers) {
-      final laid = _layoutContainer(container, nodeByAlias, measurer);
-      _placeContainer(
-          laid, Offset(x, y), shapes, nodeRects, containerRects, measurer);
-      final width = laid.size.width;
-      final height = laid.size.height;
-      x += width + _containerGap;
-      if (height > rowHeight) rowHeight = height;
-      if (x > diagramRight) diagramRight = x;
+      final laid = _layoutContainer(
+        container,
+        nodeByAlias,
+        measurer,
+        leftToRight: diagram.leftToRightDirection,
+      );
+      final owned = <String>{};
+      _collectContainerAliases(container, owned);
+      items.add(_TopItem(
+        laid: laid,
+        size: laid.size,
+        owned: owned,
+      ));
+    }
+    for (final node in freeNodes) {
+      final size = _measureNode(node, measurer);
+      items.add(_TopItem(
+        freeNode: node,
+        size: size,
+        owned: {node.alias},
+      ));
     }
 
-    if (diagram.containers.isNotEmpty) {
-      x = _padding;
-      y += rowHeight + _containerGap;
-      rowHeight = 0.0;
+    final aliasToItem = <String, int>{};
+    for (var i = 0; i < items.length; i++) {
+      for (final a in items[i].owned) {
+        aliasToItem[a] = i;
+      }
     }
 
-    if (freeNodes.isNotEmpty) {
-      for (final node in freeNodes) {
-        final size = _measureNode(node, measurer);
-        final rect = Rect.fromLTWH(x, y, size.width, size.height);
+    final layout = _bfsLayered(
+      items,
+      diagram.relations,
+      aliasToItem,
+      leftToRight: diagram.leftToRightDirection,
+    );
+
+    var diagramRight = _padding;
+    var diagramBottom = _padding;
+    for (var i = 0; i < items.length; i++) {
+      final pos = layout[i];
+      final item = items[i];
+      if (item.laid != null) {
+        _placeContainer(
+            item.laid!, pos, shapes, nodeRects, containerRects, measurer);
+      } else {
+        final node = item.freeNode!;
+        final rect =
+            Rect.fromLTWH(pos.dx, pos.dy, item.size.width, item.size.height);
         nodeRects[node.alias] = rect;
         _emitNode(node, rect, shapes, measurer);
-        x += size.width + _itemGap;
-        if (size.height > rowHeight) rowHeight = size.height;
-        if (x > diagramRight) diagramRight = x;
       }
-      y += rowHeight;
+      final right = pos.dx + item.size.width;
+      final bottom = pos.dy + item.size.height;
+      if (right > diagramRight) diagramRight = right;
+      if (bottom > diagramBottom) diagramBottom = bottom;
     }
+    final y = diagramBottom;
 
     Rect? rectFor(String alias) =>
         nodeRects[alias] ?? containerRects[alias];
@@ -366,8 +392,9 @@ class ComponentLayout implements DiagramLayout {
   _LaidContainer _layoutContainer(
     ComponentContainer container,
     Map<String, ComponentNode> nodeByAlias,
-    TextMeasurer measurer,
-  ) {
+    TextMeasurer measurer, {
+    bool leftToRight = false,
+  }) {
     final children = <_LaidItem>[];
     for (final alias in container.nodeAliases) {
       final node = nodeByAlias[alias];
@@ -376,7 +403,12 @@ class ComponentLayout implements DiagramLayout {
       children.add(_LaidItem.node(node, size));
     }
     for (final nested in container.nestedContainers) {
-      final laid = _layoutContainer(nested, nodeByAlias, measurer);
+      final laid = _layoutContainer(
+        nested,
+        nodeByAlias,
+        measurer,
+        leftToRight: leftToRight,
+      );
       children.add(_LaidItem.container(laid));
     }
 
@@ -391,16 +423,23 @@ class ComponentLayout implements DiagramLayout {
       _containerPaddingX,
       _containerPaddingY + headerHeight,
     );
+    final allContainers =
+        children.isNotEmpty && children.every((c) => c.isContainer);
+    final horizontal = allContainers ? !leftToRight : leftToRight;
+    final positions = _linearArrange(
+      children.map((c) => c.size).toList(),
+      gap: _itemGap,
+      horizontal: horizontal,
+    );
     var innerWidth = 0.0;
     var innerHeight = 0.0;
-    var cy = innerOrigin.dy;
-    for (final child in children) {
-      child.offset = Offset(innerOrigin.dx, cy);
-      cy += child.size.height + _itemGap;
-      if (child.size.width > innerWidth) innerWidth = child.size.width;
-    }
-    if (children.isNotEmpty) {
-      innerHeight = cy - _itemGap - innerOrigin.dy;
+    for (var i = 0; i < children.length; i++) {
+      final pos = positions[i];
+      children[i].offset = Offset(innerOrigin.dx + pos.dx, innerOrigin.dy + pos.dy);
+      final right = pos.dx + children[i].size.width;
+      final bottom = pos.dy + children[i].size.height;
+      if (right > innerWidth) innerWidth = right;
+      if (bottom > innerHeight) innerHeight = bottom;
     }
     innerWidth = math.max(innerWidth, labelSize.width);
 
@@ -759,6 +798,175 @@ class ComponentLayout implements DiagramLayout {
     final t = math.min(tx, ty);
     return Offset(cx + dx * t, cy + dy * t);
   }
+
+  void _collectContainerAliases(ComponentContainer c, Set<String> into) {
+    if (c.alias != null) into.add(c.alias!);
+    for (final a in c.nodeAliases) {
+      into.add(a);
+    }
+    for (final n in c.nestedContainers) {
+      _collectContainerAliases(n, into);
+    }
+  }
+
+  List<Offset> _bfsLayered(
+    List<_TopItem> items,
+    List<ComponentRelation> relations,
+    Map<String, int> aliasToItem, {
+    required bool leftToRight,
+  }) {
+    final positions = _bfsArrange(
+      items.map((i) => i.size).toList(),
+      items.map((i) => i.owned).toList(),
+      relations,
+      gap: _containerGap,
+      leftToRight: leftToRight,
+    );
+    return [for (final p in positions) Offset(p.dx + _padding, p.dy + _padding)];
+  }
+
+  List<Offset> _linearArrange(
+    List<Size> sizes, {
+    required double gap,
+    required bool horizontal,
+  }) {
+    final positions = <Offset>[];
+    if (horizontal) {
+      var rowHeight = 0.0;
+      for (final s in sizes) {
+        if (s.height > rowHeight) rowHeight = s.height;
+      }
+      var x = 0.0;
+      for (final s in sizes) {
+        final cy = (rowHeight - s.height) / 2;
+        positions.add(Offset(x, cy));
+        x += s.width + gap;
+      }
+    } else {
+      var colWidth = 0.0;
+      for (final s in sizes) {
+        if (s.width > colWidth) colWidth = s.width;
+      }
+      var y = 0.0;
+      for (final s in sizes) {
+        final cx = (colWidth - s.width) / 2;
+        positions.add(Offset(cx, y));
+        y += s.height + gap;
+      }
+    }
+    return positions;
+  }
+
+  List<Offset> _bfsArrange(
+    List<Size> sizes,
+    List<Set<String>> owned,
+    List<ComponentRelation> relations, {
+    required double gap,
+    required bool leftToRight,
+  }) {
+    final n = sizes.length;
+    if (n == 0) return const <Offset>[];
+
+    final aliasToItem = <String, int>{};
+    for (var i = 0; i < n; i++) {
+      for (final a in owned[i]) {
+        aliasToItem[a] = i;
+      }
+    }
+
+    final outEdges = List.generate(n, (_) => <int>{});
+    final inDegree = List<int>.filled(n, 0);
+    for (final r in relations) {
+      final fi = aliasToItem[r.from];
+      final ti = aliasToItem[r.to];
+      if (fi == null || ti == null || fi == ti) continue;
+      if (outEdges[fi].add(ti)) {
+        inDegree[ti]++;
+      }
+    }
+
+    final level = List<int>.filled(n, -1);
+    final queue = <int>[];
+    for (var i = 0; i < n; i++) {
+      if (inDegree[i] == 0) {
+        level[i] = 0;
+        queue.add(i);
+      }
+    }
+    if (queue.isEmpty) {
+      level[0] = 0;
+      queue.add(0);
+    }
+    while (queue.isNotEmpty) {
+      final cur = queue.removeAt(0);
+      for (final v in outEdges[cur]) {
+        final candidate = level[cur] + 1;
+        if (candidate > level[v]) {
+          level[v] = candidate;
+          queue.add(v);
+        }
+      }
+    }
+    for (var i = 0; i < n; i++) {
+      if (level[i] < 0) level[i] = 0;
+    }
+
+    final byLevel = <int, List<int>>{};
+    for (var i = 0; i < n; i++) {
+      byLevel.putIfAbsent(level[i], () => <int>[]).add(i);
+    }
+    final levels = byLevel.keys.toList()..sort();
+
+    final positions = List<Offset>.filled(n, Offset.zero);
+    if (leftToRight) {
+      var x = 0.0;
+      for (final lv in levels) {
+        final col = byLevel[lv]!;
+        var colWidth = 0.0;
+        for (final i in col) {
+          if (sizes[i].width > colWidth) colWidth = sizes[i].width;
+        }
+        var y = 0.0;
+        for (final i in col) {
+          final cx = x + (colWidth - sizes[i].width) / 2;
+          positions[i] = Offset(cx, y);
+          y += sizes[i].height + gap;
+        }
+        x += colWidth + gap;
+      }
+    } else {
+      var y = 0.0;
+      for (final lv in levels) {
+        final row = byLevel[lv]!;
+        var rowHeight = 0.0;
+        for (final i in row) {
+          if (sizes[i].height > rowHeight) rowHeight = sizes[i].height;
+        }
+        var x = 0.0;
+        for (final i in row) {
+          final cy = y + (rowHeight - sizes[i].height) / 2;
+          positions[i] = Offset(x, cy);
+          x += sizes[i].width + gap;
+        }
+        y += rowHeight + gap;
+      }
+    }
+    return positions;
+  }
+}
+
+class _TopItem {
+  final _LaidContainer? laid;
+  final ComponentNode? freeNode;
+  final Size size;
+  final Set<String> owned;
+
+  const _TopItem({
+    this.laid,
+    this.freeNode,
+    required this.size,
+    required this.owned,
+  });
 }
 
 class _LaidContainer {

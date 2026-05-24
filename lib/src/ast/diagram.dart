@@ -776,6 +776,7 @@ class ComponentDiagram extends Diagram {
   final List<ComponentNode> nodes;
   final List<ComponentContainer> containers;
   final List<ComponentRelation> relations;
+  final bool leftToRightDirection;
   @override
   final DiagramDecorations decorations;
 
@@ -783,6 +784,7 @@ class ComponentDiagram extends Diagram {
     this.nodes = const [],
     this.containers = const [],
     this.relations = const [],
+    this.leftToRightDirection = false,
     this.decorations = const DiagramDecorations(),
   });
 }
@@ -924,13 +926,74 @@ class DataDiagram extends Diagram {
 
 class EbnfDiagram extends Diagram {
   final String text;
+  final List<EbnfRule> rules;
   @override
   final DiagramDecorations decorations;
 
   const EbnfDiagram({
     required this.text,
+    this.rules = const [],
     this.decorations = const DiagramDecorations(),
   });
+}
+
+class EbnfRule {
+  final String name;
+  final EbnfExpr expression;
+  const EbnfRule({required this.name, required this.expression});
+}
+
+sealed class EbnfExpr {
+  const EbnfExpr();
+}
+
+class EbnfTerminal extends EbnfExpr {
+  final String value;
+  const EbnfTerminal(this.value);
+}
+
+class EbnfNonTerminal extends EbnfExpr {
+  final String name;
+  const EbnfNonTerminal(this.name);
+}
+
+class EbnfSequence extends EbnfExpr {
+  final List<EbnfExpr> items;
+  const EbnfSequence(this.items);
+}
+
+class EbnfAlternation extends EbnfExpr {
+  final List<EbnfExpr> items;
+  const EbnfAlternation(this.items);
+}
+
+class EbnfOptional extends EbnfExpr {
+  final EbnfExpr inner;
+  const EbnfOptional(this.inner);
+}
+
+class EbnfRepetition extends EbnfExpr {
+  final EbnfExpr inner;
+  const EbnfRepetition(this.inner);
+}
+
+class EbnfGroup extends EbnfExpr {
+  final EbnfExpr inner;
+  const EbnfGroup(this.inner);
+}
+
+class EbnfComment extends EbnfExpr {
+  final String text;
+  const EbnfComment(this.text);
+}
+
+class EbnfSpecial extends EbnfExpr {
+  final String text;
+  const EbnfSpecial(this.text);
+}
+
+class EbnfEmpty extends EbnfExpr {
+  const EbnfEmpty();
 }
 
 sealed class SaltCell {

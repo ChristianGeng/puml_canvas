@@ -57,16 +57,11 @@ class MindmapLayout implements DiagramLayout {
     final rootMeasured = _measure(root, isRoot: true, measurer: measurer);
     final leftChildren = <MindmapNode>[];
     final rightChildren = <MindmapNode>[];
-    var autoToggle = 0;
     for (final child in root.children) {
-      final side = _resolveTopSide(child, autoToggle);
-      if (side == MindmapSide.left) {
+      if (_resolveTopSide(child) == MindmapSide.left) {
         leftChildren.add(child);
       } else {
         rightChildren.add(child);
-      }
-      if (child.side == MindmapSide.auto) {
-        autoToggle++;
       }
     }
 
@@ -142,9 +137,9 @@ class MindmapLayout implements DiagramLayout {
     );
   }
 
-  MindmapSide _resolveTopSide(MindmapNode child, int autoIndex) {
+  MindmapSide _resolveTopSide(MindmapNode child) {
     if (child.side != MindmapSide.auto) return child.side;
-    return autoIndex.isEven ? MindmapSide.right : MindmapSide.left;
+    return MindmapSide.right;
   }
 
   _NodeMeasured _measure(

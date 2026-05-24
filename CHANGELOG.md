@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- EBNF diagrams now render as PlantUML-style railroad tracks: each
+  rule becomes a labeled track with entry/exit dots, sequences are
+  connected horizontally, alternations branch with rejoin points, and
+  repetitions draw a U-loop back to the start. Previously EBNF bodies
+  rendered as raw text dumps. New `EbnfParser` (recursive-descent
+  tokenizer + parser) backs the AST, exposed via `EbnfRule` and a
+  sealed `EbnfExpr` hierarchy.
+- Component / deployment parser now honors the
+  `left to right direction` and `top to bottom direction` directives
+  (default remains `top to bottom`).
+
+### Changed
+
+- Component / deployment layout: top-level containers and free nodes
+  are now placed in BFS-layered order driven by their relations
+  (default top-to-bottom stacks each rank as a row; with
+  `left to right direction` each rank becomes a column). Sibling
+  containers inside a parent container (e.g. multiple subnets inside
+  a VPC) lay out as a row by default so peer groupings render
+  side-by-side; leaf node children of a container continue to stack
+  vertically. Previously every top-level container went into a single
+  horizontal row regardless of flow, and nested children always
+  stacked vertically.
+- Mindmap: a child without an explicit `+` / `-` side marker now
+  defaults to the **right** side (matching PlantUML's default
+  behavior). Previously auto-side children alternated left/right,
+  which split simple roadmaps across both sides of the root.
+
+### Fixed
+
+- State diagram: transitions whose endpoint is the `[*]` pseudo-state
+  (initial or final) are now drawn. Previously the emit loop looked
+  up the raw `[*]` key in the node table, which the layout had
+  already split into distinct `[*]:initial` / `[*]:final` entries, so
+  the arrow was silently dropped and the start/end dots floated
+  disconnected.
+- State diagram: a bidirectional pair of transitions between the same
+  two states (e.g. `A --> B : submit` / `B --> A : request changes`)
+  now renders as two parallel arrows offset perpendicular to the
+  edge axis, so both labels remain readable. Previously both
+  transitions drew along the same center-to-center axis and stacked
+  their labels on top of each other.
+
 ## 0.7.9
 
 ### Fixed

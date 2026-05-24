@@ -3317,4 +3317,126 @@ void main() {
       expect(texts, contains('210.0.0.0/24'));
     });
   });
+
+  group('EbnfLayout', () {
+    const layout = EbnfLayout();
+    final measurer = _FixedTextMeasurer();
+
+    test('empty diagram produces an empty scene', () {
+      final scene = layout.layout(
+        const EbnfDiagram(text: ''),
+        measurer,
+      );
+      expect(scene.shapes, isEmpty);
+      expect(scene.size, Size.zero);
+    });
+
+    test('single terminal rule emits entry+exit dots and a terminal box', () {
+      final scene = layout.layout(
+        const EbnfDiagram(
+          text: '',
+          rules: [
+            EbnfRule(name: 'a', expression: EbnfTerminal('x')),
+          ],
+        ),
+        measurer,
+      );
+      expect(scene.shapes.whereType<SceneCircle>(), hasLength(2));
+      expect(scene.shapes.whereType<SceneBox>(), hasLength(1));
+      final labels =
+          scene.shapes.whereType<SceneText>().map((t) => t.text).toSet();
+      expect(labels, contains('a'));
+    });
+
+    test('non-terminal rule emits a rounded box', () {
+      final scene = layout.layout(
+        const EbnfDiagram(
+          text: '',
+          rules: [
+            EbnfRule(name: 'a', expression: EbnfNonTerminal('foo')),
+          ],
+        ),
+        measurer,
+      );
+      expect(scene.shapes.whereType<SceneRoundedBox>(), hasLength(1));
+      expect(scene.shapes.whereType<SceneBox>(), isEmpty);
+    });
+
+    test('alternation lays out children stacked with branch connectors', () {
+      final scene = layout.layout(
+        const EbnfDiagram(
+          text: '',
+          rules: [
+            EbnfRule(
+              name: 'a',
+              expression: EbnfAlternation([
+                EbnfTerminal('x'),
+                EbnfTerminal('y'),
+              ]),
+            ),
+          ],
+        ),
+        measurer,
+      );
+      expect(scene.shapes.whereType<SceneBox>(), hasLength(2));
+      expect(scene.shapes.whereType<SceneCircle>(), hasLength(2));
+      expect(
+        scene.shapes.whereType<SceneLine>().length,
+        greaterThan(2),
+      );
+    });
+
+    test('repetition emits the inner expression and the loop arch lines', () {
+      final scene = layout.layout(
+        const EbnfDiagram(
+          text: '',
+          rules: [
+            EbnfRule(
+              name: 'a',
+              expression: EbnfRepetition(EbnfTerminal('x')),
+            ),
+          ],
+        ),
+        measurer,
+      );
+      expect(scene.shapes.whereType<SceneBox>(), hasLength(1));
+      expect(scene.shapes.whereType<SceneCircle>(), hasLength(2));
+      expect(
+        scene.shapes.whereType<SceneLine>().length,
+        greaterThanOrEqualTo(5),
+      );
+    });
+
+    test('multiple rules stack vertically', () {
+      final one = layout.layout(
+        const EbnfDiagram(
+          text: '',
+          rules: [EbnfRule(name: 'a', expression: EbnfTerminal('x'))],
+        ),
+        measurer,
+      );
+      final two = layout.layout(
+        const EbnfDiagram(
+          text: '',
+          rules: [
+            EbnfRule(name: 'a', expression: EbnfTerminal('x')),
+            EbnfRule(name: 'b', expression: EbnfTerminal('y')),
+          ],
+        ),
+        measurer,
+      );
+      expect(two.size.height, greaterThan(one.size.height));
+      expect(two.shapes.whereType<SceneCircle>(), hasLength(4));
+    });
+
+    test('falls back to text rendering when rules list is empty', () {
+      final scene = layout.layout(
+        const EbnfDiagram(text: 'some regex pattern'),
+        measurer,
+      );
+      final texts =
+          scene.shapes.whereType<SceneText>().map((t) => t.text).toList();
+      expect(texts, contains('some regex pattern'));
+    });
+  });
 }

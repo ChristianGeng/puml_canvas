@@ -3203,6 +3203,113 @@ void main() {
     });
   });
 
+  group('ebnf', () {
+    EbnfDiagram parseEbnf(String src) {
+      final tokens = Lexer().tokenize(src);
+      return Parser().parse(tokens) as EbnfDiagram;
+    }
+
+    test('parses a simple terminal rule', () {
+      final d = parseEbnf('@startebnf\n'
+          'a = "x" ;\n'
+          '@endebnf\n');
+      expect(d.rules, hasLength(1));
+      final rule = d.rules.single;
+      expect(rule.name, 'a');
+      final term = rule.expression as EbnfTerminal;
+      expect(term.value, 'x');
+      expect(d.text, isEmpty);
+    });
+
+    test('parses an alternation of terminals', () {
+      final d = parseEbnf('@startebnf\n'
+          'a = "x" | "y" | "z" ;\n'
+          '@endebnf\n');
+      final rule = d.rules.single;
+      final alt = rule.expression as EbnfAlternation;
+      expect(alt.items, hasLength(3));
+      expect((alt.items[0] as EbnfTerminal).value, 'x');
+      expect((alt.items[2] as EbnfTerminal).value, 'z');
+    });
+
+    test('parses a sequence of terminals', () {
+      final d = parseEbnf('@startebnf\n'
+          'a = "x" , "y" ;\n'
+          '@endebnf\n');
+      final seq = d.rules.single.expression as EbnfSequence;
+      expect(seq.items, hasLength(2));
+    });
+
+    test('parses optional and repetition', () {
+      final d = parseEbnf('@startebnf\n'
+          'a = [ "x" ] , { "y" } ;\n'
+          '@endebnf\n');
+      final seq = d.rules.single.expression as EbnfSequence;
+      expect(seq.items[0], isA<EbnfOptional>());
+      expect(seq.items[1], isA<EbnfRepetition>());
+    });
+
+    test('parses group with non-terminals', () {
+      final d = parseEbnf('@startebnf\n'
+          'a = ( foo | bar ) , baz ;\n'
+          '@endebnf\n');
+      final seq = d.rules.single.expression as EbnfSequence;
+      final group = seq.items[0] as EbnfGroup;
+      final alt = group.inner as EbnfAlternation;
+      expect((alt.items[0] as EbnfNonTerminal).name, 'foo');
+      expect((seq.items[1] as EbnfNonTerminal).name, 'baz');
+    });
+
+    test('parses special sequence', () {
+      final d = parseEbnf('@startebnf\n'
+          'quoted = ? any character ? ;\n'
+          '@endebnf\n');
+      final special = d.rules.single.expression as EbnfSpecial;
+      expect(special.text, 'any character');
+    });
+
+    test('parses the failing sample subset grammar (11 rules)', () {
+      final d = parseEbnf('@startebnf\n'
+          'title Mini PlantUML subset grammar\n'
+          '\n'
+          'diagram = start_directive , { statement } , end_directive ;\n'
+          'start_directive = "@startuml" | "@startjson" | "@startyaml" ;\n'
+          'end_directive = "@enduml" | "@endjson" | "@endyaml" ;\n'
+          'statement = participant | message | block | note | raw_line ;\n'
+          'participant = ( "participant" | "actor" | "database" ) , quoted_name , [ "as" , identifier ] ;\n'
+          'message = identifier , arrow , identifier , ":" , text ;\n'
+          'arrow = "->" | "-->" | "<-" | "<--" | "->>" ;\n'
+          'block = ( "alt" | "loop" | "par" | "group" ) , text , { statement } , "end" ;\n'
+          'note = "note" , ( "left" | "right" | "over" ) , text , "end note" ;\n'
+          'identifier = letter , { letter | digit | "_" } ;\n'
+          'quoted_name = \'"\' , { ? any character except quote ? } , \'"\' ;\n'
+          '@endebnf\n');
+      expect(d.rules, hasLength(11));
+      expect(d.rules.map((r) => r.name), [
+        'diagram',
+        'start_directive',
+        'end_directive',
+        'statement',
+        'participant',
+        'message',
+        'arrow',
+        'block',
+        'note',
+        'identifier',
+        'quoted_name',
+      ]);
+    });
+
+    test('falls back to text for unparseable trailing content', () {
+      final d = parseEbnf('@startebnf\n'
+          'a = "x" ;\n'
+          'gibberish~no~rule\n'
+          '@endebnf\n');
+      expect(d.rules, hasLength(1));
+      expect(d.text, isNotEmpty);
+    });
+  });
+
   group('universal decorations', () {
     Diagram parseAny(String src) {
       final tokens = Lexer().tokenize(src);

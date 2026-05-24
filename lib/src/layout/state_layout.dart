@@ -119,11 +119,22 @@ class StateLayout implements DiagramLayout {
       _emitNode(node, shapes, measurer);
     }
 
+    final pairCounts = <String, int>{};
     for (final t in transitions) {
-      final a = nodes[t.from];
-      final b = nodes[t.to];
+      final fromKey = _refToNodeKey(t.from, source: true);
+      final toKey = _refToNodeKey(t.to, source: false);
+      final key = '$fromKey|$toKey';
+      pairCounts[key] = (pairCounts[key] ?? 0) + 1;
+    }
+    for (final t in transitions) {
+      final fromKey = _refToNodeKey(t.from, source: true);
+      final toKey = _refToNodeKey(t.to, source: false);
+      final a = nodes[fromKey];
+      final b = nodes[toKey];
       if (a == null || b == null) continue;
-      _emitTransition(shapes, t, a, b, measurer);
+      final reverseKey = '$toKey|$fromKey';
+      final hasReverse = (pairCounts[reverseKey] ?? 0) > 0;
+      _emitTransition(shapes, t, a, b, measurer, bidirectional: hasReverse);
     }
 
     var width = 0.0;
@@ -556,12 +567,31 @@ class StateLayout implements DiagramLayout {
     StateTransition t,
     _Node a,
     _Node b,
-    TextMeasurer measurer,
-  ) {
+    TextMeasurer measurer, {
+    bool bidirectional = false,
+  }) {
     final aRect = Rect.fromLTWH(a.origin.dx, a.origin.dy, a.width, a.height);
     final bRect = Rect.fromLTWH(b.origin.dx, b.origin.dy, b.width, b.height);
-    final fromEdge = _edgePoint(aRect, bRect.center);
-    final toEdge = _edgePoint(bRect, aRect.center);
+    var fromEdge = _edgePoint(aRect, bRect.center);
+    var toEdge = _edgePoint(bRect, aRect.center);
+    if (bidirectional) {
+      const offset = 14.0;
+      final dx = toEdge.dx - fromEdge.dx;
+      final dy = toEdge.dy - fromEdge.dy;
+      final len = math.sqrt(dx * dx + dy * dy);
+      if (len > 0) {
+        final px = -dy / len;
+        final py = dx / len;
+        fromEdge = Offset(
+          fromEdge.dx + px * offset,
+          fromEdge.dy + py * offset,
+        );
+        toEdge = Offset(
+          toEdge.dx + px * offset,
+          toEdge.dy + py * offset,
+        );
+      }
+    }
     shapes.add(SceneLine(
       from: fromEdge,
       to: toEdge,

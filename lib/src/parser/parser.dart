@@ -5,6 +5,7 @@ import 'package:flutter/painting.dart';
 import '../ast/diagram.dart';
 import '../lexer/token.dart';
 import '../text/colors.dart' as text_colors;
+import 'ebnf_parser.dart';
 
 class ParserException implements Exception {
   final String message;
@@ -2532,6 +2533,7 @@ class Parser {
     final containers = <ComponentContainer>[];
     final relations = <ComponentRelation>[];
     final seenAliases = <String>{};
+    var leftToRight = false;
 
     void addNode(ComponentNode node) {
       if (seenAliases.add(node.alias)) {
@@ -2543,6 +2545,12 @@ class Parser {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
       if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_tryParseDirectionDirective(setLeftToRight: () {
+        leftToRight = true;
+      })) {
         _skipNewlines();
         continue;
       }
@@ -2599,6 +2607,7 @@ class Parser {
       nodes: List.unmodifiable(nodes),
       containers: List.unmodifiable(containers),
       relations: List.unmodifiable(relations),
+      leftToRightDirection: leftToRight,
       decorations: _decorations.build(),
     );
   }
@@ -4308,8 +4317,11 @@ class Parser {
     if (_check(TokenType.endEbnf)) {
       _advance();
     }
+    final raw = buf.toString().trimRight();
+    final parsed = EbnfBodyParser().parse(raw);
     return EbnfDiagram(
-      text: buf.toString().trimRight(),
+      text: parsed.remainder,
+      rules: parsed.rules,
       decorations: _decorations.build(),
     );
   }
