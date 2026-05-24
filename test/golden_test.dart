@@ -627,6 +627,28 @@ void main() {
       );
     });
 
+    testWidgets('component diagram with database and queue', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'package "Backend" {\n'
+        '  [Order Service]\n'
+        '  [Payment Adapter]\n'
+        '}\n'
+        'cloud "Payment Gateway" as PG\n'
+        'database "Orders DB" as ODB\n'
+        'queue "Events" as EVQ\n'
+        '\n'
+        '[Order Service] --> [Payment Adapter]\n'
+        '[Payment Adapter] --> PG\n'
+        '[Order Service] --> ODB\n'
+        '[Order Service] --> EVQ\n'
+        '@enduml\n',
+        'component_db_queue',
+        size: const Size(900, 700),
+      );
+    });
+
     testWidgets('deployment diagram', (tester) async {
       await expectPumlGolden(
         tester,

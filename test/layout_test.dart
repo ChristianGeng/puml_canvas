@@ -2500,6 +2500,126 @@ void main() {
       expect(notes, hasLength(1));
       expect(notes.single.text, 'config.yml');
     });
+
+    test('database node emits a SceneSymbol with database kind', () {
+      final scene = layout.layout(
+        const ComponentDiagram(nodes: [
+          ComponentNode(
+              alias: 'DB',
+              label: 'Orders DB',
+              kind: ComponentNodeKind.database),
+        ]),
+        measurer,
+      );
+      final symbols = scene.shapes.whereType<SceneSymbol>().toList();
+      expect(symbols, hasLength(1));
+      expect(symbols.single.kind, ParticipantKind.database);
+      expect(symbols.single.label, 'Orders DB');
+    });
+
+    test('queue node emits a SceneSymbol with queue kind', () {
+      final scene = layout.layout(
+        const ComponentDiagram(nodes: [
+          ComponentNode(
+              alias: 'Q', label: 'Jobs', kind: ComponentNodeKind.queue),
+        ]),
+        measurer,
+      );
+      final symbols = scene.shapes.whereType<SceneSymbol>().toList();
+      expect(symbols, hasLength(1));
+      expect(symbols.single.kind, ParticipantKind.queue);
+    });
+
+    test('relation between same-container nodes emits Manhattan segments', () {
+      final scene = layout.layout(
+        const ComponentDiagram(
+          nodes: [
+            ComponentNode(
+                alias: 'A', label: 'A', kind: ComponentNodeKind.component),
+            ComponentNode(
+                alias: 'B', label: 'B', kind: ComponentNodeKind.component),
+          ],
+          containers: [
+            ComponentContainer(
+              label: 'Box',
+              kind: ContainerKind.package,
+              nodeAliases: ['A', 'B'],
+            ),
+          ],
+          relations: [
+            ComponentRelation(from: 'A', to: 'B'),
+          ],
+        ),
+        measurer,
+      );
+      final lines = scene.shapes.whereType<SceneLine>().toList();
+      final headed = lines.where((l) => l.head != null).toList();
+      expect(headed, hasLength(1));
+      expect(lines.where((l) => l.head == null).length,
+          greaterThanOrEqualTo(2));
+    });
+
+    test('checkout sample parses, lays out, and renders all 5 relations', () {
+      const src = '@startuml\n'
+          'title Checkout Components\n'
+          'package "Frontend" {\n'
+          '  [Cart UI]\n'
+          '  [Checkout UI]\n'
+          '}\n'
+          'package "Backend" {\n'
+          '  [Order Service]\n'
+          '  [Payment Adapter]\n'
+          '  [Inventory Service]\n'
+          '}\n'
+          'cloud "Payment Gateway" as PG\n'
+          'database "Orders DB" as ODB\n'
+          '\n'
+          '[Cart UI] --> [Checkout UI]\n'
+          '[Order Service] --> [Inventory Service]\n'
+          '[Order Service] --> [Payment Adapter]\n'
+          '[Payment Adapter] --> PG\n'
+          '[Order Service] --> ODB\n'
+          '@enduml\n';
+      final diagram = Parser().parse(Lexer().tokenize(src));
+      expect(diagram, isA<ComponentDiagram>());
+      final comp = diagram as ComponentDiagram;
+      expect(comp.relations, hasLength(5));
+      expect(comp.nodes.firstWhere((n) => n.alias == 'ODB').kind,
+          ComponentNodeKind.database);
+      final scene = layout.layout(comp, measurer);
+      final headedLines = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head != null)
+          .toList();
+      expect(headedLines, hasLength(5));
+    });
+
+    test('relation to container alias resolves to container rect', () {
+      final scene = layout.layout(
+        const ComponentDiagram(
+          nodes: [
+            ComponentNode(
+                alias: 'A', label: 'A', kind: ComponentNodeKind.component),
+          ],
+          containers: [
+            ComponentContainer(
+              label: 'Gateway',
+              alias: 'PG',
+              kind: ContainerKind.cloud,
+            ),
+          ],
+          relations: [
+            ComponentRelation(from: 'A', to: 'PG'),
+          ],
+        ),
+        measurer,
+      );
+      final headed = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head != null)
+          .toList();
+      expect(headed, hasLength(1));
+    });
   });
 
   group('TimingLayout', () {

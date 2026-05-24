@@ -2460,7 +2460,17 @@ class Parser {
       } else if (_isKeyword('interface')) {
         addNode(_parseInterfaceDecl());
       } else if (_isKeyword('database')) {
-        addNode(_parseComponentDecl());
+        if (_typedNodeKeywordIsContainer()) {
+          containers.add(_parseComponentContainer(addNode));
+        } else {
+          addNode(_parseTypedNodeDecl(ComponentNodeKind.database));
+        }
+      } else if (_isKeyword('queue')) {
+        if (_typedNodeKeywordIsContainer()) {
+          containers.add(_parseComponentContainer(addNode));
+        } else {
+          addNode(_parseTypedNodeDecl(ComponentNodeKind.queue));
+        }
       } else if (_isComponentContainerKeyword()) {
         containers.add(_parseComponentContainer(addNode));
       } else if (_check(TokenType.leftBracket) && !_bracketIsRelationStart()) {
@@ -2488,6 +2498,19 @@ class Parser {
     if (!_check(TokenType.identifier)) return false;
     const kws = {'package', 'node', 'cloud', 'frame'};
     return kws.contains(_peek().lexeme);
+  }
+
+  bool _typedNodeKeywordIsContainer() {
+    for (var k = _pos + 1; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.leftBrace) return true;
+      if (t.type == TokenType.newline ||
+          t.type == TokenType.eof ||
+          t.type == TokenType.endUml) {
+        return false;
+      }
+    }
+    return false;
   }
 
   bool _bracketIsRelationStart() {
@@ -2641,6 +2664,39 @@ class Parser {
     );
   }
 
+  ComponentNode _parseTypedNodeDecl(ComponentNodeKind kind) {
+    _advance();
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = first;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected node name, got ${t.type}', t.line, t.column);
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: kind,
+    );
+  }
+
   String _readBracketedName() {
     _advance();
     if (_check(TokenType.stringLiteral)) {
@@ -2742,9 +2798,10 @@ class Parser {
         label = _advance().lexeme;
       }
     }
+    String? alias;
     if (_isKeyword('as')) {
       _advance();
-      _expect(TokenType.identifier);
+      alias = _expect(TokenType.identifier).lexeme;
     }
     final contained = <String>[];
     final nested = <ComponentContainer>[];
@@ -2764,6 +2821,15 @@ class Parser {
           contained.add(node.alias);
         } else if (_isKeyword('interface')) {
           final node = _parseInterfaceDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('database') &&
+            !_typedNodeKeywordIsContainer()) {
+          final node = _parseTypedNodeDecl(ComponentNodeKind.database);
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('queue') && !_typedNodeKeywordIsContainer()) {
+          final node = _parseTypedNodeDecl(ComponentNodeKind.queue);
           addNode(node);
           contained.add(node.alias);
         } else if (_check(TokenType.leftBracket)) {
@@ -2795,6 +2861,7 @@ class Parser {
     }
     return ComponentContainer(
       label: label,
+      alias: alias,
       kind: kind,
       nodeAliases: List.unmodifiable(contained),
       nestedContainers: List.unmodifiable(nested),

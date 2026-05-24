@@ -31,6 +31,8 @@ class ComponentLayout implements DiagramLayout {
   static const _artifactMinWidth = 80.0;
   static const _artifactMinHeight = 40.0;
   static const _artifactFoldSize = 8.0;
+  static const _databaseCapHeight = 6.0;
+  static const _queueCapWidth = 8.0;
 
   static const _componentStyle = TextStyle(
     color: Color(0xFF000000),
@@ -113,6 +115,7 @@ class ComponentLayout implements DiagramLayout {
 
     final shapes = <SceneShape>[];
     final nodeRects = <String, Rect>{};
+    final containerRects = <String, Rect>{};
 
     var x = _padding;
     var y = _padding;
@@ -121,7 +124,8 @@ class ComponentLayout implements DiagramLayout {
 
     for (final container in diagram.containers) {
       final laid = _layoutContainer(container, nodeByAlias, measurer);
-      _placeContainer(laid, Offset(x, y), shapes, nodeRects, measurer);
+      _placeContainer(
+          laid, Offset(x, y), shapes, nodeRects, containerRects, measurer);
       final width = laid.size.width;
       final height = laid.size.height;
       x += width + _containerGap;
@@ -148,24 +152,26 @@ class ComponentLayout implements DiagramLayout {
       y += rowHeight;
     }
 
+    Rect? rectFor(String alias) =>
+        nodeRects[alias] ?? containerRects[alias];
+
+    final allNodeRects = nodeRects.values.toList(growable: false);
+
     for (final relation in diagram.relations) {
-      final fromRect = nodeRects[relation.from];
-      final toRect = nodeRects[relation.to];
+      final fromRect = rectFor(relation.from);
+      final toRect = rectFor(relation.to);
       if (fromRect == null || toRect == null) continue;
       final fromNode = nodeByAlias[relation.from];
       final toNode = nodeByAlias[relation.to];
-      final fromEdge = _edgeFor(fromRect, fromNode, toRect.center);
-      final toEdge = _edgeFor(toRect, toNode, fromRect.center);
-      shapes.add(SceneLine(
-        from: fromEdge,
-        to: toEdge,
-        dashed: relation.lineStyle == LineStyle.dashed,
-        head: relation.head,
-        headAtFrom: false,
-        label: relation.label,
-        labelStyle: relation.label == null ? null : _relationLabelStyle,
-        stroke: const Color(0xFF000000),
-      ));
+      _emitRelation(
+        relation,
+        fromRect,
+        toRect,
+        fromNode,
+        toNode,
+        allNodeRects,
+        shapes,
+      );
     }
 
     final width = math.max(diagramRight, _padding) + _padding;
@@ -201,6 +207,30 @@ class ComponentLayout implements DiagramLayout {
       final height = math.max(
         _artifactMinHeight,
         labelSize.height + _artifactPaddingY * 2,
+      );
+      return Size(width, height);
+    }
+    if (node.kind == ComponentNodeKind.database) {
+      final labelSize = measurer.measure(node.label, _componentStyle);
+      final width = math.max(
+        _componentMinWidth,
+        labelSize.width + _componentPaddingX * 2,
+      );
+      final height = math.max(
+        _componentMinHeight,
+        labelSize.height + _componentPaddingY * 2 + _databaseCapHeight * 2,
+      );
+      return Size(width, height);
+    }
+    if (node.kind == ComponentNodeKind.queue) {
+      final labelSize = measurer.measure(node.label, _componentStyle);
+      final width = math.max(
+        _componentMinWidth,
+        labelSize.width + _componentPaddingX * 2 + _queueCapWidth * 2,
+      );
+      final height = math.max(
+        _componentMinHeight,
+        labelSize.height + _componentPaddingY * 2,
       );
       return Size(width, height);
     }
@@ -256,6 +286,28 @@ class ComponentLayout implements DiagramLayout {
         fill: _artifactFill,
         stroke: _artifactStroke,
         foldSize: _artifactFoldSize,
+      ));
+      return;
+    }
+    if (node.kind == ComponentNodeKind.database) {
+      shapes.add(SceneSymbol(
+        rect: rect,
+        label: node.label,
+        labelStyle: _componentStyle,
+        kind: ParticipantKind.database,
+        fill: _componentFill,
+        stroke: _componentStroke,
+      ));
+      return;
+    }
+    if (node.kind == ComponentNodeKind.queue) {
+      shapes.add(SceneSymbol(
+        rect: rect,
+        label: node.label,
+        labelStyle: _componentStyle,
+        kind: ParticipantKind.queue,
+        fill: _componentFill,
+        stroke: _componentStroke,
       ));
       return;
     }
@@ -346,6 +398,7 @@ class ComponentLayout implements DiagramLayout {
     Offset origin,
     List<SceneShape> shapes,
     Map<String, Rect> nodeRects,
+    Map<String, Rect> containerRects,
     TextMeasurer measurer,
   ) {
     final rect = Rect.fromLTWH(
@@ -355,6 +408,10 @@ class ComponentLayout implements DiagramLayout {
       laid.size.height,
     );
     _emitContainerFrame(laid, rect, shapes);
+    final alias = laid.container.alias;
+    if (alias != null) {
+      containerRects[alias] = rect;
+    }
     for (final child in laid.children) {
       final childOrigin = Offset(
         origin.dx + child.offset.dx,
@@ -366,6 +423,7 @@ class ComponentLayout implements DiagramLayout {
           childOrigin,
           shapes,
           nodeRects,
+          containerRects,
           measurer,
         );
       } else {
@@ -381,6 +439,122 @@ class ComponentLayout implements DiagramLayout {
         _emitNode(node, nodeRect, shapes, measurer);
       }
     }
+  }
+
+  void _emitRelation(
+    ComponentRelation relation,
+    Rect fromRect,
+    Rect toRect,
+    ComponentNode? fromNode,
+    ComponentNode? toNode,
+    List<Rect> allNodeRects,
+    List<SceneShape> shapes,
+  ) {
+    final dashed = relation.lineStyle == LineStyle.dashed;
+    final stroke = const Color(0xFF000000);
+    final fromCenter = fromRect.center;
+    final toCenter = toRect.center;
+    final dx = (toCenter.dx - fromCenter.dx).abs();
+    final dy = (toCenter.dy - fromCenter.dy).abs();
+    final vertical = dy >= dx;
+
+    Offset start;
+    Offset end;
+    Offset midA;
+    Offset midB;
+    if (vertical) {
+      final midY = (fromCenter.dy + toCenter.dy) / 2;
+      start = _edgeFor(
+          fromRect, fromNode, Offset(fromCenter.dx, toCenter.dy));
+      end =
+          _edgeFor(toRect, toNode, Offset(toCenter.dx, fromCenter.dy));
+      midA = Offset(start.dx, midY);
+      midB = Offset(end.dx, midY);
+      if (_pathHitsAnyOther(
+          start, midA, midB, end, fromRect, toRect, allNodeRects)) {
+        final detourX = math.max(fromRect.right, toRect.right) + 16.0;
+        start = Offset(fromRect.right, fromCenter.dy);
+        end = Offset(toRect.right, toCenter.dy);
+        midA = Offset(detourX, start.dy);
+        midB = Offset(detourX, end.dy);
+      }
+    } else {
+      final midX = (fromCenter.dx + toCenter.dx) / 2;
+      start = _edgeFor(
+          fromRect, fromNode, Offset(toCenter.dx, fromCenter.dy));
+      end =
+          _edgeFor(toRect, toNode, Offset(fromCenter.dx, toCenter.dy));
+      midA = Offset(midX, start.dy);
+      midB = Offset(midX, end.dy);
+      if (_pathHitsAnyOther(
+          start, midA, midB, end, fromRect, toRect, allNodeRects)) {
+        final detourY = math.max(fromRect.bottom, toRect.bottom) + 16.0;
+        start = Offset(fromCenter.dx, fromRect.bottom);
+        end = Offset(toCenter.dx, toRect.bottom);
+        midA = Offset(start.dx, detourY);
+        midB = Offset(end.dx, detourY);
+      }
+    }
+
+    shapes.add(SceneLine(
+      from: start,
+      to: midA,
+      dashed: dashed,
+      head: null,
+      stroke: stroke,
+    ));
+    shapes.add(SceneLine(
+      from: midA,
+      to: midB,
+      dashed: dashed,
+      head: null,
+      stroke: stroke,
+    ));
+    shapes.add(SceneLine(
+      from: midB,
+      to: end,
+      dashed: dashed,
+      head: relation.head,
+      headAtFrom: false,
+      stroke: stroke,
+      label: relation.label,
+      labelStyle: relation.label == null ? null : _relationLabelStyle,
+    ));
+  }
+
+  bool _pathHitsAnyOther(
+    Offset s,
+    Offset a,
+    Offset b,
+    Offset e,
+    Rect from,
+    Rect to,
+    List<Rect> rects,
+  ) {
+    return _segmentHitsAnyOther(s, a, from, to, rects) ||
+        _segmentHitsAnyOther(a, b, from, to, rects) ||
+        _segmentHitsAnyOther(b, e, from, to, rects);
+  }
+
+  bool _segmentHitsAnyOther(
+    Offset a,
+    Offset b,
+    Rect from,
+    Rect to,
+    List<Rect> rects,
+  ) {
+    final minX = math.min(a.dx, b.dx);
+    final maxX = math.max(a.dx, b.dx);
+    final minY = math.min(a.dy, b.dy);
+    final maxY = math.max(a.dy, b.dy);
+    for (final r in rects) {
+      if (r == from || r == to) continue;
+      final inflated = r.deflate(0.5);
+      if (inflated.right < minX || inflated.left > maxX) continue;
+      if (inflated.bottom < minY || inflated.top > maxY) continue;
+      return true;
+    }
+    return false;
   }
 
   void _emitContainerFrame(

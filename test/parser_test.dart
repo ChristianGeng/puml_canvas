@@ -2488,6 +2488,39 @@ void main() {
       final d = Parser().parse(tokens);
       expect(d, isA<ComponentDiagram>());
     });
+
+    test('database keyword parses as database node when not a container', () {
+      final d = parseComponent('@startuml\n'
+          'package "P" {\n'
+          '  [A]\n'
+          '}\n'
+          'database "Orders DB" as ODB\n'
+          '@enduml\n');
+      final n = d.nodes.firstWhere((n) => n.alias == 'ODB');
+      expect(n.label, 'Orders DB');
+      expect(n.kind, ComponentNodeKind.database);
+    });
+
+    test('queue keyword parses as queue node when not a container', () {
+      final d = parseComponent('@startuml\n'
+          'package "P" {\n'
+          '  [A]\n'
+          '}\n'
+          'queue "Q" as QQ\n'
+          '@enduml\n');
+      final n = d.nodes.firstWhere((n) => n.alias == 'QQ');
+      expect(n.label, 'Q');
+      expect(n.kind, ComponentNodeKind.queue);
+    });
+
+    test('cloud container as alias is captured on the container', () {
+      final d = parseComponent('@startuml\n'
+          'cloud "Payment Gateway" as PG\n'
+          '[A] --> PG\n'
+          '@enduml\n');
+      expect(d.containers.single.alias, 'PG');
+      expect(d.relations.single.to, 'PG');
+    });
   });
 
   group('deployment / artifact', () {

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.7.4
+
+### Fixed
+
+- Component diagrams: `database "X" as DB` and `queue "Q" as QQ`
+  standalone node declarations now render as cylinder / queue-pipe
+  shapes via `SceneSymbol` instead of being miscategorized as
+  generic `<<component>>` boxes. Two new
+  `ComponentNodeKind.database` and `ComponentNodeKind.queue`
+  values are emitted by the parser. The container forms
+  (`database X { ... }` / `queue X { ... }`) still parse as
+  containers via lookahead for `{`.
+- Component diagrams: relations whose endpoint is the alias of a
+  container (e.g. `cloud "Payment Gateway" as PG` followed by
+  `[Payment Adapter] --> PG`) now resolve to the container's
+  rect, so the arrow is actually emitted instead of being silently
+  dropped. `ComponentContainer.alias` is now persisted on the AST.
+- Component diagrams: relation arrows now route as three-segment
+  Manhattan paths instead of straight diagonals, and detour
+  sideways when the straight path would pass through another
+  node's rect. This fixes the case where an arrow between two
+  nodes in the same container visually cut through a third
+  intervening node (e.g. `Order Service --> Inventory Service`
+  passing through `Payment Adapter`).
+
 ## 0.7.3
 
 ### Added

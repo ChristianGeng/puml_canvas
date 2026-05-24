@@ -715,7 +715,7 @@ class StateTransition {
   });
 }
 
-enum ComponentNodeKind { component, interface, artifact }
+enum ComponentNodeKind { component, interface, artifact, database, queue }
 
 class ComponentNode {
   final String alias;
@@ -733,12 +733,14 @@ enum ContainerKind { package, node, cloud, frame }
 
 class ComponentContainer {
   final String? label;
+  final String? alias;
   final ContainerKind kind;
   final List<String> nodeAliases;
   final List<ComponentContainer> nestedContainers;
 
   const ComponentContainer({
     this.label,
+    this.alias,
     required this.kind,
     this.nodeAliases = const [],
     this.nestedContainers = const [],
