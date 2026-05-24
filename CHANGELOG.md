@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- Universal directive support. The six top-of-diagram directives
+  `title`, `header`, `footer`, `caption`, `legend`, and `skinparam`
+  are now accepted by every keyword-dispatched diagram type
+  (sequence, class, use case, activity, state, component, timing) —
+  not just sequence diagrams. Previously the non-sequence parsers
+  threw `ParserException` when a source started with `title Foo`,
+  which blocked the common PlantUML convention of "first line is the
+  diagram title." Decorations are stored on a new `DiagramDecorations`
+  holder accessible via `diagram.decorations` on every `Diagram`
+  subclass; rendering uses a new `wrapWithDecorations` helper so
+  every layout draws the header/title above and
+  legend/caption/footer below its inner content.
+- Use-case-diagram `left to right direction` and
+  `top to bottom direction` layout-orientation hints are now parsed.
+  `left to right direction` sets `UseCaseDiagram.leftToRightDirection`
+  to `true`; `top to bottom direction` is parsed and ignored (the
+  existing layout already places actors on the left and use cases
+  on the right). Unknown variants are not consumed.
+- Component diagrams now recognize the `database` node keyword (as
+  a synonym for `component`) so deployment-style sources that
+  declare `database "Orders DB" as ODB` parse without throwing.
+
+### Changed
+
+- `SequenceDiagram` no longer exposes the individual `title`,
+  `caption`, `header`, `footer`, `legend`, and `skin` constructor
+  parameters and fields. They live on the new `decorations` field
+  (a `DiagramDecorations` instance) instead. Callers constructing
+  `SequenceDiagram` instances directly should migrate from
+  `SequenceDiagram(title: 'X', ...)` to
+  `SequenceDiagram(decorations: DiagramDecorations(title: 'X'), ...)`.
+
 ## 0.5.0
 
 ### Added

@@ -825,7 +825,7 @@ void main() {
         );
         final withTitle = layout.layout(
           const SequenceDiagram(
-            title: 'My Diagram',
+            decorations: DiagramDecorations(title: 'My Diagram'),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -843,7 +843,7 @@ void main() {
       test('title text is emitted near the top', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            title: 'Hello',
+            decorations: DiagramDecorations(title: 'Hello'),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -861,8 +861,10 @@ void main() {
       test('header is emitted above title', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            title: 'Title',
-            header: HeaderFooter(text: 'Header'),
+            decorations: DiagramDecorations(
+              title: 'Title',
+              header: HeaderFooter(text: 'Header'),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -881,8 +883,10 @@ void main() {
       test('caption is below diagram and footer below caption', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            caption: 'Cap',
-            footer: HeaderFooter(text: 'Foot'),
+            decorations: DiagramDecorations(
+              caption: 'Cap',
+              footer: HeaderFooter(text: 'Foot'),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -908,7 +912,9 @@ void main() {
       test('footer left alignment uses padding from left', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            footer: HeaderFooter(text: 'F', align: TextAlign.left),
+            decorations: DiagramDecorations(
+              footer: HeaderFooter(text: 'F', align: TextAlign.left),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -923,7 +929,9 @@ void main() {
       test('footer right alignment is right-aligned', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            footer: HeaderFooter(text: 'F', align: TextAlign.right),
+            decorations: DiagramDecorations(
+              footer: HeaderFooter(text: 'F', align: TextAlign.right),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -944,7 +952,9 @@ void main() {
         );
         final withLegend = layout.layout(
           const SequenceDiagram(
-            legend: Legend(text: 'A legend body'),
+            decorations: DiagramDecorations(
+              legend: Legend(text: 'A legend body'),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -955,7 +965,9 @@ void main() {
       test('legend emits a SceneBox and SceneText in the bottom region', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            legend: Legend(text: 'Legend body text'),
+            decorations: DiagramDecorations(
+              legend: Legend(text: 'Legend body text'),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -984,7 +996,9 @@ void main() {
       test('legend right alignment places box on the right side', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            legend: Legend(text: 'R', align: TextAlign.right),
+            decorations: DiagramDecorations(
+              legend: Legend(text: 'R', align: TextAlign.right),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -1005,9 +1019,11 @@ void main() {
       test('legend sits between diagram and caption/footer', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            legend: Legend(text: 'L'),
-            caption: 'Cap',
-            footer: HeaderFooter(text: 'Foot'),
+            decorations: DiagramDecorations(
+              legend: Legend(text: 'L'),
+              caption: 'Cap',
+              footer: HeaderFooter(text: 'Foot'),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -1117,7 +1133,9 @@ void main() {
       test('backgroundColor propagates to Scene.background', () {
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(backgroundColor: Color(0xFFFEEDFA)),
+            decorations: DiagramDecorations(
+              skin: SkinParams(backgroundColor: Color(0xFFFEEDFA)),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -1129,7 +1147,9 @@ void main() {
         const fill = Color(0xFF112233);
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(noteBackgroundColor: fill),
+            decorations: DiagramDecorations(
+              skin: SkinParams(noteBackgroundColor: fill),
+            ),
             events: [
               Note(
                 position: NotePosition.over,
@@ -1148,7 +1168,9 @@ void main() {
         const stroke = Color(0xFF445566);
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(noteBorderColor: stroke),
+            decorations: DiagramDecorations(
+              skin: SkinParams(noteBorderColor: stroke),
+            ),
             events: [
               Note(
                 position: NotePosition.over,
@@ -1169,9 +1191,11 @@ void main() {
         const stroke = Color(0xFF334455);
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(
-              participantBackgroundColor: fill,
-              participantBorderColor: stroke,
+            decorations: DiagramDecorations(
+              skin: SkinParams(
+                participantBackgroundColor: fill,
+                participantBorderColor: stroke,
+              ),
             ),
             events: [Message(from: 'A', to: 'B')],
           ),
@@ -1190,7 +1214,9 @@ void main() {
         const arrow = Color(0xFFAABBCC);
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(sequenceArrowColor: arrow),
+            decorations: DiagramDecorations(
+              skin: SkinParams(sequenceArrowColor: arrow),
+            ),
             events: [Message(from: 'A', to: 'B', label: 'hi')],
           ),
           measurer,
@@ -1207,7 +1233,9 @@ void main() {
         const explicit = Color(0xFFFF0000);
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(sequenceArrowColor: arrow),
+            decorations: DiagramDecorations(
+              skin: SkinParams(sequenceArrowColor: arrow),
+            ),
             events: [Message(from: 'A', to: 'B', color: explicit)],
           ),
           measurer,
@@ -1223,7 +1251,9 @@ void main() {
         const life = Color(0xFF998877);
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(sequenceLifeLineBackgroundColor: life),
+            decorations: DiagramDecorations(
+              skin: SkinParams(sequenceLifeLineBackgroundColor: life),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -1242,7 +1272,9 @@ void main() {
         const fontSize = 22.0;
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(defaultFontSize: fontSize),
+            decorations: DiagramDecorations(
+              skin: SkinParams(defaultFontSize: fontSize),
+            ),
             events: [Message(from: 'A', to: 'B')],
           ),
           measurer,
@@ -1258,7 +1290,9 @@ void main() {
         const fontSize = 18.0;
         final scene = layout.layout(
           const SequenceDiagram(
-            skin: SkinParams(defaultFontSize: fontSize),
+            decorations: DiagramDecorations(
+              skin: SkinParams(defaultFontSize: fontSize),
+            ),
             events: [
               Note(
                 position: NotePosition.over,

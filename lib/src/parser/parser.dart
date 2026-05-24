@@ -37,13 +37,13 @@ class Parser {
   late List<Token> _tokens;
   var _pos = 0;
   final _autonumber = _AutonumberState();
-  var _skin = const SkinParams();
+  var _decorations = _DiagramDecorationBuilder();
 
   Diagram parse(List<Token> tokens) {
     _tokens = tokens;
     _pos = 0;
     _autonumber.reset();
-    _skin = const SkinParams();
+    _decorations = _DiagramDecorationBuilder();
 
     _skipNewlines();
     if (_check(TokenType.startMindmap)) {
@@ -106,12 +106,11 @@ class Parser {
     final participants = <Participant>[];
     final events = <SequenceEvent>[];
     final boxes = <ParticipantBox>[];
-    String? title;
-    String? caption;
-    HeaderFooter? header;
-    HeaderFooter? footer;
-    Legend? legend;
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
+      if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
       final kind = _check(TokenType.identifier)
           ? _participantKinds[_peek().lexeme]
           : null;
@@ -125,43 +124,6 @@ class Parser {
         boxes.add(_parseBox(participants));
       } else if (_isKeyword('autonumber')) {
         _parseAutonumber();
-      } else if (_isKeyword('title')) {
-        final t = _peek();
-        if (title != null) {
-          throw ParserException(
-              'Duplicate title directive', t.line, t.column);
-        }
-        title = _parseDecorationText('title');
-      } else if (_isKeyword('caption')) {
-        final t = _peek();
-        if (caption != null) {
-          throw ParserException(
-              'Duplicate caption directive', t.line, t.column);
-        }
-        caption = _parseDecorationText('caption');
-      } else if (_isKeyword('header')) {
-        final t = _peek();
-        if (header != null) {
-          throw ParserException(
-              'Duplicate header directive', t.line, t.column);
-        }
-        header = _parseHeaderFooter('header');
-      } else if (_isKeyword('footer')) {
-        final t = _peek();
-        if (footer != null) {
-          throw ParserException(
-              'Duplicate footer directive', t.line, t.column);
-        }
-        footer = _parseHeaderFooter('footer');
-      } else if (_isKeyword('legend')) {
-        final t = _peek();
-        if (legend != null) {
-          throw ParserException(
-              'Duplicate legend directive', t.line, t.column);
-        }
-        legend = _parseLegend();
-      } else if (_isKeyword('skinparam')) {
-        _parseSkinparam();
       } else {
         _parseEvent(events);
       }
@@ -173,13 +135,57 @@ class Parser {
       participants: List.unmodifiable(participants),
       events: List.unmodifiable(events),
       boxes: List.unmodifiable(boxes),
-      title: title,
-      caption: caption,
-      header: header,
-      footer: footer,
-      legend: legend,
-      skin: _skin,
+      decorations: _decorations.build(),
     );
+  }
+
+  bool _tryParseDecoration() {
+    if (_isKeyword('title')) {
+      final t = _peek();
+      if (_decorations.title != null) {
+        throw ParserException('Duplicate title directive', t.line, t.column);
+      }
+      _decorations.title = _parseDecorationText('title');
+      return true;
+    }
+    if (_isKeyword('caption')) {
+      final t = _peek();
+      if (_decorations.caption != null) {
+        throw ParserException(
+            'Duplicate caption directive', t.line, t.column);
+      }
+      _decorations.caption = _parseDecorationText('caption');
+      return true;
+    }
+    if (_isKeyword('header')) {
+      final t = _peek();
+      if (_decorations.header != null) {
+        throw ParserException('Duplicate header directive', t.line, t.column);
+      }
+      _decorations.header = _parseHeaderFooter('header');
+      return true;
+    }
+    if (_isKeyword('footer')) {
+      final t = _peek();
+      if (_decorations.footer != null) {
+        throw ParserException('Duplicate footer directive', t.line, t.column);
+      }
+      _decorations.footer = _parseHeaderFooter('footer');
+      return true;
+    }
+    if (_isKeyword('legend')) {
+      final t = _peek();
+      if (_decorations.legend != null) {
+        throw ParserException('Duplicate legend directive', t.line, t.column);
+      }
+      _decorations.legend = _parseLegend();
+      return true;
+    }
+    if (_isKeyword('skinparam')) {
+      _parseSkinparam();
+      return true;
+    }
+    return false;
   }
 
   void _parseSkinparam() {
@@ -277,7 +283,7 @@ class Parser {
         return;
     }
     if (update != null) {
-      _skin = _skin.merge(update);
+      _decorations.skin = _decorations.skin.merge(update);
     }
   }
 
@@ -365,17 +371,15 @@ class Parser {
       }
     }
     if (!_check(TokenType.newline)) {
-      throw ParserException(
-          "Expected newline after 'legend'", startToken.line, startToken.column);
+      throw ParserException("Expected newline after 'legend'", startToken.line,
+          startToken.column);
     }
     _advance();
     final lines = <String>[];
     while (true) {
       if (_check(TokenType.eof) || _check(TokenType.endUml)) {
-        throw ParserException(
-            "Expected 'endlegend' to close legend",
-            startToken.line,
-            startToken.column);
+        throw ParserException("Expected 'endlegend' to close legend",
+            startToken.line, startToken.column);
       }
       if (_check(TokenType.identifier) && _peek().lexeme == 'endlegend') {
         _advance();
@@ -463,8 +467,7 @@ class Parser {
       }
       if (_isKeyword('box')) {
         final t = _peek();
-        throw ParserException(
-            'Nested box is not allowed', t.line, t.column);
+        throw ParserException('Nested box is not allowed', t.line, t.column);
       }
       final kind = _check(TokenType.identifier)
           ? _participantKinds[_peek().lexeme]
@@ -838,8 +841,8 @@ class Parser {
       _parseEvent(firstEvents);
       _skipNewlines();
     }
-    branches.add(GroupBranch(
-        label: firstLabel, events: List.unmodifiable(firstEvents)));
+    branches.add(
+        GroupBranch(label: firstLabel, events: List.unmodifiable(firstEvents)));
 
     while (_isKeyword('else')) {
       _advance();
@@ -853,8 +856,7 @@ class Parser {
         _parseEvent(inner);
         _skipNewlines();
       }
-      branches.add(
-          GroupBranch(label: label, events: List.unmodifiable(inner)));
+      branches.add(GroupBranch(label: label, events: List.unmodifiable(inner)));
     }
 
     _expectKeyword('end');
@@ -982,7 +984,8 @@ class Parser {
       while (afterClose < lexeme.length && lexeme[afterClose] == '-') {
         afterClose++;
       }
-      stripped = lexeme.substring(0, openBracket) + lexeme.substring(afterClose);
+      stripped =
+          lexeme.substring(0, openBracket) + lexeme.substring(afterClose);
       if (modifier == 'hidden') {
         hidden = true;
       } else {
@@ -1046,8 +1049,7 @@ class Parser {
   Color _parseColor(String spec, Token token) {
     final color = text_colors.tryParseColor(spec);
     if (color == null) {
-      throw ParserException(
-          "Unknown color '$spec'", token.line, token.column);
+      throw ParserException("Unknown color '$spec'", token.line, token.column);
     }
     return color;
   }
@@ -1064,8 +1066,7 @@ class Parser {
   Token _expect(TokenType type) {
     if (!_check(type)) {
       final t = _peek();
-      throw ParserException(
-          'Expected $type, got ${t.type}', t.line, t.column);
+      throw ParserException('Expected $type, got ${t.type}', t.line, t.column);
     }
     return _advance();
   }
@@ -1096,8 +1097,7 @@ class Parser {
       }
       final next = _tokens[k + 1];
       if (atLineStart && t.type == TokenType.colon) {
-        if (next.type == TokenType.text &&
-            next.lexeme.endsWith(';')) {
+        if (next.type == TokenType.text && next.lexeme.endsWith(';')) {
           return true;
         }
       }
@@ -1105,9 +1105,7 @@ class Parser {
         final nextIsNewlineOrEnd = next.type == TokenType.newline ||
             next.type == TokenType.endUml ||
             next.type == TokenType.eof;
-        if ((t.lexeme == 'start' ||
-                t.lexeme == 'stop') &&
-            nextIsNewlineOrEnd) {
+        if ((t.lexeme == 'start' || t.lexeme == 'stop') && nextIsNewlineOrEnd) {
           return true;
         }
         if (t.lexeme == 'if' || t.lexeme == 'while') {
@@ -1136,8 +1134,7 @@ class Parser {
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
-      if (_isKeyword('skinparam')) {
-        _parseSkinparam();
+      if (_tryParseDecoration()) {
         _skipNewlines();
         continue;
       }
@@ -1148,7 +1145,7 @@ class Parser {
     _expect(TokenType.endUml);
     return ActivityDiagram(
       nodes: List.unmodifiable(nodes),
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -1352,8 +1349,8 @@ class Parser {
     while (_isKeyword('fork') && _peekAhead(1, 'again')) {
       _advance();
       _advance();
-      branches.add(_parseActivityBlock(
-          () => (_isKeyword('fork') && _peekAhead(1, 'again')) || _isEndFork()));
+      branches.add(_parseActivityBlock(() =>
+          (_isKeyword('fork') && _peekAhead(1, 'again')) || _isEndFork()));
     }
     if (!_isEndFork()) {
       final t = _peek();
@@ -1367,8 +1364,7 @@ class Parser {
     return ForkBlock(branches: List.unmodifiable(branches));
   }
 
-  bool _isEndFork() =>
-      _isKeyword('end') && _peekAhead(1, 'fork');
+  bool _isEndFork() => _isKeyword('end') && _peekAhead(1, 'fork');
 
   Partition _parsePartition() {
     _advance();
@@ -1381,9 +1377,7 @@ class Parser {
     if (!_check(TokenType.leftBrace)) {
       final t = _peek();
       throw ParserException(
-          "Expected '{' after partition name, got ${t.type}",
-          t.line,
-          t.column);
+          "Expected '{' after partition name, got ${t.type}", t.line, t.column);
     }
     _advance();
     final body = _parseActivityBlock(() => _check(TokenType.rightBrace));
@@ -1399,9 +1393,8 @@ class Parser {
   List<ActivityNode> _parseActivityBlock(bool Function() terminator) {
     final body = <ActivityNode>[];
     _skipNewlines();
-    while (!_check(TokenType.endUml) &&
-        !_check(TokenType.eof) &&
-        !terminator()) {
+    while (
+        !_check(TokenType.endUml) && !_check(TokenType.eof) && !terminator()) {
       final node = _parseActivityNode();
       if (node != null) body.add(node);
       _skipNewlines();
@@ -1474,9 +1467,11 @@ class Parser {
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
-      if (_isKeyword('skinparam')) {
-        _parseSkinparam();
-      } else if (_isKeyword('state')) {
+      if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('state')) {
         addState(_parseStateDecl());
       } else if (_isKeyword('note')) {
         _skipUntilNewline();
@@ -1490,7 +1485,7 @@ class Parser {
     return StateDiagram(
       states: List.unmodifiable(states),
       transitions: List.unmodifiable(transitions),
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -1715,10 +1710,12 @@ class Parser {
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+      if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
       if (_isClassHeaderKeyword()) {
         classes.add(_parseClassDecl());
-      } else if (_isKeyword('skinparam')) {
-        _parseSkinparam();
       } else {
         _parseClassRelationship(relationships);
       }
@@ -1728,7 +1725,7 @@ class Parser {
     return ClassDiagram(
       classes: List.unmodifiable(classes),
       relationships: List.unmodifiable(relationships),
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -1776,8 +1773,7 @@ class Parser {
           kind = ClassKind.entity_;
       }
     }
-    if (!_check(TokenType.identifier) &&
-        !_check(TokenType.stringLiteral)) {
+    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
       final t = _peek();
       throw ParserException(
           'Expected class name, got ${t.type}', t.line, t.column);
@@ -1859,9 +1855,7 @@ class Parser {
     }
     final name = trimmed.substring(0, idx).trim();
     var value = trimmed.substring(idx + sep.length).trim();
-    if (value.length >= 2 &&
-        value.startsWith('"') &&
-        value.endsWith('"')) {
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
       value = value.substring(1, value.length - 1);
     }
     return Attribute(name: name, value: value, isMap: isMap);
@@ -2219,18 +2213,21 @@ class Parser {
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
-      if (_isKeyword('skinparam')) {
-        _parseSkinparam();
-      } else if (_isKeyword('component')) {
+      if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('component')) {
         addNode(_parseComponentDecl());
       } else if (_isKeyword('artifact')) {
         addNode(_parseArtifactDecl());
       } else if (_isKeyword('interface')) {
         addNode(_parseInterfaceDecl());
+      } else if (_isKeyword('database')) {
+        addNode(_parseComponentDecl());
       } else if (_isComponentContainerKeyword()) {
         containers.add(_parseComponentContainer(addNode));
-      } else if (_check(TokenType.leftBracket) &&
-          !_bracketIsRelationStart()) {
+      } else if (_check(TokenType.leftBracket) && !_bracketIsRelationStart()) {
         addNode(_parseBracketComponent());
       } else if (_check(TokenType.leftParen) &&
           _pos + 1 < _tokens.length &&
@@ -2247,7 +2244,7 @@ class Parser {
       nodes: List.unmodifiable(nodes),
       containers: List.unmodifiable(containers),
       relations: List.unmodifiable(relations),
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -2555,10 +2552,8 @@ class Parser {
         _skipNewlines();
       }
       if (!_check(TokenType.rightBrace)) {
-        throw ParserException(
-            "Expected '}' to close ${kwToken.lexeme}",
-            kwToken.line,
-            kwToken.column);
+        throw ParserException("Expected '}' to close ${kwToken.lexeme}",
+            kwToken.line, kwToken.column);
       }
       _advance();
     }
@@ -2639,6 +2634,7 @@ class Parser {
     final relations = <UseCaseRelation>[];
     final boundaries = <UseCaseBoundary>[];
     final seenAliases = <String>{};
+    var leftToRight = false;
 
     void addNode(UseCaseNode node) {
       if (seenAliases.add(node.alias)) {
@@ -2649,14 +2645,22 @@ class Parser {
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+      if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_tryParseDirectionDirective(setLeftToRight: () {
+        leftToRight = true;
+      })) {
+        _skipNewlines();
+        continue;
+      }
       if (_isKeyword('actor')) {
         addNode(_parseUseCaseNode(UseCaseNodeKind.actor));
       } else if (_isKeyword('usecase')) {
         addNode(_parseUseCaseNode(UseCaseNodeKind.useCase));
       } else if (_isKeyword('rectangle')) {
         boundaries.add(_parseRectangleBoundary(addNode));
-      } else if (_isKeyword('skinparam')) {
-        _parseSkinparam();
       } else {
         _parseUseCaseRelation(relations, addNode);
       }
@@ -2667,8 +2671,41 @@ class Parser {
       nodes: List.unmodifiable(nodes),
       relations: List.unmodifiable(relations),
       boundaries: List.unmodifiable(boundaries),
-      skin: _skin,
+      leftToRightDirection: leftToRight,
+      decorations: _decorations.build(),
     );
+  }
+
+  bool _tryParseDirectionDirective({required void Function() setLeftToRight}) {
+    if (!_isKeyword('left') && !_isKeyword('top')) return false;
+    final start = _pos;
+    final first = _peek().lexeme;
+    final isLeft = first == 'left';
+    final expected = isLeft
+        ? const ['left', 'to', 'right', 'direction']
+        : const ['top', 'to', 'bottom', 'direction'];
+    for (var i = 0; i < expected.length; i++) {
+      final idx = start + i;
+      if (idx >= _tokens.length) return false;
+      final t = _tokens[idx];
+      if (t.type != TokenType.identifier || t.lexeme != expected[i]) {
+        return false;
+      }
+    }
+    final after = start + expected.length;
+    if (after < _tokens.length) {
+      final t = _tokens[after];
+      if (t.type != TokenType.newline &&
+          t.type != TokenType.eof &&
+          t.type != TokenType.endUml) {
+        return false;
+      }
+    }
+    for (var i = 0; i < expected.length; i++) {
+      _advance();
+    }
+    if (isLeft) setLeftToRight();
+    return true;
   }
 
   UseCaseNode _parseUseCaseNode(UseCaseNodeKind kind) {
@@ -2743,9 +2780,7 @@ class Parser {
         _skipNewlines();
       }
       if (!_check(TokenType.rightBrace)) {
-        throw ParserException(
-            "Expected '}' to close rectangle",
-            rectToken.line,
+        throw ParserException("Expected '}' to close rectangle", rectToken.line,
             rectToken.column);
       }
       _advance();
@@ -2786,8 +2821,10 @@ class Parser {
       }
     }
     final decoded = _decodeUseCaseArrow(arrowToken);
-    final resolvedFrom = decoded.direction == MessageDirection.backward ? to : from;
-    final resolvedTo = decoded.direction == MessageDirection.backward ? from : to;
+    final resolvedFrom =
+        decoded.direction == MessageDirection.backward ? to : from;
+    final resolvedTo =
+        decoded.direction == MessageDirection.backward ? from : to;
     addNode(UseCaseNode(
       alias: resolvedFrom,
       label: resolvedFrom,
@@ -2871,8 +2908,7 @@ class Parser {
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
-      if (_isKeyword('skinparam')) {
-        _parseSkinparam();
+      if (_tryParseDecoration()) {
         _skipNewlines();
         continue;
       }
@@ -2893,7 +2929,7 @@ class Parser {
     return TimingDiagram(
       lanes: List.unmodifiable(lanes),
       events: List.unmodifiable(events),
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -2907,8 +2943,7 @@ class Parser {
         _advance();
         if (!_check(TokenType.identifier)) {
           final t = _peek();
-          throw ParserException(
-              "Expected alias after 'as'", t.line, t.column);
+          throw ParserException("Expected alias after 'as'", t.line, t.column);
         }
         alias = _advance().lexeme;
       } else {
@@ -2921,8 +2956,7 @@ class Parser {
         _advance();
         if (!_check(TokenType.identifier)) {
           final t = _peek();
-          throw ParserException(
-              "Expected alias after 'as'", t.line, t.column);
+          throw ParserException("Expected alias after 'as'", t.line, t.column);
         }
         alias = _advance().lexeme;
       }
@@ -2943,8 +2977,7 @@ class Parser {
       _advance();
       if (!_check(TokenType.identifier)) {
         final t = _peek();
-        throw ParserException(
-            "Expected integer period", t.line, t.column);
+        throw ParserException("Expected integer period", t.line, t.column);
       }
       final periodToken = _advance();
       clockPeriod = int.tryParse(periodToken.lexeme);
@@ -2967,9 +3000,7 @@ class Parser {
     if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
       final t = _peek();
       throw ParserException(
-          "Unexpected token '${t.lexeme}' in timing diagram",
-          t.line,
-          t.column);
+          "Unexpected token '${t.lexeme}' in timing diagram", t.line, t.column);
     }
     final firstToken = _advance();
     final first = firstToken.lexeme;
@@ -3011,10 +3042,8 @@ class Parser {
       ));
       return;
     }
-    throw ParserException(
-        "Expected 'is' or arrow after '${firstToken.lexeme}'",
-        firstToken.line,
-        firstToken.column);
+    throw ParserException("Expected 'is' or arrow after '${firstToken.lexeme}'",
+        firstToken.line, firstToken.column);
   }
 
   MindmapDiagram _parseMindmapDiagram() {
@@ -3022,7 +3051,7 @@ class Parser {
       endType: TokenType.endMindmap,
       diagramName: 'mindmap',
     );
-    return MindmapDiagram(root: root, skin: _skin);
+    return MindmapDiagram(root: root, decorations: _decorations.build());
   }
 
   WbsDiagram _parseWbsDiagram() {
@@ -3030,7 +3059,7 @@ class Parser {
       endType: TokenType.endWbs,
       diagramName: 'wbs',
     );
-    return WbsDiagram(root: root, skin: _skin);
+    return WbsDiagram(root: root, decorations: _decorations.build());
   }
 
   MindmapNode? _parseIndentedTree({
@@ -3077,8 +3106,7 @@ class Parser {
       depth++;
     }
     if (depth == 0) {
-      throw ParserException(
-          'Expected node line starting with *', line, col);
+      throw ParserException('Expected node line starting with *', line, col);
     }
     s = s.substring(depth);
     Color? color;
@@ -3137,9 +3165,7 @@ class Parser {
       }
       if (stack.isEmpty) {
         throw ParserException(
-            '$label node depth jumps from 0 to ${l.depth}',
-            l.line,
-            l.column);
+            '$label node depth jumps from 0 to ${l.depth}', l.line, l.column);
       }
       stack.last.children.add(node);
       stack.add(node);
@@ -3171,8 +3197,7 @@ class Parser {
     }
     final source = buf.toString().trim();
     if (source.isEmpty) {
-      throw ParserException(
-          'Empty JSON body', firstLine ?? 1, firstCol ?? 1);
+      throw ParserException('Empty JSON body', firstLine ?? 1, firstCol ?? 1);
     }
     final dynamic decoded;
     try {
@@ -3184,7 +3209,7 @@ class Parser {
     return DataDiagram(
       root: _convertJsonValue(decoded, firstLine ?? 1, firstCol ?? 1),
       format: DataFormat.json,
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -3246,7 +3271,7 @@ class Parser {
     return DataDiagram(
       root: root,
       format: DataFormat.yaml,
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -3311,10 +3336,10 @@ class Parser {
         blockEnd++;
       }
       if (trimmed.isEmpty) {
-        final nested = _parseYamlValue(
-            lines, blockStart, blockEnd, indent, line.line);
-        items.add(nested ??
-            const DataScalar(value: '', kind: ScalarKind.null_));
+        final nested =
+            _parseYamlValue(lines, blockStart, blockEnd, indent, line.line);
+        items
+            .add(nested ?? const DataScalar(value: '', kind: ScalarKind.null_));
       } else {
         final colonIdx = _yamlFindMappingColon(trimmed);
         if (colonIdx >= 0) {
@@ -3322,12 +3347,11 @@ class Parser {
           final rest = trimmed.substring(colonIdx + 1).trim();
           final entries = <MapEntry<String, DataNode>>[];
           if (rest.isEmpty) {
-            final nested = _parseYamlValue(
-                lines, blockStart, blockEnd, indent, line.line);
+            final nested =
+                _parseYamlValue(lines, blockStart, blockEnd, indent, line.line);
             entries.add(MapEntry(
               key,
-              nested ??
-                  const DataScalar(value: '', kind: ScalarKind.null_),
+              nested ?? const DataScalar(value: '', kind: ScalarKind.null_),
             ));
           } else {
             entries.add(MapEntry(key, _yamlScalar(rest)));
@@ -3372,8 +3396,7 @@ class Parser {
       final lineIndent = _yamlIndent(line.raw);
       if (lineIndent < indent) break;
       if (lineIndent > indent) {
-        throw ParserException(
-            'YAML indent error', line.line, lineIndent + 1);
+        throw ParserException('YAML indent error', line.line, lineIndent + 1);
       }
       final content = line.raw.substring(indent);
       if (content.startsWith('-')) break;
@@ -3500,7 +3523,7 @@ class Parser {
       }
       rows.add(SaltRow(cells: List.unmodifiable(cells)));
     }
-    return SaltDiagram(rows: List.unmodifiable(rows), skin: _skin);
+    return SaltDiagram(rows: List.unmodifiable(rows), decorations: _decorations.build());
   }
 
   GanttDiagram _parseGanttDiagram() {
@@ -3530,15 +3553,15 @@ class Parser {
     final builders = <_GanttItemBuilder>[];
     final tasks = <String, _GanttTaskBuilder>{};
 
-    final projectRe = RegExp(
-        r'^[Pp]roject\s+starts?\s+(\d{4}-\d{2}-\d{2})\s*$');
+    final projectRe =
+        RegExp(r'^[Pp]roject\s+starts?\s+(\d{4}-\d{2}-\d{2})\s*$');
     final sectionRe = RegExp(r'^--\s*(.*?)\s*--\s*$');
     final lastsRe = RegExp(
         r'^\[(.+?)\]\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s*$');
     final startsDateRe = RegExp(
         r'^\[(.+?)\]\s+starts?\s+(?:on\s+|at\s+)?(\d{4}-\d{2}-\d{2})\s*$');
-    final startsAtRe = RegExp(
-        r"^\[(.+?)\]\s+starts?\s+at\s+\[(.+?)\]'s\s+(end|start)\s*$");
+    final startsAtRe =
+        RegExp(r"^\[(.+?)\]\s+starts?\s+at\s+\[(.+?)\]'s\s+(end|start)\s*$");
     final happensRe = RegExp(
         r"^\[(.+?)\]\s+happens?\s+(?:on\s+|at\s+)?(?:\[(.+?)\]'s\s+(end|start)|(\d{4}-\d{2}-\d{2}))\s*$");
     final coloredRe = RegExp(r'^\[(.+?)\]\s+is\s+colored?\s+in\s+(\S+)\s*$');
@@ -3566,8 +3589,8 @@ class Parser {
             : unit.startsWith('month')
                 ? n * 30
                 : n;
-        final builder = tasks.putIfAbsent(
-            name, () => _GanttTaskBuilder(name: name));
+        final builder =
+            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
         builder.duration = Duration(days: days);
         if (!builders.contains(builder)) builders.add(builder);
         continue;
@@ -3576,8 +3599,8 @@ class Parser {
       if (sdm != null) {
         final name = sdm.group(1)!.trim();
         final date = DateTime.parse(sdm.group(2)!);
-        final builder = tasks.putIfAbsent(
-            name, () => _GanttTaskBuilder(name: name));
+        final builder =
+            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
         builder.explicitStart = date;
         if (!builders.contains(builder)) builders.add(builder);
         continue;
@@ -3587,8 +3610,8 @@ class Parser {
         final name = sam.group(1)!.trim();
         final ref = sam.group(2)!.trim();
         final endpoint = sam.group(3)!.toLowerCase();
-        final builder = tasks.putIfAbsent(
-            name, () => _GanttTaskBuilder(name: name));
+        final builder =
+            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
         builder.startsAtRef = ref;
         builder.startsAtEnd = endpoint == 'end';
         if (!builders.contains(builder)) builders.add(builder);
@@ -3652,7 +3675,7 @@ class Parser {
     return GanttDiagram(
       projectStart: projectStart,
       items: List.unmodifiable(items),
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -3676,8 +3699,7 @@ class Parser {
         throw ParserException(
             'Unknown gantt task reference "${task.startsAtRef}"', 0, 0);
       }
-      final refStart =
-          _resolveTaskStart(ref, tasks, projectStart, visiting);
+      final refStart = _resolveTaskStart(ref, tasks, projectStart, visiting);
       start = task.startsAtEnd
           ? refStart.add(ref.duration ?? const Duration(days: 1))
           : refStart;
@@ -3701,11 +3723,9 @@ class Parser {
     if (m.ref != null) {
       final ref = tasks[m.ref!];
       if (ref == null) {
-        throw ParserException(
-            'Unknown gantt task reference "${m.ref}"', 0, 0);
+        throw ParserException('Unknown gantt task reference "${m.ref}"', 0, 0);
       }
-      final refStart =
-          _resolveTaskStart(ref, tasks, projectStart, <String>{});
+      final refStart = _resolveTaskStart(ref, tasks, projectStart, <String>{});
       m.resolvedDate = m.atEnd
           ? refStart.add(ref.duration ?? const Duration(days: 1))
           : refStart;
@@ -3738,15 +3758,11 @@ class Parser {
 
   NetworkDiagram _buildNetworkDiagram(List<_NwdiagSourceLine> rawLines) {
     final segments = <NetworkSegment>[];
-    final networkOpenRe =
-        RegExp(r'^network\s+([A-Za-z0-9_]+)\s*\{?\s*$');
-    final segmentAddressRe =
-        RegExp(r'^address\s*=\s*"([^"]*)"\s*;?\s*$');
-    final nodeWithAttrsRe =
-        RegExp(r'^([A-Za-z0-9_]+)\s*\[(.*)\]\s*;?\s*$');
+    final networkOpenRe = RegExp(r'^network\s+([A-Za-z0-9_]+)\s*\{?\s*$');
+    final segmentAddressRe = RegExp(r'^address\s*=\s*"([^"]*)"\s*;?\s*$');
+    final nodeWithAttrsRe = RegExp(r'^([A-Za-z0-9_]+)\s*\[(.*)\]\s*;?\s*$');
     final bareNodeRe = RegExp(r'^([A-Za-z0-9_]+)\s*;?\s*$');
-    final addressAttrRe =
-        RegExp(r'address\s*=\s*"([^"]*)"');
+    final addressAttrRe = RegExp(r'address\s*=\s*"([^"]*)"');
 
     String? currentName;
     String? currentAddress;
@@ -3818,7 +3834,7 @@ class Parser {
 
     return NetworkDiagram(
       networks: List.unmodifiable(segments),
-      skin: _skin,
+      decorations: _decorations.build(),
     );
   }
 
@@ -3999,6 +4015,26 @@ class _AutonumberState {
   }
 }
 
+class _DiagramDecorationBuilder {
+  String? title;
+  String? caption;
+  HeaderFooter? header;
+  HeaderFooter? footer;
+  Legend? legend;
+  SkinParams skin = const SkinParams();
+
+  DiagramDecorations build() {
+    return DiagramDecorations(
+      title: title,
+      caption: caption,
+      header: header,
+      footer: footer,
+      legend: legend,
+      skin: skin,
+    );
+  }
+}
+
 class _DecodedArrow {
   final LineStyle lineStyle;
   final ArrowHead head;
@@ -4013,4 +4049,3 @@ class _DecodedArrow {
     this.color,
   });
 }
-

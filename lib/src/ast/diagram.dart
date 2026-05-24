@@ -2,12 +2,11 @@ import 'package:flutter/painting.dart';
 
 sealed class Diagram {
   const Diagram();
+
+  DiagramDecorations get decorations;
 }
 
-class SequenceDiagram extends Diagram {
-  final List<Participant> participants;
-  final List<SequenceEvent> events;
-  final List<ParticipantBox> boxes;
+class DiagramDecorations {
   final String? title;
   final String? caption;
   final HeaderFooter? header;
@@ -15,16 +14,28 @@ class SequenceDiagram extends Diagram {
   final Legend? legend;
   final SkinParams skin;
 
-  const SequenceDiagram({
-    this.participants = const [],
-    this.events = const [],
-    this.boxes = const [],
+  const DiagramDecorations({
     this.title,
     this.caption,
     this.header,
     this.footer,
     this.legend,
     this.skin = const SkinParams(),
+  });
+}
+
+class SequenceDiagram extends Diagram {
+  final List<Participant> participants;
+  final List<SequenceEvent> events;
+  final List<ParticipantBox> boxes;
+  @override
+  final DiagramDecorations decorations;
+
+  const SequenceDiagram({
+    this.participants = const [],
+    this.events = const [],
+    this.boxes = const [],
+    this.decorations = const DiagramDecorations(),
   });
 
   /// Returns participants in the order they should appear left-to-right.
@@ -325,22 +336,13 @@ class Group extends SequenceEvent {
 class ClassDiagram extends Diagram {
   final List<ClassDecl> classes;
   final List<Relationship> relationships;
-  final String? title;
-  final String? caption;
-  final HeaderFooter? header;
-  final HeaderFooter? footer;
-  final Legend? legend;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const ClassDiagram({
     this.classes = const [],
     this.relationships = const [],
-    this.title,
-    this.caption,
-    this.header,
-    this.footer,
-    this.legend,
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
@@ -517,23 +519,27 @@ class UseCaseDiagram extends Diagram {
   final List<UseCaseNode> nodes;
   final List<UseCaseRelation> relations;
   final List<UseCaseBoundary> boundaries;
-  final SkinParams skin;
+  final bool leftToRightDirection;
+  @override
+  final DiagramDecorations decorations;
 
   const UseCaseDiagram({
     this.nodes = const [],
     this.relations = const [],
     this.boundaries = const [],
-    this.skin = const SkinParams(),
+    this.leftToRightDirection = false,
+    this.decorations = const DiagramDecorations(),
   });
 }
 
 class ActivityDiagram extends Diagram {
   final List<ActivityNode> nodes;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const ActivityDiagram({
     this.nodes = const [],
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
@@ -634,12 +640,13 @@ class Partition extends ActivityNode {
 class StateDiagram extends Diagram {
   final List<StateDecl> states;
   final List<StateTransition> transitions;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const StateDiagram({
     this.states = const [],
     this.transitions = const [],
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
@@ -725,13 +732,14 @@ class ComponentDiagram extends Diagram {
   final List<ComponentNode> nodes;
   final List<ComponentContainer> containers;
   final List<ComponentRelation> relations;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const ComponentDiagram({
     this.nodes = const [],
     this.containers = const [],
     this.relations = const [],
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
@@ -783,12 +791,13 @@ class TimingArrow extends TimingEvent {
 class TimingDiagram extends Diagram {
   final List<TimingLane> lanes;
   final List<TimingEvent> events;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const TimingDiagram({
     this.lanes = const [],
     this.events = const [],
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
@@ -812,21 +821,23 @@ class MindmapNode {
 
 class MindmapDiagram extends Diagram {
   final MindmapNode? root;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const MindmapDiagram({
     this.root,
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
 class WbsDiagram extends Diagram {
   final MindmapNode? root;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const WbsDiagram({
     this.root,
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
@@ -857,12 +868,13 @@ class DataScalar extends DataNode {
 class DataDiagram extends Diagram {
   final DataNode root;
   final DataFormat format;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const DataDiagram({
     required this.root,
     required this.format,
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
@@ -905,11 +917,12 @@ class SaltRow {
 
 class SaltDiagram extends Diagram {
   final List<SaltRow> rows;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const SaltDiagram({
     this.rows = const [],
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
@@ -964,22 +977,24 @@ class NetworkSegment {
 
 class NetworkDiagram extends Diagram {
   final List<NetworkSegment> networks;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const NetworkDiagram({
     this.networks = const [],
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }
 
 class GanttDiagram extends Diagram {
   final DateTime projectStart;
   final List<GanttItem> items;
-  final SkinParams skin;
+  @override
+  final DiagramDecorations decorations;
 
   const GanttDiagram({
     required this.projectStart,
     this.items = const [],
-    this.skin = const SkinParams(),
+    this.decorations = const DiagramDecorations(),
   });
 }

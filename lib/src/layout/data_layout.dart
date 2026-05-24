@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
+import 'decoration_wrapper.dart';
 import 'layout.dart';
 import 'scene.dart';
 import 'text_measurer.dart';
@@ -60,10 +61,14 @@ class DataLayout implements DiagramLayout {
       block.size.width + _padding * 2,
       block.size.height + _padding * 2,
     );
-    return Scene(
-      size: size,
-      shapes: shapes,
-      background: diagram.skin.backgroundColor,
+    return wrapWithDecorations(
+      Scene(
+        size: size,
+        shapes: shapes,
+        background: diagram.decorations.skin.backgroundColor,
+      ),
+      diagram.decorations,
+      measurer,
     );
   }
 

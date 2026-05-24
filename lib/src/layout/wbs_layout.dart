@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
+import 'decoration_wrapper.dart';
 import 'layout.dart';
 import 'scene.dart';
 import 'text_measurer.dart';
@@ -42,10 +43,14 @@ class WbsLayout implements DiagramLayout {
     }
     final root = diagram.root;
     if (root == null) {
-      return Scene(
-        size: Size.zero,
-        shapes: const [],
-        background: diagram.skin.backgroundColor,
+      return wrapWithDecorations(
+        Scene(
+          size: Size.zero,
+          shapes: const [],
+          background: diagram.decorations.skin.backgroundColor,
+        ),
+        diagram.decorations,
+        measurer,
       );
     }
 
@@ -55,10 +60,14 @@ class WbsLayout implements DiagramLayout {
     _place(tree, leftX: _padding, topY: _padding, shapes: shapes);
     final totalHeight = _padding * 2 + _treeHeight(tree);
 
-    return Scene(
-      size: Size(totalWidth, totalHeight),
-      shapes: shapes,
-      background: diagram.skin.backgroundColor,
+    return wrapWithDecorations(
+      Scene(
+        size: Size(totalWidth, totalHeight),
+        shapes: shapes,
+        background: diagram.decorations.skin.backgroundColor,
+      ),
+      diagram.decorations,
+      measurer,
     );
   }
 

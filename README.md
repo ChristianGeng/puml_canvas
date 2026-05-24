@@ -75,6 +75,30 @@ re-renders on every keystroke.
 
 ## Supported PlantUML syntax
 
+### Universal directives
+
+The six top-of-diagram directives `title`, `header`, `footer`,
+`caption`, `legend`, and `skinparam` are accepted by every
+keyword-dispatched diagram type (sequence, class, use case,
+activity, state, component, timing), not just sequence diagrams.
+A source like:
+
+```
+@startuml
+title My Diagram
+class Foo
+@enduml
+```
+
+now parses cleanly as a class diagram with a title; previously the
+parser threw on `title` outside a sequence body. Each `Diagram`
+subclass exposes a `decorations` field of type `DiagramDecorations`
+that holds the parsed title / header / footer / caption / legend /
+skin values; rendering wraps the inner layout's scene with the
+decoration regions.
+
+### Diagram types
+
 Sequence diagrams, (as of 0.4.0) class diagrams, use case diagrams,
 activity diagrams, state diagrams, component diagrams, timing
 diagrams, mindmaps, work breakdown structure (WBS) diagrams,
@@ -361,6 +385,7 @@ A boundary `rectangle` groups related use cases:
 | Anonymous boundary   | `rectangle { ... }`                                 |
 | Relationship         | `User --> UC1` / `User -- UC1`                      |
 | Include / extend     | `UC1 ..> UC2 : <<include>>`                         |
+| Layout hint          | `left to right direction` / `top to bottom direction` |
 
 Actors are rendered as stick figures (reusing the sequence-diagram actor
 glyph). Use cases are rendered as ellipses with their label centered

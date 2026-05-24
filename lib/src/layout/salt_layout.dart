@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
+import 'decoration_wrapper.dart';
 import 'layout.dart';
 import 'scene.dart';
 import 'text_measurer.dart';
@@ -54,10 +55,14 @@ class SaltLayout implements DiagramLayout {
       throw ArgumentError('SaltLayout expects SaltDiagram');
     }
     if (diagram.rows.isEmpty) {
-      return Scene(
-        size: Size.zero,
-        shapes: const [],
-        background: diagram.skin.backgroundColor,
+      return wrapWithDecorations(
+        Scene(
+          size: Size.zero,
+          shapes: const [],
+          background: diagram.decorations.skin.backgroundColor,
+        ),
+        diagram.decorations,
+        measurer,
       );
     }
 
@@ -146,10 +151,14 @@ class SaltLayout implements DiagramLayout {
       if (r < diagram.rows.length - 1) y += _rowGap;
     }
 
-    return Scene(
-      size: Size(totalWidth, totalHeight),
-      shapes: List.unmodifiable(shapes),
-      background: diagram.skin.backgroundColor,
+    return wrapWithDecorations(
+      Scene(
+        size: Size(totalWidth, totalHeight),
+        shapes: List.unmodifiable(shapes),
+        background: diagram.decorations.skin.backgroundColor,
+      ),
+      diagram.decorations,
+      measurer,
     );
   }
 

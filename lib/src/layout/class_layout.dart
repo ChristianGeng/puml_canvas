@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
+import 'decoration_wrapper.dart';
 import 'layout.dart';
 import 'scene.dart';
 import 'text_measurer.dart';
@@ -84,10 +85,14 @@ class ClassLayout implements DiagramLayout {
     }
 
     if (diagram.classes.isEmpty) {
-      return Scene(
-        size: Size.zero,
-        shapes: const [],
-        background: diagram.skin.backgroundColor,
+      return wrapWithDecorations(
+        Scene(
+          size: Size.zero,
+          shapes: const [],
+          background: diagram.decorations.skin.backgroundColor,
+        ),
+        diagram.decorations,
+        measurer,
       );
     }
 
@@ -121,10 +126,14 @@ class ClassLayout implements DiagramLayout {
       _emitRelationship(shapes, rel, a, b, measurer);
     }
 
-    return Scene(
-      size: Size(width, height),
-      shapes: shapes,
-      background: diagram.skin.backgroundColor,
+    return wrapWithDecorations(
+      Scene(
+        size: Size(width, height),
+        shapes: shapes,
+        background: diagram.decorations.skin.backgroundColor,
+      ),
+      diagram.decorations,
+      measurer,
     );
   }
 

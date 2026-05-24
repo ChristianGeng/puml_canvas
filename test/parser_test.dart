@@ -41,18 +41,24 @@ void main() {
         ('-->', LineStyle.dashed, ArrowHead.filled, MessageDirection.forward),
         ('->>', LineStyle.solid, ArrowHead.open, MessageDirection.forward),
         ('-->>', LineStyle.dashed, ArrowHead.open, MessageDirection.forward),
-        ('->o', LineStyle.solid, ArrowHead.openCircle,
-            MessageDirection.forward),
-        ('-->o', LineStyle.dashed, ArrowHead.openCircle,
-            MessageDirection.forward),
+        (
+          '->o',
+          LineStyle.solid,
+          ArrowHead.openCircle,
+          MessageDirection.forward
+        ),
+        (
+          '-->o',
+          LineStyle.dashed,
+          ArrowHead.openCircle,
+          MessageDirection.forward
+        ),
         ('->x', LineStyle.solid, ArrowHead.cross, MessageDirection.forward),
         ('-->x', LineStyle.dashed, ArrowHead.cross, MessageDirection.forward),
         ('<-', LineStyle.solid, ArrowHead.filled, MessageDirection.backward),
-        ('<--', LineStyle.dashed, ArrowHead.filled,
-            MessageDirection.backward),
+        ('<--', LineStyle.dashed, ArrowHead.filled, MessageDirection.backward),
         ('<<-', LineStyle.solid, ArrowHead.open, MessageDirection.backward),
-        ('<<--', LineStyle.dashed, ArrowHead.open,
-            MessageDirection.backward),
+        ('<<--', LineStyle.dashed, ArrowHead.open, MessageDirection.backward),
       ];
       for (final c in cases) {
         test('"${c.$1}" decodes to (${c.$2}, ${c.$3}, ${c.$4})', () {
@@ -87,7 +93,8 @@ void main() {
       });
 
       test('named color is decoded case-insensitively', () {
-        final d = parseSequence('@startuml\nA -[#Red]-> B\nC -[Blue]-> D\n@enduml\n');
+        final d =
+            parseSequence('@startuml\nA -[#Red]-> B\nC -[Blue]-> D\n@enduml\n');
         final messages = d.events.whereType<Message>().toList();
         expect(messages[0].color, const Color(0xFFFF0000));
         expect(messages[1].color, const Color(0xFF0000FF));
@@ -412,8 +419,7 @@ void main() {
 
     group('actor kinds', () {
       test('participant keyword maps to ParticipantKind.participant', () {
-        final d = parseSequence(
-            '@startuml\nparticipant Alice\n@enduml\n');
+        final d = parseSequence('@startuml\nparticipant Alice\n@enduml\n');
         expect(d.participants.single.kind, ParticipantKind.participant);
       });
 
@@ -439,16 +445,15 @@ void main() {
       });
 
       test('database keyword maps to ParticipantKind.database', () {
-        final d = parseSequence(
-            '@startuml\ndatabase "User DB" as DB\n@enduml\n');
+        final d =
+            parseSequence('@startuml\ndatabase "User DB" as DB\n@enduml\n');
         expect(d.participants.single.alias, 'DB');
         expect(d.participants.single.displayName, 'User DB');
         expect(d.participants.single.kind, ParticipantKind.database);
       });
 
       test('collections keyword maps to ParticipantKind.collections', () {
-        final d = parseSequence(
-            '@startuml\ncollections Items\n@enduml\n');
+        final d = parseSequence('@startuml\ncollections Items\n@enduml\n');
         expect(d.participants.single.kind, ParticipantKind.collections);
       });
 
@@ -484,8 +489,8 @@ void main() {
       });
 
       test('"create participant Alice" adds participant and Create event', () {
-        final d = parseSequence(
-            '@startuml\ncreate participant Alice\n@enduml\n');
+        final d =
+            parseSequence('@startuml\ncreate participant Alice\n@enduml\n');
         expect(d.participants, hasLength(1));
         expect(d.participants.single.alias, 'Alice');
         expect(d.participants.single.kind, ParticipantKind.participant);
@@ -494,8 +499,8 @@ void main() {
       });
 
       test('"create actor \\"Bob\\" as B" adds actor and Create event', () {
-        final d = parseSequence(
-            '@startuml\ncreate actor "Bob" as B\n@enduml\n');
+        final d =
+            parseSequence('@startuml\ncreate actor "Bob" as B\n@enduml\n');
         expect(d.participants, hasLength(1));
         expect(d.participants.single.alias, 'B');
         expect(d.participants.single.displayName, 'Bob');
@@ -504,8 +509,7 @@ void main() {
       });
 
       test('"create database DB" adds database participant', () {
-        final d = parseSequence(
-            '@startuml\ncreate database DB\n@enduml\n');
+        final d = parseSequence('@startuml\ncreate database DB\n@enduml\n');
         expect(d.participants, hasLength(1));
         expect(d.participants.single.alias, 'DB');
         expect(d.participants.single.kind, ParticipantKind.database);
@@ -591,8 +595,8 @@ void main() {
             'end box\n'
             'participant A\n'
             '@enduml\n');
-        expect(d.participantsInOrder().map((p) => p.alias).toList(),
-            ['B', 'A']);
+        expect(
+            d.participantsInOrder().map((p) => p.alias).toList(), ['B', 'A']);
       });
 
       test('boxOf returns the containing box', () {
@@ -735,8 +739,7 @@ void main() {
         expect(sep.kind, SeparatorKind.dash);
       });
 
-      test('"--" suffix after message target is preserved (not separator)',
-          () {
+      test('"--" suffix after message target is preserved (not separator)', () {
         final d = parseSequence('@startuml\nB --> A --\n@enduml\n');
         expect(d.events.whereType<Separator>(), isEmpty);
         final m = d.events.whereType<Message>().single;
@@ -877,35 +880,34 @@ void main() {
 
     group('title/header/footer/caption', () {
       test('single-line title', () {
-        final d = parseSequence(
-            '@startuml\ntitle My Diagram\nA -> B\n@enduml\n');
-        expect(d.title, 'My Diagram');
+        final d =
+            parseSequence('@startuml\ntitle My Diagram\nA -> B\n@enduml\n');
+        expect(d.decorations.title, 'My Diagram');
       });
 
       test('single-line caption', () {
-        final d = parseSequence(
-            '@startuml\ncaption Figure 1\nA -> B\n@enduml\n');
-        expect(d.caption, 'Figure 1');
+        final d =
+            parseSequence('@startuml\ncaption Figure 1\nA -> B\n@enduml\n');
+        expect(d.decorations.caption, 'Figure 1');
       });
 
       test('single-line header default center', () {
-        final d = parseSequence(
-            '@startuml\nheader Top Bar\nA -> B\n@enduml\n');
-        expect(d.header!.text, 'Top Bar');
-        expect(d.header!.align, TextAlign.center);
+        final d = parseSequence('@startuml\nheader Top Bar\nA -> B\n@enduml\n');
+        expect(d.decorations.header!.text, 'Top Bar');
+        expect(d.decorations.header!.align, TextAlign.center);
       });
 
       test('single-line footer with right alignment', () {
-        final d = parseSequence(
-            '@startuml\nfooter right Page 1\nA -> B\n@enduml\n');
-        expect(d.footer!.text, 'Page 1');
-        expect(d.footer!.align, TextAlign.right);
+        final d =
+            parseSequence('@startuml\nfooter right Page 1\nA -> B\n@enduml\n');
+        expect(d.decorations.footer!.text, 'Page 1');
+        expect(d.decorations.footer!.align, TextAlign.right);
       });
 
       test('header left alignment', () {
-        final d = parseSequence(
-            '@startuml\nheader left Hello\nA -> B\n@enduml\n');
-        expect(d.header!.align, TextAlign.left);
+        final d =
+            parseSequence('@startuml\nheader left Hello\nA -> B\n@enduml\n');
+        expect(d.decorations.header!.align, TextAlign.left);
       });
 
       test('multi-line title', () {
@@ -916,7 +918,7 @@ void main() {
             'end title\n'
             'A -> B\n'
             '@enduml\n');
-        expect(d.title, 'first line\nsecond line');
+        expect(d.decorations.title, 'first line\nsecond line');
       });
 
       test('multi-line header with alignment', () {
@@ -927,8 +929,8 @@ void main() {
             'end header\n'
             'A -> B\n'
             '@enduml\n');
-        expect(d.header!.text, 'top right text\nsecond');
-        expect(d.header!.align, TextAlign.right);
+        expect(d.decorations.header!.text, 'top right text\nsecond');
+        expect(d.decorations.header!.align, TextAlign.right);
       });
 
       test('multi-line footer', () {
@@ -938,8 +940,8 @@ void main() {
             'bottom\n'
             'end footer\n'
             '@enduml\n');
-        expect(d.footer!.text, 'bottom');
-        expect(d.footer!.align, TextAlign.center);
+        expect(d.decorations.footer!.text, 'bottom');
+        expect(d.decorations.footer!.align, TextAlign.center);
       });
 
       test('duplicate title throws', () {
@@ -994,10 +996,10 @@ void main() {
 
       test('title default null', () {
         final d = parseSequence('@startuml\nA -> B\n@enduml\n');
-        expect(d.title, isNull);
-        expect(d.header, isNull);
-        expect(d.footer, isNull);
-        expect(d.caption, isNull);
+        expect(d.decorations.title, isNull);
+        expect(d.decorations.header, isNull);
+        expect(d.decorations.footer, isNull);
+        expect(d.decorations.caption, isNull);
       });
     });
 
@@ -1048,8 +1050,8 @@ void main() {
             'endlegend\n'
             'A -> B\n'
             '@enduml\n');
-        expect(d.legend!.text, 'first line\nsecond line');
-        expect(d.legend!.align, TextAlign.left);
+        expect(d.decorations.legend!.text, 'first line\nsecond line');
+        expect(d.decorations.legend!.align, TextAlign.left);
       });
 
       test('legend right sets align', () {
@@ -1059,8 +1061,8 @@ void main() {
             'endlegend\n'
             'A -> B\n'
             '@enduml\n');
-        expect(d.legend!.text, 'right aligned');
-        expect(d.legend!.align, TextAlign.right);
+        expect(d.decorations.legend!.text, 'right aligned');
+        expect(d.decorations.legend!.align, TextAlign.right);
       });
 
       test('legend center sets align', () {
@@ -1070,7 +1072,7 @@ void main() {
             'endlegend\n'
             'A -> B\n'
             '@enduml\n');
-        expect(d.legend!.align, TextAlign.center);
+        expect(d.decorations.legend!.align, TextAlign.center);
       });
 
       test('two-word end legend is accepted', () {
@@ -1080,7 +1082,7 @@ void main() {
             'end legend\n'
             'A -> B\n'
             '@enduml\n');
-        expect(d.legend!.text, 'body');
+        expect(d.decorations.legend!.text, 'body');
       });
 
       test('duplicate legend throws', () {
@@ -1109,7 +1111,7 @@ void main() {
 
       test('legend default null', () {
         final d = parseSequence('@startuml\nA -> B\n@enduml\n');
-        expect(d.legend, isNull);
+        expect(d.decorations.legend, isNull);
       });
     });
 
@@ -1117,25 +1119,25 @@ void main() {
       test('inline backgroundColor parses to a Color', () {
         final d = parseSequence(
             '@startuml\nskinparam backgroundColor #FFEEDD\n@enduml\n');
-        expect(d.skin.backgroundColor, const Color(0xFFFFEEDD));
+        expect(d.decorations.skin.backgroundColor, const Color(0xFFFFEEDD));
       });
 
       test('inline named color is accepted', () {
         final d = parseSequence(
             '@startuml\nskinparam sequenceArrowColor red\n@enduml\n');
-        expect(d.skin.sequenceArrowColor, const Color(0xFFFF0000));
+        expect(d.decorations.skin.sequenceArrowColor, const Color(0xFFFF0000));
       });
 
       test('inline defaultFontSize parses to a double', () {
-        final d = parseSequence(
-            '@startuml\nskinparam defaultFontSize 18\n@enduml\n');
-        expect(d.skin.defaultFontSize, 18.0);
+        final d =
+            parseSequence('@startuml\nskinparam defaultFontSize 18\n@enduml\n');
+        expect(d.decorations.skin.defaultFontSize, 18.0);
       });
 
       test('keys are matched case-insensitively', () {
         final d = parseSequence(
             '@startuml\nskinparam NoteBackgroundColor #ABCDEF\n@enduml\n');
-        expect(d.skin.noteBackgroundColor, const Color(0xFFABCDEF));
+        expect(d.decorations.skin.noteBackgroundColor, const Color(0xFFABCDEF));
       });
 
       test('block form without prefix parses each pair', () {
@@ -1145,8 +1147,8 @@ void main() {
             '  defaultFontSize 14\n'
             '}\n'
             '@enduml\n');
-        expect(d.skin.backgroundColor, const Color(0xFF112233));
-        expect(d.skin.defaultFontSize, 14.0);
+        expect(d.decorations.skin.backgroundColor, const Color(0xFF112233));
+        expect(d.decorations.skin.defaultFontSize, 14.0);
       });
 
       test('block form with sequence prefix concatenates keys', () {
@@ -1156,9 +1158,8 @@ void main() {
             '  LifeLineBackgroundColor #LightGray\n'
             '}\n'
             '@enduml\n');
-        expect(d.skin.sequenceArrowColor, const Color(0xFFFF0000));
-        expect(d.skin.sequenceLifeLineBackgroundColor,
-            const Color(0xFFD3D3D3));
+        expect(d.decorations.skin.sequenceArrowColor, const Color(0xFFFF0000));
+        expect(d.decorations.skin.sequenceLifeLineBackgroundColor, const Color(0xFFD3D3D3));
       });
 
       test('participant prefix block sets participant colors', () {
@@ -1168,8 +1169,8 @@ void main() {
             '  BorderColor Black\n'
             '}\n'
             '@enduml\n');
-        expect(d.skin.participantBackgroundColor, const Color(0xFFEEEEEE));
-        expect(d.skin.participantBorderColor, const Color(0xFF000000));
+        expect(d.decorations.skin.participantBackgroundColor, const Color(0xFFEEEEEE));
+        expect(d.decorations.skin.participantBorderColor, const Color(0xFF000000));
       });
 
       test('unknown inline key is silently ignored', () {
@@ -1180,8 +1181,8 @@ void main() {
         );
         final d = parseSequence(
             '@startuml\nskinparam totallyMadeUpKey #FF00FF\n@enduml\n');
-        expect(d.skin.backgroundColor, isNull);
-        expect(d.skin.sequenceArrowColor, isNull);
+        expect(d.decorations.skin.backgroundColor, isNull);
+        expect(d.decorations.skin.sequenceArrowColor, isNull);
       });
 
       test('unknown block key is silently ignored', () {
@@ -1200,19 +1201,19 @@ void main() {
             '  ArrowColor #Blue\n'
             '}\n'
             '@enduml\n');
-        expect(d.skin.sequenceArrowColor, const Color(0xFF0000FF));
+        expect(d.decorations.skin.sequenceArrowColor, const Color(0xFF0000FF));
       });
 
       test('skin defaults are all null when no skinparam is used', () {
         final d = parseSequence('@startuml\nA -> B\n@enduml\n');
-        expect(d.skin.backgroundColor, isNull);
-        expect(d.skin.defaultFontSize, isNull);
-        expect(d.skin.sequenceArrowColor, isNull);
-        expect(d.skin.sequenceLifeLineBackgroundColor, isNull);
-        expect(d.skin.participantBackgroundColor, isNull);
-        expect(d.skin.participantBorderColor, isNull);
-        expect(d.skin.noteBackgroundColor, isNull);
-        expect(d.skin.noteBorderColor, isNull);
+        expect(d.decorations.skin.backgroundColor, isNull);
+        expect(d.decorations.skin.defaultFontSize, isNull);
+        expect(d.decorations.skin.sequenceArrowColor, isNull);
+        expect(d.decorations.skin.sequenceLifeLineBackgroundColor, isNull);
+        expect(d.decorations.skin.participantBackgroundColor, isNull);
+        expect(d.decorations.skin.participantBorderColor, isNull);
+        expect(d.decorations.skin.noteBackgroundColor, isNull);
+        expect(d.decorations.skin.noteBorderColor, isNull);
       });
     });
   });
@@ -1378,8 +1379,7 @@ void main() {
           'class B\n'
           'A --> B\n'
           '@enduml\n');
-      expect(d.relationships.single.kind,
-          RelationshipKind.directedAssociation);
+      expect(d.relationships.single.kind, RelationshipKind.directedAssociation);
     });
 
     test('parses association A -- B', () {
@@ -1798,13 +1798,13 @@ void main() {
           'UC2 ..> UC4 : <<include>>\n'
           'UC3 ..> UC4 : <<include>>\n'
           '@enduml\n');
-      expect(d.nodes.where((n) => n.kind == UseCaseNodeKind.actor),
-          hasLength(2));
+      expect(
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.actor), hasLength(2));
       expect(d.nodes.where((n) => n.kind == UseCaseNodeKind.useCase),
           hasLength(4));
       expect(d.boundaries.single.label, 'System');
-      expect(d.boundaries.single.containedAliases,
-          ['UC1', 'UC2', 'UC3', 'UC4']);
+      expect(
+          d.boundaries.single.containedAliases, ['UC1', 'UC2', 'UC3', 'UC4']);
       expect(d.relations, hasLength(6));
     });
   });
@@ -1826,6 +1826,21 @@ void main() {
       expect(d.nodes[0], isA<StartNode>());
       expect(d.nodes[1], isA<Action>());
       expect((d.nodes[1] as Action).text, 'Process Order');
+      expect(d.nodes[2], isA<StopNode>());
+    });
+
+    test('skips common diagram decorations before activity nodes', () {
+      final d = parseActivity('@startuml\n'
+          'title Release Pipeline\n'
+          'header Draft\n'
+          'caption Offline render\n'
+          'start\n'
+          ':Create release branch;\n'
+          'stop\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(3));
+      expect(d.nodes[0], isA<StartNode>());
+      expect((d.nodes[1] as Action).text, 'Create release branch');
       expect(d.nodes[2], isA<StopNode>());
     });
 
@@ -1995,8 +2010,7 @@ void main() {
     });
 
     test('parses state alias form', () {
-      final d = parseState(
-          '@startuml\nstate "Display Name" as Foo\n@enduml\n');
+      final d = parseState('@startuml\nstate "Display Name" as Foo\n@enduml\n');
       final s = d.states.single;
       expect(s.name, 'Foo');
       expect(s.displayName, 'Display Name');
@@ -2065,8 +2079,8 @@ void main() {
     });
 
     test('[*] discriminator routes to state diagram', () {
-      final tokens = Lexer().tokenize(
-          '@startuml\n[*] --> Idle\nIdle --> [*]\n@enduml\n');
+      final tokens =
+          Lexer().tokenize('@startuml\n[*] --> Idle\nIdle --> [*]\n@enduml\n');
       final d = Parser().parse(tokens);
       expect(d, isA<StateDiagram>());
     });
@@ -2105,7 +2119,8 @@ void main() {
     });
 
     test('parses [Name] bracket shorthand with alias', () {
-      final d = parseComponent('@startuml\n[Cache Service] as Cache\n@enduml\n');
+      final d =
+          parseComponent('@startuml\n[Cache Service] as Cache\n@enduml\n');
       final n = d.nodes.single;
       expect(n.alias, 'Cache');
       expect(n.label, 'Cache Service');
@@ -2330,10 +2345,8 @@ void main() {
           '@enduml\n');
       expect(d.containers, hasLength(1));
       expect(d.containers.single.nodeAliases, ['Apache', 'Config']);
-      final apache =
-          d.nodes.firstWhere((n) => n.alias == 'Apache');
-      final config =
-          d.nodes.firstWhere((n) => n.alias == 'Config');
+      final apache = d.nodes.firstWhere((n) => n.alias == 'Apache');
+      final config = d.nodes.firstWhere((n) => n.alias == 'Config');
       expect(apache.kind, ComponentNodeKind.component);
       expect(config.kind, ComponentNodeKind.artifact);
       expect(config.label, 'config.yml');
@@ -2472,8 +2485,7 @@ void main() {
 
     test('rejects multiple roots', () {
       expect(
-        () => parseMindmap(
-            '@startmindmap\n* One\n* Two\n@endmindmap\n'),
+        () => parseMindmap('@startmindmap\n* One\n* Two\n@endmindmap\n'),
         throwsA(isA<ParserException>()),
       );
     });
@@ -2910,4 +2922,219 @@ void main() {
       expect(d.networks.single.nodes.single.address, isNull);
     });
   });
+
+  group('universal decorations', () {
+    Diagram parseAny(String src) {
+      final tokens = Lexer().tokenize(src);
+      return Parser().parse(tokens);
+    }
+
+    test('class diagram accepts title at top', () {
+      final d = parseAny('@startuml\n'
+          'title My Class Diagram\n'
+          'class Foo\n'
+          '@enduml\n') as ClassDiagram;
+      expect(d.decorations.title, 'My Class Diagram');
+    });
+
+    test('usecase diagram accepts title at top', () {
+      final d = parseAny('@startuml\n'
+          'title Use Cases\n'
+          'actor User\n'
+          'usecase Login\n'
+          'User --> Login\n'
+          '@enduml\n') as UseCaseDiagram;
+      expect(d.decorations.title, 'Use Cases');
+    });
+
+    test('state diagram accepts title at top', () {
+      final d = parseAny('@startuml\n'
+          'title States\n'
+          '[*] --> Idle\n'
+          '@enduml\n') as StateDiagram;
+      expect(d.decorations.title, 'States');
+    });
+
+    test('component diagram accepts title at top', () {
+      final d = parseAny('@startuml\n'
+          'title Components\n'
+          'component Web\n'
+          '@enduml\n') as ComponentDiagram;
+      expect(d.decorations.title, 'Components');
+    });
+
+    test('activity diagram accepts title at top', () {
+      final d = parseAny('@startuml\n'
+          'title Pipeline\n'
+          'start\n'
+          ':Step;\n'
+          'stop\n'
+          '@enduml\n') as ActivityDiagram;
+      expect(d.decorations.title, 'Pipeline');
+    });
+
+    test('class diagram accepts header / footer / caption / legend', () {
+      final d = parseAny('@startuml\n'
+          'header My Header\n'
+          'footer My Footer\n'
+          'caption My Caption\n'
+          'legend\n'
+          'L1\n'
+          'endlegend\n'
+          'class Foo\n'
+          '@enduml\n') as ClassDiagram;
+      expect(d.decorations.header!.text, 'My Header');
+      expect(d.decorations.footer!.text, 'My Footer');
+      expect(d.decorations.caption, 'My Caption');
+      expect(d.decorations.legend!.text, 'L1');
+    });
+
+    test('state diagram accepts skinparam backgroundColor', () {
+      final d = parseAny('@startuml\n'
+          'skinparam backgroundColor #FFEEDD\n'
+          '[*] --> Idle\n'
+          '@enduml\n') as StateDiagram;
+      expect(d.decorations.skin.backgroundColor, const Color(0xFFFFEEDD));
+    });
+
+    test('component diagram accepts header and skinparam', () {
+      final d = parseAny('@startuml\n'
+          'header Top\n'
+          'skinparam defaultFontSize 14\n'
+          'component Web\n'
+          '@enduml\n') as ComponentDiagram;
+      expect(d.decorations.header!.text, 'Top');
+      expect(d.decorations.skin.defaultFontSize, 14.0);
+    });
+
+    test('usecase "left to right direction" sets the flag', () {
+      final d = parseAny('@startuml\n'
+          'left to right direction\n'
+          'actor User\n'
+          'usecase Login\n'
+          'User --> Login\n'
+          '@enduml\n') as UseCaseDiagram;
+      expect(d.leftToRightDirection, isTrue);
+    });
+
+    test('usecase "top to bottom direction" leaves the flag false', () {
+      final d = parseAny('@startuml\n'
+          'top to bottom direction\n'
+          'actor User\n'
+          'usecase Login\n'
+          'User --> Login\n'
+          '@enduml\n') as UseCaseDiagram;
+      expect(d.leftToRightDirection, isFalse);
+    });
+
+    test('usecase defaults leftToRightDirection to false', () {
+      final d = parseAny('@startuml\n'
+          'actor User\n'
+          'usecase Login\n'
+          'User --> Login\n'
+          '@enduml\n') as UseCaseDiagram;
+      expect(d.leftToRightDirection, isFalse);
+    });
+  });
+
+  group('sample integration smoke tests', () {
+    void smoke(String name, String src) {
+      test('$name parses + lays out without throwing', () {
+        final tokens = Lexer().tokenize(src);
+        final diagram = Parser().parse(tokens);
+        final measurer = _StubMeasurer();
+        final scene = const AutoLayout().layout(diagram, measurer);
+        expect(scene.shapes, isNotEmpty);
+      });
+    }
+
+    smoke('class_order_domain', '''@startuml
+title Order Domain
+class Customer {
+  +String id
+  +String name
+  +placeOrder(cart)
+}
+class Order {
+  +String orderNo
+  +Money total
+  +submit()
+  +cancel()
+}
+class OrderLine {
+  +String sku
+  +int quantity
+  +Money price
+}
+class Payment {
+  +authorize()
+  +capture()
+}
+
+Customer "1" --> "0..*" Order
+Order "1" *-- "1..*" OrderLine
+Order "1" --> "0..1" Payment
+@enduml
+''');
+
+    smoke('component_checkout', '''@startuml
+title Checkout Components
+package "Frontend" {
+  [Cart UI]
+  [Checkout UI]
+}
+package "Backend" {
+  [Order Service]
+  [Payment Adapter]
+  [Inventory Service]
+}
+cloud "Payment Gateway" as PG
+database "Orders DB" as ODB
+
+[Cart UI] --> [Checkout UI]
+[Order Service] --> [Inventory Service]
+[Order Service] --> [Payment Adapter]
+[Payment Adapter] --> PG
+[Order Service] --> ODB
+@enduml
+''');
+
+    smoke('state_document_review', '''@startuml
+title Document Review State
+[*] --> Draft
+Draft --> InReview: submit
+InReview --> Draft: request changes
+InReview --> Approved: approve
+Approved --> Published: publish
+Published --> Archived: archive
+Archived --> [*]
+@enduml
+''');
+
+    smoke('usecase_share_file', '''@startuml
+title Share File Use Cases
+left to right direction
+actor Developer
+actor Reviewer
+rectangle "Omni Viewer" {
+  usecase "Open file" as Open
+  usecase "Upload share link" as Upload
+  usecase "Copy link" as Copy
+  usecase "Open shared link" as OpenLink
+}
+Developer --> Open
+Developer --> Upload
+Upload --> Copy
+Reviewer --> OpenLink
+@enduml
+''');
+  });
+}
+
+class _StubMeasurer implements TextMeasurer {
+  @override
+  Size measure(String text, TextStyle style) {
+    final fontSize = style.fontSize ?? 12.0;
+    return Size(text.length * fontSize * 0.6, fontSize * 1.2);
+  }
 }

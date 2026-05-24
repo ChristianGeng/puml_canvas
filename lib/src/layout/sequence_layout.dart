@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
+import 'decoration_wrapper.dart';
 import 'layout.dart';
 import 'scene.dart';
 import 'text_measurer.dart';
@@ -79,23 +80,6 @@ class SequenceLayout implements DiagramLayout {
   static const _participantBoxDefaultStroke = Color(0xFF808080);
   static const _participantBoxLabelStyle =
       TextStyle(color: Color(0xFF000000), fontSize: 11, fontWeight: FontWeight.w600);
-  static const _titleStyle = TextStyle(
-      color: Color(0xFF000000), fontSize: 16, fontWeight: FontWeight.bold);
-  static const _headerFooterStyle =
-      TextStyle(color: Color(0xFF808080), fontSize: 10);
-  static const _captionStyle = TextStyle(
-      color: Color(0xFF505050), fontSize: 11, fontStyle: FontStyle.italic);
-  static const _titleGap = 8.0;
-  static const _headerGap = 6.0;
-  static const _footerGap = 6.0;
-  static const _captionGap = 6.0;
-  static const _legendGap = 8.0;
-  static const _legendPaddingX = 8.0;
-  static const _legendPaddingY = 6.0;
-  static const _legendStyle =
-      TextStyle(color: Color(0xFF000000), fontSize: 11);
-  static const _legendFill = Color(0x11000000);
-  static const _legendStroke = Color(0xFFB0B0B0);
   static const _actorIconHeight = 36.0;
   static const _smallIconHeight = 22.0;
   static const _databaseCapHeight = 6.0;
@@ -112,14 +96,15 @@ class SequenceLayout implements DiagramLayout {
 
     final participants = diagram.participantsInOrder();
     if (participants.isEmpty) {
-      return Scene(
+      final emptyInner = Scene(
         size: Size.zero,
         shapes: const [],
-        background: diagram.skin.backgroundColor,
+        background: diagram.decorations.skin.backgroundColor,
       );
+      return wrapWithDecorations(emptyInner, diagram.decorations, measurer);
     }
 
-    final skin = diagram.skin;
+    final skin = diagram.decorations.skin;
     final labelStyle = skin.defaultFontSize == null
         ? _labelStyle
         : _labelStyle.copyWith(fontSize: skin.defaultFontSize);
@@ -136,44 +121,6 @@ class SequenceLayout implements DiagramLayout {
         skin.participantBorderColor ?? const Color(0xFF000000);
     final noteFill = skin.noteBackgroundColor ?? const Color(0xFFFEF9C3);
     final noteStroke = skin.noteBorderColor ?? const Color(0xFF000000);
-
-    final headerFooterStyle = skin.defaultFontSize == null
-        ? _headerFooterStyle
-        : _headerFooterStyle.copyWith(fontSize: skin.defaultFontSize);
-    final captionStyle = skin.defaultFontSize == null
-        ? _captionStyle
-        : _captionStyle.copyWith(fontSize: skin.defaultFontSize);
-    final legendStyle = skin.defaultFontSize == null
-        ? _legendStyle
-        : _legendStyle.copyWith(fontSize: skin.defaultFontSize);
-
-    final headerSize = diagram.header != null
-        ? _measureMultiline(diagram.header!.text, headerFooterStyle, measurer)
-        : Size.zero;
-    final titleSize = diagram.title != null
-        ? _measureMultiline(diagram.title!, _titleStyle, measurer)
-        : Size.zero;
-    final captionSize = diagram.caption != null
-        ? _measureMultiline(diagram.caption!, captionStyle, measurer)
-        : Size.zero;
-    final footerSize = diagram.footer != null
-        ? _measureMultiline(diagram.footer!.text, headerFooterStyle, measurer)
-        : Size.zero;
-    final legendTextSize = diagram.legend != null
-        ? _measureMultiline(diagram.legend!.text, legendStyle, measurer)
-        : Size.zero;
-    final legendBoxSize = diagram.legend != null
-        ? Size(legendTextSize.width + _legendPaddingX * 2,
-            legendTextSize.height + _legendPaddingY * 2)
-        : Size.zero;
-
-    final topDecorationHeight =
-        (diagram.header != null ? headerSize.height + _headerGap : 0.0) +
-            (diagram.title != null ? titleSize.height + _titleGap : 0.0);
-    final bottomDecorationHeight =
-        (diagram.legend != null ? legendBoxSize.height + _legendGap : 0.0) +
-            (diagram.caption != null ? captionSize.height + _captionGap : 0.0) +
-            (diagram.footer != null ? footerSize.height + _footerGap : 0.0);
 
     final actorWidths = <String, double>{};
     final actorHeights = <String, double>{};
@@ -215,7 +162,7 @@ class SequenceLayout implements DiagramLayout {
                 .height +
             _participantBoxLabelGap * 2
         : 0.0;
-    final topActorY = _padding + topDecorationHeight + boxLabelReserve;
+    final topActorY = _padding + boxLabelReserve;
     final messagesStartY = topActorY + actorBoxHeight + _messageGap;
     final bottomActorY = messagesStartY + totalEventsHeight;
 
@@ -348,121 +295,15 @@ class SequenceLayout implements DiagramLayout {
     shapes.addAll(eventShapes);
 
     totalWidth = math.max(totalWidth, ctx.rightmost + _padding);
-    final decorationWidth = math.max(
-      math.max(
-        math.max(headerSize.width, footerSize.width),
-        math.max(titleSize.width, captionSize.width),
-      ),
-      legendBoxSize.width,
-    );
-    totalWidth = math.max(totalWidth, decorationWidth + _padding * 2);
     final diagramBottomY = bottomActorY + actorBoxHeight;
-    final totalHeight =
-        diagramBottomY + bottomDecorationHeight + _padding;
+    final totalHeight = diagramBottomY + _padding;
 
-    if (diagram.header != null) {
-      shapes.add(SceneText(
-        offset: Offset(
-          _alignX(totalWidth, headerSize.width, diagram.header!.align),
-          _padding,
-        ),
-        text: diagram.header!.text,
-        textStyle: headerFooterStyle,
-      ));
-    }
-    if (diagram.title != null) {
-      final titleY = _padding +
-          (diagram.header != null ? headerSize.height + _headerGap : 0.0);
-      shapes.add(SceneText(
-        offset: Offset(
-          (totalWidth - titleSize.width) / 2,
-          titleY,
-        ),
-        text: diagram.title!,
-        textStyle: _titleStyle,
-      ));
-    }
-    if (diagram.legend != null) {
-      final legendLeft =
-          _alignX(totalWidth, legendBoxSize.width, diagram.legend!.align);
-      final legendTop = diagramBottomY + _legendGap;
-      shapes.add(SceneBox(
-        rect: Rect.fromLTWH(
-            legendLeft, legendTop, legendBoxSize.width, legendBoxSize.height),
-        fill: _legendFill,
-        stroke: _legendStroke,
-        textStyle: legendStyle,
-      ));
-      shapes.add(SceneText(
-        offset: Offset(
-          legendLeft + _legendPaddingX,
-          legendTop + _legendPaddingY,
-        ),
-        text: diagram.legend!.text,
-        textStyle: legendStyle,
-      ));
-    }
-    final afterLegendY = diagram.legend != null
-        ? diagramBottomY + _legendGap + legendBoxSize.height
-        : diagramBottomY;
-    if (diagram.caption != null) {
-      shapes.add(SceneText(
-        offset: Offset(
-          (totalWidth - captionSize.width) / 2,
-          afterLegendY + _captionGap,
-        ),
-        text: diagram.caption!,
-        textStyle: captionStyle,
-      ));
-    }
-    if (diagram.footer != null) {
-      final footerY = afterLegendY +
-          (diagram.caption != null ? captionSize.height + _captionGap : 0.0) +
-          _footerGap;
-      shapes.add(SceneText(
-        offset: Offset(
-          _alignX(totalWidth, footerSize.width, diagram.footer!.align),
-          footerY,
-        ),
-        text: diagram.footer!.text,
-        textStyle: headerFooterStyle,
-      ));
-    }
-
-    return Scene(
+    final innerScene = Scene(
       size: Size(totalWidth, totalHeight),
       shapes: shapes,
       background: skin.backgroundColor,
     );
-  }
-
-  double _alignX(double totalWidth, double textWidth, TextAlign align) {
-    switch (align) {
-      case TextAlign.left:
-      case TextAlign.start:
-        return _padding;
-      case TextAlign.right:
-      case TextAlign.end:
-        return totalWidth - _padding - textWidth;
-      case TextAlign.center:
-      case TextAlign.justify:
-        return (totalWidth - textWidth) / 2;
-    }
-  }
-
-  Size _measureMultiline(String text, TextStyle style, TextMeasurer measurer) {
-    if (!text.contains('\n')) {
-      return measurer.measure(text, style);
-    }
-    final lines = text.split('\n');
-    var maxWidth = 0.0;
-    var totalHeight = 0.0;
-    for (final line in lines) {
-      final size = measurer.measure(line.isEmpty ? ' ' : line, style);
-      if (size.width > maxWidth) maxWidth = size.width;
-      totalHeight += size.height;
-    }
-    return Size(maxWidth, totalHeight);
+    return wrapWithDecorations(innerScene, diagram.decorations, measurer);
   }
 
   void _emitDestroyMark(List<SceneShape> shapes, double cx, double y) {

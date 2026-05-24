@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
+import 'decoration_wrapper.dart';
 import 'layout.dart';
 import 'scene.dart';
 import 'text_measurer.dart';
@@ -47,10 +48,14 @@ class TimingLayout implements DiagramLayout {
       throw ArgumentError('TimingLayout expects TimingDiagram');
     }
     if (diagram.lanes.isEmpty) {
-      return Scene(
-        size: Size.zero,
-        shapes: const [],
-        background: diagram.skin.backgroundColor,
+      return wrapWithDecorations(
+        Scene(
+          size: Size.zero,
+          shapes: const [],
+          background: diagram.decorations.skin.backgroundColor,
+        ),
+        diagram.decorations,
+        measurer,
       );
     }
 
@@ -231,10 +236,14 @@ class TimingLayout implements DiagramLayout {
 
     final width = plotRight + _padding;
     final height = bottomY + _padding;
-    return Scene(
-      size: Size(width, height),
-      shapes: shapes,
-      background: diagram.skin.backgroundColor,
+    return wrapWithDecorations(
+      Scene(
+        size: Size(width, height),
+        shapes: shapes,
+        background: diagram.decorations.skin.backgroundColor,
+      ),
+      diagram.decorations,
+      measurer,
     );
   }
 

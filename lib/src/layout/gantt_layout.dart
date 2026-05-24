@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
+import 'decoration_wrapper.dart';
 import 'layout.dart';
 import 'scene.dart';
 import 'text_measurer.dart';
@@ -52,10 +53,14 @@ class GanttLayout implements DiagramLayout {
       throw ArgumentError('GanttLayout expects GanttDiagram');
     }
     if (diagram.items.isEmpty) {
-      return Scene(
-        size: Size.zero,
-        shapes: const [],
-        background: diagram.skin.backgroundColor,
+      return wrapWithDecorations(
+        Scene(
+          size: Size.zero,
+          shapes: const [],
+          background: diagram.decorations.skin.backgroundColor,
+        ),
+        diagram.decorations,
+        measurer,
       );
     }
 
@@ -183,10 +188,14 @@ class GanttLayout implements DiagramLayout {
 
     final totalWidth = plotLeft + plotWidth + _padding;
     final totalHeight = y + _padding;
-    return Scene(
-      size: Size(totalWidth, totalHeight),
-      shapes: List.unmodifiable(shapes),
-      background: diagram.skin.backgroundColor,
+    return wrapWithDecorations(
+      Scene(
+        size: Size(totalWidth, totalHeight),
+        shapes: List.unmodifiable(shapes),
+        background: diagram.decorations.skin.backgroundColor,
+      ),
+      diagram.decorations,
+      measurer,
     );
   }
 
