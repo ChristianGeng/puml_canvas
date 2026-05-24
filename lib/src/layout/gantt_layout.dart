@@ -206,11 +206,12 @@ class GanttLayout implements DiagramLayout {
   }
 
   static int _chooseTickStep(int totalDays) {
-    if (totalDays <= 14) return 1;
-    if (totalDays <= 30) return 2;
-    if (totalDays <= 90) return 7;
-    if (totalDays <= 365) return 30;
-    return 90;
+    const minPxBetweenLabels = 78.0;
+    final pxStep = (minPxBetweenLabels / _pxPerDay).ceil();
+    if (totalDays <= 30) return math.max(pxStep, 1);
+    if (totalDays <= 90) return math.max(pxStep, 7);
+    if (totalDays <= 365) return math.max(pxStep, 30);
+    return math.max(pxStep, 90);
   }
 
   static String _formatDate(DateTime d) {

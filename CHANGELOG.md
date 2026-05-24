@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.7
+
+### Fixed
+
+- Gantt diagram date axis labels no longer overlap. The tick step now
+  enforces a minimum 78px gap between labels so date strings like
+  `2026-05-25` (about 70px wide at fontSize 10) have room to render.
+  Previously short timelines (≤14 days) emitted a label every day at
+  14px spacing, producing illegible smudge text.
+
 ## 0.7.6
 
 ### Fixed

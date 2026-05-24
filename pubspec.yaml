@@ -1,6 +1,6 @@
 name: puml_canvas
 description: "A native PlantUML-compatible diagram renderer for Flutter. Parses PUML in Dart and paints directly onto a Canvas — no server, no WebView."
-version: 0.7.6
+version: 0.7.7
 homepage: https://github.com/battlecook/puml_canvas
 repository: https://github.com/battlecook/puml_canvas
 issue_tracker: https://github.com/battlecook/puml_canvas/issues
