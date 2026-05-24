@@ -28,7 +28,7 @@ Add `puml_canvas` to your `pubspec.yaml`:
 dependencies:
   puml_canvas:
     git:
-      url: https://github.com/<your-account>/puml_canvas.git
+      url: https://github.com/battlecook/puml_canvas.git
 ```
 
 (Once published to pub.dev the dependency line will be `puml_canvas: ^x.y.z`.)
