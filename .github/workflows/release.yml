@@ -39,8 +39,8 @@ jobs:
       - name: Analyze
         run: flutter analyze
 
-      - name: Test
-        run: flutter test
+      - name: Test (excluding golden tests — platform-dependent font rendering)
+        run: flutter test --exclude-tags golden
 
       - name: Dry-run publish (validate package)
         run: flutter pub publish --dry-run
