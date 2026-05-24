@@ -533,7 +533,28 @@ void main() {
         'stop\n'
         '@enduml\n',
         'activity_diagram',
-        size: const Size(640, 1200),
+        size: const Size(720, 1100),
+      );
+    });
+
+    testWidgets('activity nested if routing', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'start\n'
+        'if (outer?) then (yes)\n'
+        '  if (inner?) then (yes)\n'
+        '    :Inner yes;\n'
+        '  else (no)\n'
+        '    :Inner no;\n'
+        '  endif\n'
+        'else (no)\n'
+        '  :Outer no;\n'
+        'endif\n'
+        'stop\n'
+        '@enduml\n',
+        'activity_nested_if_routing',
+        size: const Size(720, 720),
       );
     });
 

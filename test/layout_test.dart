@@ -1799,6 +1799,91 @@ void main() {
       expect(diamonds.length, greaterThanOrEqualTo(2));
     });
 
+    test('if/else places branches side-by-side', () {
+      final scene = layout.layout(
+        const ActivityDiagram(nodes: [
+          IfBlock(
+            branches: [
+              IfBranch(condition: 'ok?', body: [Action(text: 'Yes path')]),
+            ],
+            elseBody: [Action(text: 'No path')],
+          ),
+        ]),
+        measurer,
+      );
+      final boxes = scene.shapes.whereType<SceneRoundedBox>().toList();
+      expect(boxes, hasLength(2));
+      final thenBox =
+          boxes.firstWhere((b) => b.label == 'Yes path');
+      final elseBox =
+          boxes.firstWhere((b) => b.label == 'No path');
+      expect(thenBox.rect.left, lessThan(elseBox.rect.left));
+      expect(
+        (thenBox.rect.top - elseBox.rect.top).abs() < 1,
+        isTrue,
+        reason: 'side-by-side branches share a row',
+      );
+    });
+
+    test('if/else merge diamond is centered between and below branches', () {
+      final scene = layout.layout(
+        const ActivityDiagram(nodes: [
+          IfBlock(
+            branches: [
+              IfBranch(condition: 'ok?', body: [Action(text: 'Yes')]),
+            ],
+            elseBody: [Action(text: 'No')],
+          ),
+        ]),
+        measurer,
+      );
+      final diamonds = scene.shapes.whereType<SceneDiamond>().toList();
+      expect(diamonds, hasLength(2));
+      final decision = diamonds[0];
+      final merge = diamonds[1];
+      final boxes = scene.shapes.whereType<SceneRoundedBox>().toList();
+      final maxBranchBottom = boxes.fold<double>(
+          0, (a, b) => b.rect.bottom > a ? b.rect.bottom : a);
+      expect(merge.rect.top, greaterThan(maxBranchBottom));
+      expect(
+        (merge.rect.center.dx - decision.rect.center.dx).abs() < 1,
+        isTrue,
+      );
+    });
+
+    test('nested if expands its parent column width', () {
+      final scene = layout.layout(
+        const ActivityDiagram(nodes: [
+          IfBlock(
+            branches: [
+              IfBranch(
+                condition: 'outer?',
+                body: [
+                  IfBlock(
+                    branches: [
+                      IfBranch(
+                        condition: 'inner?',
+                        body: [Action(text: 'Inner yes')],
+                      ),
+                    ],
+                    elseBody: [Action(text: 'Inner no')],
+                  ),
+                ],
+              ),
+            ],
+            elseBody: [Action(text: 'Outer no')],
+          ),
+        ]),
+        measurer,
+      );
+      final boxes = scene.shapes.whereType<SceneRoundedBox>().toList();
+      final innerYes = boxes.firstWhere((b) => b.label == 'Inner yes');
+      final innerNo = boxes.firstWhere((b) => b.label == 'Inner no');
+      final outerNo = boxes.firstWhere((b) => b.label == 'Outer no');
+      expect(innerYes.rect.left, lessThan(innerNo.rect.left));
+      expect(innerNo.rect.right, lessThan(outerNo.rect.left));
+    });
+
     test('while emits a diamond and connects body', () {
       final scene = layout.layout(
         const ActivityDiagram(nodes: [
@@ -1822,6 +1907,37 @@ void main() {
       );
       expect(scene.shapes.whereType<SceneBox>(), hasLength(2));
       expect(scene.shapes.whereType<SceneRoundedBox>(), hasLength(2));
+    });
+
+    test('fork places branches side-by-side between two thick bars', () {
+      final scene = layout.layout(
+        const ActivityDiagram(nodes: [
+          ForkBlock(branches: [
+            [Action(text: 'A')],
+            [Action(text: 'B')],
+            [Action(text: 'C')],
+          ]),
+        ]),
+        measurer,
+      );
+      final bars = scene.shapes.whereType<SceneBox>().toList();
+      expect(bars, hasLength(2));
+      final boxes = scene.shapes.whereType<SceneRoundedBox>().toList();
+      expect(boxes, hasLength(3));
+      final a = boxes.firstWhere((b) => b.label == 'A');
+      final b = boxes.firstWhere((b) => b.label == 'B');
+      final c = boxes.firstWhere((b) => b.label == 'C');
+      expect(a.rect.left, lessThan(b.rect.left));
+      expect(b.rect.left, lessThan(c.rect.left));
+      expect(
+        (a.rect.top - b.rect.top).abs() < 1,
+        isTrue,
+        reason: 'parallel branches sit on the same row',
+      );
+      final topBar = bars[0];
+      final bottomBar = bars[1];
+      expect(topBar.rect.top, lessThan(a.rect.top));
+      expect(bottomBar.rect.top, greaterThan(a.rect.bottom));
     });
 
     test('connects sequential nodes with arrow lines', () {

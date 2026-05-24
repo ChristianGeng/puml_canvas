@@ -24,6 +24,9 @@ class ActivityLayout implements DiagramLayout {
   static const _partitionPadding = 12.0;
   static const _partitionLabelHeight = 18.0;
   static const _forkBarHeight = 6.0;
+  static const _minBranchWidth = 100.0;
+  static const _interBranchGap = 30.0;
+  static const _mergeDiamondSize = 24.0;
 
   static const _actionStyle = TextStyle(
     color: Color(0xFF000000),
@@ -72,7 +75,6 @@ class ActivityLayout implements DiagramLayout {
     final centerX = _padding + 200.0;
     final result = _layoutSequence(diagram.nodes, ctx, centerX, _padding);
 
-    // Compute scene size based on emitted shapes.
     var maxRight = 0.0;
     var maxBottom = 0.0;
     for (final s in shapes) {
@@ -200,6 +202,133 @@ class ActivityLayout implements DiagramLayout {
     }
   }
 
+  Size _measureNode(ActivityNode node, TextMeasurer measurer) {
+    switch (node) {
+      case StartNode():
+      case StopNode():
+      case EndNode():
+        return const Size(_startStopRadius * 2, _startStopRadius * 2);
+      case Action():
+        final s = measurer.measure(node.text, _actionStyle);
+        final w = math.max(_actionMinWidth, s.width + _actionPaddingX * 2);
+        final h = math.max(_actionMinHeight, s.height + _actionPaddingY * 2);
+        return Size(w, h);
+      case IfBlock():
+        return _measureIf(node, measurer);
+      case WhileBlock():
+        final s = measurer.measure(node.condition, _diamondStyle);
+        final dw = math.max(_diamondMinWidth, s.width + _diamondPaddingX * 2);
+        final dh =
+            math.max(_diamondMinHeight, s.height + _diamondPaddingY * 2);
+        final bodySize = _measureSubtree(node.body, measurer);
+        final w = math.max(dw, bodySize.width);
+        final h = dh +
+            (node.body.isEmpty ? 0 : _vGap + bodySize.height);
+        return Size(w, h);
+      case RepeatBlock():
+        final entryH = 28.0;
+        final bodySize = _measureSubtree(node.body, measurer);
+        final wText = measurer.measure(
+            node.whileCondition ?? '', _diamondStyle);
+        final ww =
+            math.max(_diamondMinWidth, wText.width + _diamondPaddingX * 2);
+        final wh =
+            math.max(_diamondMinHeight, wText.height + _diamondPaddingY * 2);
+        final w = math.max(math.max(50.0, bodySize.width), ww);
+        final h = entryH +
+            (node.body.isEmpty ? 0 : _vGap + bodySize.height) +
+            _vGap +
+            wh;
+        return Size(w, h);
+      case ForkBlock():
+        return _measureFork(node, measurer);
+      case Partition():
+        final bodySize = _measureSubtree(node.body, measurer);
+        final w = bodySize.width + _partitionPadding * 2;
+        final h = bodySize.height +
+            _partitionLabelHeight +
+            _partitionPadding * 2;
+        return Size(w, h);
+    }
+  }
+
+  Size _measureSubtree(List<ActivityNode> body, TextMeasurer measurer) {
+    if (body.isEmpty) return Size.zero;
+    var maxW = 0.0;
+    var totalH = 0.0;
+    for (var i = 0; i < body.length; i++) {
+      final s = _measureNode(body[i], measurer);
+      if (s.width > maxW) maxW = s.width;
+      totalH += s.height;
+      if (i > 0) totalH += _vGap;
+    }
+    return Size(maxW, totalH);
+  }
+
+  Size _measureIf(IfBlock block, TextMeasurer measurer) {
+    final condSize =
+        measurer.measure(block.branches.isNotEmpty
+            ? block.branches.first.condition
+            : '', _diamondStyle);
+    final dw = math.max(_diamondMinWidth, condSize.width + _diamondPaddingX * 2);
+    final dh =
+        math.max(_diamondMinHeight, condSize.height + _diamondPaddingY * 2);
+
+    final branchSizes = <Size>[];
+    var maxBranchH = 0.0;
+    var totalBranchW = 0.0;
+    for (final br in block.branches) {
+      final s = _measureSubtree(br.body, measurer);
+      final w = math.max(_minBranchWidth, s.width);
+      final h = s.height;
+      branchSizes.add(Size(w, h));
+      if (h > maxBranchH) maxBranchH = h;
+      totalBranchW += w;
+    }
+    if (block.elseBody.isNotEmpty || block.elseLabel != null) {
+      final s = _measureSubtree(block.elseBody, measurer);
+      final w = math.max(_minBranchWidth, s.width);
+      final h = s.height;
+      branchSizes.add(Size(w, h));
+      if (h > maxBranchH) maxBranchH = h;
+      totalBranchW += w;
+    }
+    final branchCount = branchSizes.length;
+    final totalW = math.max(
+      dw,
+      totalBranchW + _interBranchGap * math.max(0, branchCount - 1),
+    );
+    final totalH = dh +
+        _vGap +
+        maxBranchH +
+        _vGap +
+        _mergeDiamondSize;
+    return Size(totalW, totalH);
+  }
+
+  Size _measureFork(ForkBlock block, TextMeasurer measurer) {
+    final branchSizes = <Size>[];
+    var maxBranchH = 0.0;
+    var totalBranchW = 0.0;
+    for (final br in block.branches) {
+      final s = _measureSubtree(br, measurer);
+      final w = math.max(_minBranchWidth, s.width);
+      final h = s.height;
+      branchSizes.add(Size(w, h));
+      if (h > maxBranchH) maxBranchH = h;
+      totalBranchW += w;
+    }
+    final branchCount = branchSizes.length;
+    final totalW =
+        totalBranchW + _interBranchGap * math.max(0, branchCount - 1);
+    final totalH = _forkBarHeight +
+        _vGap +
+        maxBranchH +
+        _vGap +
+        _forkBarHeight;
+    return Size(totalW, totalH);
+  }
+
   _Flow _layoutTerminator(
     ActivityNode node,
     _LayoutContext ctx,
@@ -258,18 +387,52 @@ class ActivityLayout implements DiagramLayout {
     double centerX,
     double topY,
   ) {
-    // Single decision diamond at top, then a single combined body below
-    // (rather than parallel columns) for v1 simplicity.
     final firstCondition = block.branches.isNotEmpty
         ? block.branches.first.condition
         : '';
     final diamondSize = ctx.measurer.measure(firstCondition, _diamondStyle);
-    final width = math.max(
+    final dWidth = math.max(
         _diamondMinWidth, diamondSize.width + _diamondPaddingX * 2);
-    final height = math.max(
+    final dHeight = math.max(
         _diamondMinHeight, diamondSize.height + _diamondPaddingY * 2);
-    final diamondRect =
-        Rect.fromLTWH(centerX - width / 2, topY, width, height);
+
+    final branches = <_BranchSpec>[];
+    for (var i = 0; i < block.branches.length; i++) {
+      final br = block.branches[i];
+      final size = _measureSubtree(br.body, ctx.measurer);
+      final w = math.max(_minBranchWidth, size.width);
+      branches.add(_BranchSpec(
+        body: br.body,
+        width: w,
+        height: size.height,
+        label: br.thenLabel,
+      ));
+    }
+    final hasElse =
+        block.elseBody.isNotEmpty || block.elseLabel != null;
+    if (hasElse) {
+      final size = _measureSubtree(block.elseBody, ctx.measurer);
+      final w = math.max(_minBranchWidth, size.width);
+      branches.add(_BranchSpec(
+        body: block.elseBody,
+        width: w,
+        height: size.height,
+        label: block.elseLabel,
+      ));
+    }
+
+    final branchCount = branches.length;
+    final totalBranchW = branches.fold<double>(0, (a, b) => a + b.width);
+    final span = totalBranchW +
+        _interBranchGap * math.max(0, branchCount - 1);
+    final spanLeft = centerX - span / 2;
+
+    final diamondRect = Rect.fromLTWH(
+      centerX - dWidth / 2,
+      topY,
+      dWidth,
+      dHeight,
+    );
     ctx.shapes.add(SceneDiamond(
       rect: diamondRect,
       label: firstCondition,
@@ -278,70 +441,50 @@ class ActivityLayout implements DiagramLayout {
       stroke: _strokeColor,
     ));
 
-    var minLeft = diamondRect.left;
-    var maxRight = diamondRect.right;
-    var y = diamondRect.bottom + _vGap;
+    final branchTopY = diamondRect.bottom + _vGap;
+    var maxBranchBottom = branchTopY;
+    var minLeft = math.min(diamondRect.left, spanLeft);
+    var maxRight = math.max(diamondRect.right, spanLeft + span);
 
-    // Optional "then" branch label inline next to the down arrow.
-    if (block.branches.isNotEmpty &&
-        block.branches.first.thenLabel != null &&
-        block.branches.first.thenLabel!.isNotEmpty) {
-      ctx.shapes.add(SceneText(
-        offset: Offset(
-          diamondRect.right + _branchLabelGap,
-          diamondRect.bottom - 12,
-        ),
-        text: block.branches.first.thenLabel!,
-        textStyle: _branchLabelStyle,
-      ));
-    }
+    var cursor = spanLeft;
+    for (var i = 0; i < branchCount; i++) {
+      final br = branches[i];
+      final colLeft = cursor;
+      final colCenter = colLeft + br.width / 2;
+      cursor += br.width + _interBranchGap;
 
-    // Render each branch's body sequentially down the spine. This is the
-    // v1 simplification documented in README.
-    for (var i = 0; i < block.branches.length; i++) {
-      final branch = block.branches[i];
-      if (branch.body.isEmpty) continue;
-      final flow = _layoutSequence(branch.body, ctx, centerX, y);
-      ctx.shapes.add(SceneLine(
-        from: Offset(centerX, y - _vGap),
-        to: Offset(centerX, flow.topY),
-        head: ArrowHead.filled,
-        stroke: _strokeColor,
-      ));
-      y = flow.bottomY + _vGap;
-      if (flow.left < minLeft) minLeft = flow.left;
-      if (flow.right > maxRight) maxRight = flow.right;
-    }
-
-    if (block.elseBody.isNotEmpty) {
-      if (block.elseLabel != null && block.elseLabel!.isNotEmpty) {
-        ctx.shapes.add(SceneText(
-          offset: Offset(
-            diamondRect.left - 40,
-            diamondRect.center.dy - 6,
-          ),
-          text: block.elseLabel!,
-          textStyle: _branchLabelStyle,
-        ));
+      if (br.body.isNotEmpty) {
+        final flow =
+            _layoutSequence(br.body, ctx, colCenter, branchTopY);
+        _emitConnector(
+          ctx,
+          from: Offset(diamondRect.center.dx, diamondRect.bottom),
+          toCenterX: colCenter,
+          toY: flow.topY,
+          label: br.label,
+        );
+        if (flow.bottomY > maxBranchBottom) maxBranchBottom = flow.bottomY;
+        if (flow.left < minLeft) minLeft = flow.left;
+        if (flow.right > maxRight) maxRight = flow.right;
+      } else {
+        if (br.label != null && br.label!.isNotEmpty) {
+          ctx.shapes.add(SceneText(
+            offset: Offset(
+              colCenter + _branchLabelGap,
+              diamondRect.bottom + 2,
+            ),
+            text: br.label!,
+            textStyle: _branchLabelStyle,
+          ));
+        }
       }
-      final flow = _layoutSequence(block.elseBody, ctx, centerX, y);
-      ctx.shapes.add(SceneLine(
-        from: Offset(centerX, y - _vGap),
-        to: Offset(centerX, flow.topY),
-        head: ArrowHead.filled,
-        stroke: _strokeColor,
-      ));
-      y = flow.bottomY + _vGap;
-      if (flow.left < minLeft) minLeft = flow.left;
-      if (flow.right > maxRight) maxRight = flow.right;
     }
 
-    // Merge diamond at the bottom.
-    final mergeSize = math.min(_diamondMinHeight, 24.0);
+    final mergeTopY = maxBranchBottom + _vGap;
     final mergeRect = Rect.fromCenter(
-      center: Offset(centerX, y + mergeSize / 2),
-      width: mergeSize * 1.4,
-      height: mergeSize,
+      center: Offset(centerX, mergeTopY + _mergeDiamondSize / 2),
+      width: _mergeDiamondSize * 1.4,
+      height: _mergeDiamondSize,
     );
     ctx.shapes.add(SceneDiamond(
       rect: mergeRect,
@@ -349,12 +492,27 @@ class ActivityLayout implements DiagramLayout {
       fill: _diamondFill,
       stroke: _strokeColor,
     ));
-    ctx.shapes.add(SceneLine(
-      from: Offset(centerX, y - _vGap),
-      to: Offset(centerX, mergeRect.top),
-      head: ArrowHead.filled,
-      stroke: _strokeColor,
-    ));
+
+    cursor = spanLeft;
+    for (var i = 0; i < branchCount; i++) {
+      final br = branches[i];
+      final colLeft = cursor;
+      final colCenter = colLeft + br.width / 2;
+      cursor += br.width + _interBranchGap;
+
+      if (br.body.isEmpty) continue;
+      final lastBottomY = branchTopY + br.height;
+      _emitTail(
+        ctx,
+        fromCenterX: colCenter,
+        fromY: lastBottomY,
+        to: Offset(mergeRect.center.dx, mergeRect.top),
+      );
+    }
+
+    if (mergeRect.left < minLeft) minLeft = mergeRect.left;
+    if (mergeRect.right > maxRight) maxRight = mergeRect.right;
+
     return _Flow(
       topY: topY,
       bottomY: mergeRect.bottom,
@@ -363,6 +521,89 @@ class ActivityLayout implements DiagramLayout {
       left: minLeft,
       right: maxRight,
     );
+  }
+
+  void _emitConnector(
+    _LayoutContext ctx, {
+    required Offset from,
+    required double toCenterX,
+    required double toY,
+    String? label,
+  }) {
+    final midY = (from.dy + toY) / 2;
+    if ((toCenterX - from.dx).abs() < 0.5) {
+      ctx.shapes.add(SceneLine(
+        from: from,
+        to: Offset(toCenterX, toY),
+        head: ArrowHead.filled,
+        stroke: _strokeColor,
+      ));
+    } else {
+      ctx.shapes.add(SceneLine(
+        from: from,
+        to: Offset(from.dx, midY),
+        head: null,
+        stroke: _strokeColor,
+      ));
+      ctx.shapes.add(SceneLine(
+        from: Offset(from.dx, midY),
+        to: Offset(toCenterX, midY),
+        head: null,
+        stroke: _strokeColor,
+      ));
+      ctx.shapes.add(SceneLine(
+        from: Offset(toCenterX, midY),
+        to: Offset(toCenterX, toY),
+        head: ArrowHead.filled,
+        stroke: _strokeColor,
+      ));
+    }
+    if (label != null && label.isNotEmpty) {
+      final labelX = (from.dx < toCenterX)
+          ? from.dx + _branchLabelGap
+          : toCenterX + _branchLabelGap;
+      ctx.shapes.add(SceneText(
+        offset: Offset(labelX, midY - 12),
+        text: label,
+        textStyle: _branchLabelStyle,
+      ));
+    }
+  }
+
+  void _emitTail(
+    _LayoutContext ctx, {
+    required double fromCenterX,
+    required double fromY,
+    required Offset to,
+  }) {
+    final midY = (fromY + to.dy) / 2;
+    if ((fromCenterX - to.dx).abs() < 0.5) {
+      ctx.shapes.add(SceneLine(
+        from: Offset(fromCenterX, fromY),
+        to: to,
+        head: ArrowHead.filled,
+        stroke: _strokeColor,
+      ));
+    } else {
+      ctx.shapes.add(SceneLine(
+        from: Offset(fromCenterX, fromY),
+        to: Offset(fromCenterX, midY),
+        head: null,
+        stroke: _strokeColor,
+      ));
+      ctx.shapes.add(SceneLine(
+        from: Offset(fromCenterX, midY),
+        to: Offset(to.dx, midY),
+        head: null,
+        stroke: _strokeColor,
+      ));
+      ctx.shapes.add(SceneLine(
+        from: Offset(to.dx, midY),
+        to: to,
+        head: ArrowHead.filled,
+        stroke: _strokeColor,
+      ));
+    }
   }
 
   _Flow _layoutWhile(
@@ -488,15 +729,28 @@ class ActivityLayout implements DiagramLayout {
     double centerX,
     double topY,
   ) {
-    // For v1 we stack fork branches vertically rather than side-by-side,
-    // separated by thick bars.
-    final topBarY = topY;
-    final forkLeftPlaceholder = centerX - 60;
-    final forkRightPlaceholder = centerX + 60;
+    final branches = <_BranchSpec>[];
+    for (final br in block.branches) {
+      final size = _measureSubtree(br, ctx.measurer);
+      final w = math.max(_minBranchWidth, size.width);
+      branches.add(_BranchSpec(
+        body: br,
+        width: w,
+        height: size.height,
+        label: null,
+      ));
+    }
+
+    final branchCount = branches.length;
+    final totalBranchW = branches.fold<double>(0, (a, b) => a + b.width);
+    final span = totalBranchW +
+        _interBranchGap * math.max(0, branchCount - 1);
+    final spanLeft = centerX - span / 2;
+
     final topBarRect = Rect.fromLTWH(
-      forkLeftPlaceholder,
-      topBarY,
-      forkRightPlaceholder - forkLeftPlaceholder,
+      spanLeft,
+      topY,
+      span,
       _forkBarHeight,
     );
     ctx.shapes.add(SceneBox(
@@ -505,25 +759,39 @@ class ActivityLayout implements DiagramLayout {
       stroke: _strokeColor,
       textStyle: _actionStyle,
     ));
-    var y = topBarRect.bottom + _vGap;
+
+    final branchTopY = topBarRect.bottom + _vGap;
+    var maxBranchBottom = branchTopY;
     var minLeft = topBarRect.left;
     var maxRight = topBarRect.right;
-    for (final branch in block.branches) {
-      final flow = _layoutSequence(branch, ctx, centerX, y);
-      ctx.shapes.add(SceneLine(
-        from: Offset(centerX, y - _vGap),
-        to: Offset(centerX, flow.topY),
-        head: ArrowHead.filled,
-        stroke: _strokeColor,
-      ));
-      y = flow.bottomY + _vGap;
-      if (flow.left < minLeft) minLeft = flow.left;
-      if (flow.right > maxRight) maxRight = flow.right;
+
+    var cursor = spanLeft;
+    for (var i = 0; i < branchCount; i++) {
+      final br = branches[i];
+      final colLeft = cursor;
+      final colCenter = colLeft + br.width / 2;
+      cursor += br.width + _interBranchGap;
+
+      if (br.body.isNotEmpty) {
+        final flow =
+            _layoutSequence(br.body, ctx, colCenter, branchTopY);
+        _emitConnector(
+          ctx,
+          from: Offset(colCenter, topBarRect.bottom),
+          toCenterX: colCenter,
+          toY: flow.topY,
+        );
+        if (flow.bottomY > maxBranchBottom) maxBranchBottom = flow.bottomY;
+        if (flow.left < minLeft) minLeft = flow.left;
+        if (flow.right > maxRight) maxRight = flow.right;
+      }
     }
+
+    final bottomBarY = maxBranchBottom + _vGap;
     final bottomBarRect = Rect.fromLTWH(
-      minLeft - 8,
-      y,
-      maxRight - minLeft + 16,
+      spanLeft,
+      bottomBarY,
+      span,
       _forkBarHeight,
     );
     ctx.shapes.add(SceneBox(
@@ -532,19 +800,31 @@ class ActivityLayout implements DiagramLayout {
       stroke: _strokeColor,
       textStyle: _actionStyle,
     ));
-    ctx.shapes.add(SceneLine(
-      from: Offset(centerX, y - _vGap),
-      to: Offset(centerX, bottomBarRect.top),
-      head: ArrowHead.filled,
-      stroke: _strokeColor,
-    ));
+
+    cursor = spanLeft;
+    for (var i = 0; i < branchCount; i++) {
+      final br = branches[i];
+      final colLeft = cursor;
+      final colCenter = colLeft + br.width / 2;
+      cursor += br.width + _interBranchGap;
+
+      if (br.body.isEmpty) continue;
+      final lastBottomY = branchTopY + br.height;
+      _emitTail(
+        ctx,
+        fromCenterX: colCenter,
+        fromY: lastBottomY,
+        to: Offset(colCenter, bottomBarRect.top),
+      );
+    }
+
     return _Flow(
       topY: topY,
       bottomY: bottomBarRect.bottom,
       hasEntry: true,
       hasExit: true,
-      left: bottomBarRect.left,
-      right: bottomBarRect.right,
+      left: minLeft,
+      right: maxRight,
     );
   }
 
@@ -554,7 +834,6 @@ class ActivityLayout implements DiagramLayout {
     double centerX,
     double topY,
   ) {
-    // Reserve label space and lay out body inside; then emit a wrapping box.
     final innerTop = topY + _partitionLabelHeight + _partitionPadding;
     final innerStart = ctx.shapes.length;
     final flow = _layoutSequence(partition.body, ctx, centerX, innerTop);
@@ -611,5 +890,19 @@ class _Flow {
     required this.hasExit,
     required this.left,
     required this.right,
+  });
+}
+
+class _BranchSpec {
+  final List<ActivityNode> body;
+  final double width;
+  final double height;
+  final String? label;
+
+  const _BranchSpec({
+    required this.body,
+    required this.width,
+    required this.height,
+    required this.label,
   });
 }

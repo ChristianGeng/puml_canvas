@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0
+
+### Changed
+
+- Activity diagram `if` / `elseif` / `else` and `fork` blocks now route
+  their branches side-by-side instead of stacking them vertically on the
+  spine. Each branch occupies its own column laid out horizontally
+  (column width derived recursively from a `_measureSubtree` walk so
+  nested decisions expand their enclosing column), with three-segment
+  Manhattan connector arrows from the decision diamond (or top fork
+  bar) down into each column and matching tail arrows up into the
+  merge diamond (or bottom fork bar) below. The `yes` / `no` /
+  user-supplied condition labels render next to the horizontal segment
+  of each connector. `while` and `repeat` blocks keep their existing
+  vertical layout.
+
 ## 0.6.0
 
 ### Added
