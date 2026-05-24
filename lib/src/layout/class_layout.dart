@@ -3,6 +3,9 @@ import 'dart:math' as math;
 import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
+import '../graph_layout/edge_routing.dart';
+import '../graph_layout/graph.dart';
+import '../graph_layout/layered_layout.dart';
 import 'decoration_wrapper.dart';
 import 'layout.dart';
 import 'scene.dart';
@@ -79,6 +82,7 @@ class ClassLayout implements DiagramLayout {
   static const _privateColor = Color(0xFFC62828);
   static const _protectedColor = Color(0xFFEF6C00);
   static const _packageColor = Color(0xFF6A1B9A);
+  static const _edgeRouter = OrthogonalEdgeRouter();
 
   const ClassLayout();
 
@@ -105,8 +109,34 @@ class ClassLayout implements DiagramLayout {
       boxes[c.name] = _measureClass(c, measurer);
     }
 
-    final levels = _bfsLevels(diagram);
-    _assignPositions(boxes, levels);
+    final graphResult = const LayeredGraphLayout(
+      options: LayeredLayoutOptions(
+        padding: _padding,
+        nodeGap: _colGap,
+        layerGap: _rowGap,
+      ),
+    ).layout(LayoutGraph(
+      nodes: [
+        for (final box in boxes.values)
+          LayoutNode(
+            id: box.decl.name,
+            size: Size(box.width, box.height),
+          ),
+      ],
+      edges: [
+        for (final rel in diagram.relationships)
+          if (boxes.containsKey(rel.from) && boxes.containsKey(rel.to))
+            LayoutEdge(
+              from: rel.from,
+              to: rel.to,
+              directed: rel.kind != RelationshipKind.association &&
+                  rel.kind != RelationshipKind.link,
+            ),
+      ],
+    ));
+    for (final entry in graphResult.nodeRects.entries) {
+      boxes[entry.key]!.rect = entry.value;
+    }
 
     var width = 0.0;
     var height = 0.0;
@@ -127,8 +157,7 @@ class ClassLayout implements DiagramLayout {
           ny += rowMaxHeight + _rowGap;
           rowMaxHeight = 0.0;
         }
-        noteRects[note.alias] =
-            Rect.fromLTWH(nx, ny, size.width, size.height);
+        noteRects[note.alias] = Rect.fromLTWH(nx, ny, size.width, size.height);
         nx += size.width + _colGap;
         if (size.height > rowMaxHeight) rowMaxHeight = size.height;
       }
@@ -150,12 +179,31 @@ class ClassLayout implements DiagramLayout {
     final notesByAlias = <String, FreeNote>{
       for (final n in diagram.freeNotes) n.alias: n,
     };
+    final relationGroupSizes =
+        _relationGroupSizes(diagram.relationships, boxes);
+    final relationGroupSeen = <String, int>{};
+    final obstacleRects = boxes.values.map((box) => box.rect).toList();
 
     for (final rel in diagram.relationships) {
       final a = boxes[rel.from];
       final b = boxes[rel.to];
       if (a != null && b != null) {
-        _emitRelationship(shapes, rel, a, b, measurer);
+        final groupKey = _relationGroupKey(rel.from, rel.to);
+        final groupSize = relationGroupSizes[groupKey] ?? 1;
+        final groupIndex = relationGroupSeen[groupKey] ?? 0;
+        relationGroupSeen[groupKey] = groupIndex + 1;
+        _emitRelationship(
+          shapes,
+          rel,
+          a,
+          b,
+          measurer,
+          laneOffset: _laneOffset(groupIndex, groupSize),
+          obstacles: [
+            for (final rect in obstacleRects)
+              if (rect != a.rect && rect != b.rect) rect,
+          ],
+        );
         continue;
       }
       final fromIsNote = notesByAlias.containsKey(rel.from);
@@ -235,9 +283,8 @@ class ClassLayout implements DiagramLayout {
     final headerText =
         c.instanceOf == null ? baseName : '$baseName : ${c.instanceOf}';
     final nameSize = measurer.measure(headerText, headerStyle);
-    final stereotype = c.stereotype != null
-        ? '<<${c.stereotype}>>'
-        : _stereotype(c.kind);
+    final stereotype =
+        c.stereotype != null ? '<<${c.stereotype}>>' : _stereotype(c.kind);
     final stereotypeSize = stereotype == null
         ? Size.zero
         : measurer.measure(stereotype, _stereotypeStyle);
@@ -254,9 +301,8 @@ class ClassLayout implements DiagramLayout {
         (stereotype != null ? stereotypeSize.height + _stereotypeGap : 0) +
         nameSize.height +
         _classHeaderPaddingY;
-    final memberAreaHeight = memberLines.isEmpty
-        ? 0.0
-        : memberHeightSum + _memberPaddingY * 2;
+    final memberAreaHeight =
+        memberLines.isEmpty ? 0.0 : memberHeightSum + _memberPaddingY * 2;
     final width = math.max(
       _minClassWidth,
       math.max(
@@ -291,7 +337,8 @@ class ClassLayout implements DiagramLayout {
         final core = m.type == null ? m.name : '${m.name}: ${m.type}';
         final body = '$requiredPrefix$core$stereotypeSuffix';
         final style = m.isStatic ? _staticMemberStyle : _memberStyle;
-        final visSize = measurer.measure(visChar, style.copyWith(color: visColor));
+        final visSize =
+            measurer.measure(visChar, style.copyWith(color: visColor));
         final bodySize = measurer.measure(' $body', style);
         return _MemberLine(
           visibilityChar: visChar,
@@ -316,7 +363,8 @@ class ClassLayout implements DiagramLayout {
         } else {
           style = _memberStyle;
         }
-        final visSize = measurer.measure(visChar, style.copyWith(color: visColor));
+        final visSize =
+            measurer.measure(visChar, style.copyWith(color: visColor));
         final bodySize = measurer.measure(fullBody, style);
         return _MemberLine(
           visibilityChar: visChar,
@@ -362,105 +410,6 @@ class ClassLayout implements DiagramLayout {
           height: size.height,
           visWidth: 0.0,
         );
-    }
-  }
-
-  Map<String, int> _bfsLevels(ClassDiagram diagram) {
-    final names = diagram.classes.map((c) => c.name).toList();
-    final indexOf = <String, int>{
-      for (var i = 0; i < names.length; i++) names[i]: i,
-    };
-    final children = <String, List<String>>{
-      for (final n in names) n: <String>[],
-    };
-    final inDegree = <String, int>{
-      for (final n in names) n: 0,
-    };
-    for (final r in diagram.relationships) {
-      if (!indexOf.containsKey(r.from) || !indexOf.containsKey(r.to)) continue;
-      children[r.from]!.add(r.to);
-      children[r.to]!.add(r.from);
-      final isDirected = r.kind != RelationshipKind.association &&
-          r.kind != RelationshipKind.link;
-      if (isDirected) {
-        inDegree[r.to] = inDegree[r.to]! + 1;
-      }
-    }
-
-    final level = <String, int>{};
-    final roots = <String>[];
-    for (final n in names) {
-      if (inDegree[n]! == 0) roots.add(n);
-    }
-    if (roots.isEmpty && names.isNotEmpty) roots.add(names.first);
-
-    final queue = <String>[...roots];
-    for (final r in roots) {
-      level[r] = 0;
-    }
-    while (queue.isNotEmpty) {
-      final cur = queue.removeAt(0);
-      final lv = level[cur]!;
-      for (final n in children[cur]!) {
-        if (!level.containsKey(n)) {
-          level[n] = lv + 1;
-          queue.add(n);
-        }
-      }
-    }
-    for (final n in names) {
-      level.putIfAbsent(n, () => 0);
-    }
-    return level;
-  }
-
-  void _assignPositions(Map<String, _ClassBox> boxes, Map<String, int> levels) {
-    final byLevel = <int, List<String>>{};
-    for (final entry in levels.entries) {
-      byLevel.putIfAbsent(entry.value, () => <String>[]).add(entry.key);
-    }
-    final sortedLevels = byLevel.keys.toList()..sort();
-    var y = _padding;
-    for (final lv in sortedLevels) {
-      final names = byLevel[lv]!;
-      var rowHeight = 0.0;
-      for (final n in names) {
-        if (boxes[n]!.height > rowHeight) rowHeight = boxes[n]!.height;
-      }
-      var x = _padding;
-      // Center the row horizontally relative to the widest row
-      // (we just left-align for simplicity; final width is computed afterwards)
-      for (final n in names) {
-        final b = boxes[n]!;
-        b.rect = Rect.fromLTWH(x, y, b.width, b.height);
-        x += b.width + _colGap;
-      }
-      y += rowHeight + _rowGap;
-    }
-    // Center rows horizontally relative to the widest row.
-    var maxRowRight = 0.0;
-    for (final lv in sortedLevels) {
-      final names = byLevel[lv]!;
-      var rowRight = 0.0;
-      for (final n in names) {
-        if (boxes[n]!.rect.right > rowRight) rowRight = boxes[n]!.rect.right;
-      }
-      if (rowRight > maxRowRight) maxRowRight = rowRight;
-    }
-    for (final lv in sortedLevels) {
-      final names = byLevel[lv]!;
-      if (names.isEmpty) continue;
-      var rowRight = 0.0;
-      for (final n in names) {
-        if (boxes[n]!.rect.right > rowRight) rowRight = boxes[n]!.rect.right;
-      }
-      final dx = (maxRowRight - rowRight) / 2;
-      if (dx > 0) {
-        for (final n in names) {
-          final b = boxes[n]!;
-          b.rect = b.rect.translate(dx, 0);
-        }
-      }
     }
   }
 
@@ -538,33 +487,53 @@ class ClassLayout implements DiagramLayout {
     }
   }
 
+  Map<String, int> _relationGroupSizes(
+    List<Relationship> relationships,
+    Map<String, _ClassBox> boxes,
+  ) {
+    final result = <String, int>{};
+    for (final rel in relationships) {
+      if (!boxes.containsKey(rel.from) || !boxes.containsKey(rel.to)) {
+        continue;
+      }
+      final key = _relationGroupKey(rel.from, rel.to);
+      result[key] = (result[key] ?? 0) + 1;
+    }
+    return result;
+  }
+
+  String _relationGroupKey(String a, String b) {
+    return a.compareTo(b) <= 0 ? '$a\u0000$b' : '$b\u0000$a';
+  }
+
+  double _laneOffset(int index, int total) {
+    if (total <= 1) return 0.0;
+    return (index - (total - 1) / 2) * 14.0;
+  }
+
   void _emitRelationship(
     List<SceneShape> shapes,
     Relationship rel,
     _ClassBox a,
     _ClassBox b,
-    TextMeasurer measurer,
-  ) {
-    final fromCenter = a.rect.center;
-    final toCenter = b.rect.center;
-    final fromEdge = _edgePoint(a.rect, toCenter);
-    final toEdge = _edgePoint(b.rect, fromCenter);
+    TextMeasurer measurer, {
+    required double laneOffset,
+    required List<Rect> obstacles,
+  }) {
+    final path = _edgeRouter.route(
+      a.rect,
+      b.rect,
+      obstacles: obstacles,
+      laneOffset: laneOffset,
+    );
+    final fromEdge = path.first;
+    final toEdge = path.last;
     final hasCrow = rel.fromCrowFoot != null || rel.toCrowFoot != null;
     final style = _styleFor(rel.kind);
-    shapes.add(SceneLine(
-      from: fromEdge,
-      to: toEdge,
-      dashed: style.dashed,
-      head: hasCrow ? null : style.head,
-      headAtFrom: style.headAtFrom,
-      stroke: const Color(0xFF000000),
-      strokeWidth: 1.0,
-    ));
+    _emitEdgePath(shapes, path, style, suppressHead: hasCrow);
     if (rel.fromCrowFoot != null) {
-      final angle = math.atan2(
-        toEdge.dy - fromEdge.dy,
-        toEdge.dx - fromEdge.dx,
-      );
+      final next = path.length > 1 ? path[1] : toEdge;
+      final angle = math.atan2(next.dy - fromEdge.dy, next.dx - fromEdge.dx);
       shapes.add(SceneCrowFoot(
         position: fromEdge,
         angle: angle,
@@ -572,10 +541,8 @@ class ClassLayout implements DiagramLayout {
       ));
     }
     if (rel.toCrowFoot != null) {
-      final angle = math.atan2(
-        fromEdge.dy - toEdge.dy,
-        fromEdge.dx - toEdge.dx,
-      );
+      final prev = path.length > 1 ? path[path.length - 2] : fromEdge;
+      final angle = math.atan2(prev.dy - toEdge.dy, prev.dx - toEdge.dx);
       shapes.add(SceneCrowFoot(
         position: toEdge,
         angle: angle,
@@ -583,10 +550,7 @@ class ClassLayout implements DiagramLayout {
       ));
     }
     if (rel.label != null && rel.label!.isNotEmpty) {
-      final mid = Offset(
-        (fromEdge.dx + toEdge.dx) / 2,
-        (fromEdge.dy + toEdge.dy) / 2,
-      );
+      final mid = _pathMidpoint(path);
       final size = measurer.measure(rel.label!, _relationshipLabelStyle);
       shapes.add(SceneText(
         offset: Offset(mid.dx - size.width / 2, mid.dy - size.height - 2),
@@ -595,10 +559,9 @@ class ClassLayout implements DiagramLayout {
       ));
     }
     if (rel.fromMultiplicity != null) {
-      final size =
-          measurer.measure(rel.fromMultiplicity!, _multiplicityStyle);
+      final size = measurer.measure(rel.fromMultiplicity!, _multiplicityStyle);
       shapes.add(SceneText(
-        offset: _multiplicityOffset(fromEdge, toEdge, size, atFrom: true),
+        offset: _multiplicityOffset(path, size, atFrom: true),
         text: rel.fromMultiplicity!,
         textStyle: _multiplicityStyle,
       ));
@@ -606,21 +569,70 @@ class ClassLayout implements DiagramLayout {
     if (rel.toMultiplicity != null) {
       final size = measurer.measure(rel.toMultiplicity!, _multiplicityStyle);
       shapes.add(SceneText(
-        offset: _multiplicityOffset(fromEdge, toEdge, size, atFrom: false),
+        offset: _multiplicityOffset(path, size, atFrom: false),
         text: rel.toMultiplicity!,
         textStyle: _multiplicityStyle,
       ));
     }
   }
 
+  void _emitEdgePath(
+    List<SceneShape> shapes,
+    List<Offset> path,
+    _RelStyle style, {
+    required bool suppressHead,
+  }) {
+    if (path.length < 2) return;
+    for (var i = 0; i < path.length - 1; i++) {
+      final first = i == 0;
+      final last = i == path.length - 2;
+      final carriesHead = !suppressHead && (style.headAtFrom ? first : last);
+      shapes.add(SceneLine(
+        from: path[i],
+        to: path[i + 1],
+        dashed: style.dashed,
+        head: carriesHead ? style.head : null,
+        headAtFrom: carriesHead && style.headAtFrom,
+        stroke: const Color(0xFF000000),
+        strokeWidth: 1.0,
+      ));
+    }
+  }
+
+  Offset _pathMidpoint(List<Offset> path) {
+    if (path.length == 1) return path.single;
+    var total = 0.0;
+    for (var i = 0; i < path.length - 1; i++) {
+      total += (path[i + 1] - path[i]).distance;
+    }
+    if (total == 0) return path.first;
+    var walked = 0.0;
+    final target = total / 2;
+    for (var i = 0; i < path.length - 1; i++) {
+      final a = path[i];
+      final b = path[i + 1];
+      final segment = (b - a).distance;
+      if (walked + segment >= target) {
+        final t = (target - walked) / segment;
+        return Offset(
+          a.dx + (b.dx - a.dx) * t,
+          a.dy + (b.dy - a.dy) * t,
+        );
+      }
+      walked += segment;
+    }
+    return path.last;
+  }
+
   Offset _multiplicityOffset(
-    Offset fromEdge,
-    Offset toEdge,
+    List<Offset> path,
     Size size, {
     required bool atFrom,
   }) {
-    final anchor = atFrom ? fromEdge : toEdge;
-    final other = atFrom ? toEdge : fromEdge;
+    final anchor = atFrom ? path.first : path.last;
+    final other = atFrom
+        ? (path.length > 1 ? path[1] : path.first)
+        : (path.length > 1 ? path[path.length - 2] : path.last);
     final dx = other.dx - anchor.dx;
     final dy = other.dy - anchor.dy;
     final len = math.sqrt(dx * dx + dy * dy);

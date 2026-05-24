@@ -365,12 +365,15 @@ A "1" *-- "*" B : has
 
 #### Layout
 
-Class diagrams use a simple grid + BFS layered layout: each class becomes a
-yellow box; rows are filled by BFS level starting from classes with no
-incoming inheritance edge. Rows are centered horizontally, edges are drawn
-as straight lines between the nearest box edges. There is no edge routing,
-so dense diagrams may have crossing lines. A future release may swap in a
-Sugiyama-style layered layout.
+Class diagrams use the shared `graph_layout` layered layout: each class
+becomes a yellow box, directed relationships assign nodes to layers, and
+small barycenter ordering passes reduce crossings within neighboring
+layers. Rows are centered horizontally, and relationships use a lightweight
+orthogonal router that keeps aligned boxes as a single segment and routes
+offset boxes with dogleg segments. Parallel / reverse relationships are
+split into small lanes, and same-row edges can detour around boxes that sit
+between the endpoints. This is still a lightweight router, so very dense
+diagrams may still have crossing lines.
 
 ### Use case diagrams
 
@@ -940,7 +943,7 @@ caught by macOS-platform golden tests in `test/golden/`.
 
 ## Roadmap
 
-- [x] Class diagrams (basic grid + BFS layout; Sugiyama-style routing still TBD)
+- [x] Class diagrams (shared layered graph layout; lightweight orthogonal routing with lane separation)
 - [x] Use case diagrams (actors + ellipses + boundary rectangles)
 - [x] Activity diagrams (start/stop, action, if/while/repeat/fork, partition; v1 vertical-spine layout)
 - [x] State diagrams (pseudo-states, transitions, composite states, concurrent regions)

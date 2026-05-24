@@ -1,14 +1,113 @@
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:puml_canvas/puml_canvas.dart';
+import 'package:puml_canvas/src/graph_layout/edge_routing.dart';
+import 'package:puml_canvas/src/graph_layout/graph.dart';
+import 'package:puml_canvas/src/graph_layout/layered_layout.dart';
 
 class _FixedTextMeasurer implements TextMeasurer {
   @override
-  Size measure(String text, TextStyle style) =>
-      Size(text.length * 7.0, 14);
+  Size measure(String text, TextStyle style) => Size(text.length * 7.0, 14);
 }
 
 void main() {
+  group('LayeredGraphLayout', () {
+    test('places directed children on later layers', () {
+      const layout = LayeredGraphLayout();
+      final result = layout.layout(const LayoutGraph(
+        nodes: [
+          LayoutNode(id: 'A', size: Size(40, 20)),
+          LayoutNode(id: 'B', size: Size(40, 20)),
+          LayoutNode(id: 'C', size: Size(40, 20)),
+        ],
+        edges: [
+          LayoutEdge(from: 'A', to: 'B'),
+          LayoutEdge(from: 'B', to: 'C'),
+        ],
+      ));
+
+      expect(result.layers, [
+        ['A'],
+        ['B'],
+        ['C'],
+      ]);
+      expect(
+          result.nodeRects['B']!.top, greaterThan(result.nodeRects['A']!.top));
+      expect(
+          result.nodeRects['C']!.top, greaterThan(result.nodeRects['B']!.top));
+    });
+
+    test('supports left-to-right orientation', () {
+      const layout = LayeredGraphLayout(
+        options: LayeredLayoutOptions(
+          direction: LayoutDirection.leftToRight,
+        ),
+      );
+      final result = layout.layout(const LayoutGraph(
+        nodes: [
+          LayoutNode(id: 'A', size: Size(40, 20)),
+          LayoutNode(id: 'B', size: Size(40, 20)),
+        ],
+        edges: [
+          LayoutEdge(from: 'A', to: 'B'),
+        ],
+      ));
+
+      expect(result.nodeRects['B']!.left,
+          greaterThan(result.nodeRects['A']!.left));
+    });
+  });
+
+  group('OrthogonalEdgeRouter', () {
+    const router = OrthogonalEdgeRouter();
+
+    test('keeps vertically aligned boxes as a single segment', () {
+      final path = router.route(
+        const Rect.fromLTWH(20, 20, 40, 20),
+        const Rect.fromLTWH(20, 80, 40, 20),
+      );
+
+      expect(path, hasLength(2));
+      expect(path.first.dx, path.last.dx);
+    });
+
+    test('routes offset layered boxes through a dogleg', () {
+      final path = router.route(
+        const Rect.fromLTWH(20, 20, 40, 20),
+        const Rect.fromLTWH(100, 80, 40, 20),
+      );
+
+      expect(path, hasLength(4));
+      expect(path[0].dx, path[1].dx);
+      expect(path[1].dy, path[2].dy);
+      expect(path[2].dx, path[3].dx);
+    });
+
+    test('detours around horizontal corridor blockers', () {
+      final path = router.route(
+        const Rect.fromLTWH(0, 50, 20, 20),
+        const Rect.fromLTWH(100, 50, 20, 20),
+        obstacles: const [Rect.fromLTWH(50, 45, 20, 30)],
+      );
+
+      expect(path, hasLength(4));
+      expect(path[1].dy, isNot(path.first.dy));
+      expect(path[1].dy, path[2].dy);
+    });
+
+    test('separates parallel vertical edges with a lane offset', () {
+      final path = router.route(
+        const Rect.fromLTWH(20, 20, 40, 20),
+        const Rect.fromLTWH(20, 80, 40, 20),
+        laneOffset: 12,
+      );
+
+      expect(path, hasLength(4));
+      expect(path[1].dx, isNot(path.first.dx));
+      expect(path[1].dx, path[2].dx);
+    });
+  });
+
   group('SequenceLayout', () {
     const layout = SequenceLayout();
     final measurer = _FixedTextMeasurer();
@@ -36,8 +135,7 @@ void main() {
 
     test('scene size grows with participant count', () {
       final small = layout.layout(
-        const SequenceDiagram(
-            events: [Message(from: 'A', to: 'B')]),
+        const SequenceDiagram(events: [Message(from: 'A', to: 'B')]),
         measurer,
       );
       final big = layout.layout(
@@ -181,10 +279,8 @@ void main() {
           .whereType<SceneBox>()
           .where((b) => b.rect.top < scene.size.height / 2)
           .toList();
-      final cxA =
-          boxes.firstWhere((b) => b.label == 'A').rect.center.dx;
-      final cxB =
-          boxes.firstWhere((b) => b.label == 'B').rect.center.dx;
+      final cxA = boxes.firstWhere((b) => b.label == 'A').rect.center.dx;
+      final cxB = boxes.firstWhere((b) => b.label == 'B').rect.center.dx;
       expect(note.rect.left, lessThanOrEqualTo(cxA));
       expect(note.rect.right, greaterThanOrEqualTo(cxB));
     });
@@ -212,16 +308,8 @@ void main() {
           .whereType<SceneBox>()
           .where((b) => b.label == 'A' || b.label == 'B')
           .toList();
-      final cxA = actorBoxes
-          .firstWhere((b) => b.label == 'A')
-          .rect
-          .center
-          .dx;
-      final cxB = actorBoxes
-          .firstWhere((b) => b.label == 'B')
-          .rect
-          .center
-          .dx;
+      final cxA = actorBoxes.firstWhere((b) => b.label == 'A').rect.center.dx;
+      final cxB = actorBoxes.firstWhere((b) => b.label == 'B').rect.center.dx;
       final outer = scene.shapes
           .whereType<SceneBox>()
           .where((b) =>
@@ -274,10 +362,8 @@ void main() {
           Group(
             kind: GroupKind.alt,
             branches: [
-              GroupBranch(
-                  label: 'ok', events: [Message(from: 'A', to: 'B')]),
-              GroupBranch(
-                  label: 'fail', events: [Message(from: 'A', to: 'B')]),
+              GroupBranch(label: 'ok', events: [Message(from: 'A', to: 'B')]),
+              GroupBranch(label: 'fail', events: [Message(from: 'A', to: 'B')]),
             ],
           ),
         ]),
@@ -408,9 +494,8 @@ void main() {
     });
 
     group('arrow variants', () {
-      SceneLine messageLine(Scene scene) => scene.shapes
-          .whereType<SceneLine>()
-          .firstWhere((l) => l.head != null);
+      SceneLine messageLine(Scene scene) =>
+          scene.shapes.whereType<SceneLine>().firstWhere((l) => l.head != null);
 
       test('default forward message has filled head at "to" end', () {
         final scene = layout.layout(
@@ -453,10 +538,7 @@ void main() {
       test('backward direction sets headAtFrom=true', () {
         final scene = layout.layout(
           const SequenceDiagram(events: [
-            Message(
-                from: 'A',
-                to: 'B',
-                direction: MessageDirection.backward),
+            Message(from: 'A', to: 'B', direction: MessageDirection.backward),
           ]),
           measurer,
         );
@@ -664,7 +746,8 @@ void main() {
                 b.rect.top <= topActorBox.rect.top)
             .toList();
         expect(boxRects, hasLength(1));
-        expect(boxRects.single.rect.bottom, greaterThan(topActorBox.rect.bottom));
+        expect(
+            boxRects.single.rect.bottom, greaterThan(topActorBox.rect.bottom));
 
         final labelTexts = scene.shapes
             .whereType<SceneText>()
@@ -712,8 +795,8 @@ void main() {
           ),
           measurer,
         );
-        final firstActorIndex = scene.shapes.indexWhere(
-            (s) => s is SceneBox && s.label == 'A');
+        final firstActorIndex =
+            scene.shapes.indexWhere((s) => s is SceneBox && s.label == 'A');
         final boxIndex = scene.shapes.indexWhere(
             (s) => s is SceneBox && s.label == null && s.rect.height > 20);
         expect(boxIndex, greaterThanOrEqualTo(0));
@@ -1116,13 +1199,11 @@ void main() {
 
     test('AutoLayout dispatches SequenceDiagram to SequenceLayout', () {
       final auto = const AutoLayout().layout(
-        const SequenceDiagram(
-            events: [Message(from: 'A', to: 'B')]),
+        const SequenceDiagram(events: [Message(from: 'A', to: 'B')]),
         measurer,
       );
       final direct = layout.layout(
-        const SequenceDiagram(
-            events: [Message(from: 'A', to: 'B')]),
+        const SequenceDiagram(events: [Message(from: 'A', to: 'B')]),
         measurer,
       );
       expect(auto.size, direct.size);
@@ -1366,19 +1447,19 @@ void main() {
         outers.add(b.rect);
       }
       // Walk through pairs and ensure no two outer-class boxes overlap.
-      final classOuters = boxes
-          .where((b) => b.label == null)
-          .map((b) => b.rect)
-          .toList();
+      final classOuters =
+          boxes.where((b) => b.label == null).map((b) => b.rect).toList();
       for (var i = 0; i < classOuters.length; i++) {
         for (var j = i + 1; j < classOuters.length; j++) {
           if (classOuters[i] == classOuters[j]) continue;
           // Either disjoint or one fully contains the other (header in body)
           if (classOuters[i].overlaps(classOuters[j])) {
-            final iContainsJ = classOuters[i].contains(classOuters[j].topLeft) &&
-                classOuters[i].contains(classOuters[j].bottomRight);
-            final jContainsI = classOuters[j].contains(classOuters[i].topLeft) &&
-                classOuters[j].contains(classOuters[i].bottomRight);
+            final iContainsJ =
+                classOuters[i].contains(classOuters[j].topLeft) &&
+                    classOuters[i].contains(classOuters[j].bottomRight);
+            final jContainsI =
+                classOuters[j].contains(classOuters[i].topLeft) &&
+                    classOuters[j].contains(classOuters[i].bottomRight);
             expect(iContainsJ || jContainsI, isTrue,
                 reason:
                     'class rectangles overlap: ${classOuters[i]} vs ${classOuters[j]}');
@@ -1461,6 +1542,55 @@ void main() {
       );
       final line = scene.shapes.whereType<SceneLine>().single;
       expect(line.dashed, isTrue);
+    });
+
+    test('offset relationship emits orthogonal routed segments', () {
+      final scene = layout.layout(
+        const ClassDiagram(
+          classes: [
+            ClassDecl(name: 'A'),
+            ClassDecl(name: 'B'),
+            ClassDecl(name: 'C'),
+          ],
+          relationships: [
+            Relationship(
+              from: 'A',
+              to: 'C',
+              kind: RelationshipKind.directedAssociation,
+            ),
+          ],
+        ),
+        measurer,
+      );
+      final lines = scene.shapes.whereType<SceneLine>().toList();
+      expect(lines.length, greaterThan(1));
+      expect(lines.where((line) => line.head == ArrowHead.open), hasLength(1));
+      expect(lines.last.head, ArrowHead.open);
+    });
+
+    test('reverse relationships are separated into distinct lanes', () {
+      final scene = layout.layout(
+        const ClassDiagram(
+          classes: [ClassDecl(name: 'A'), ClassDecl(name: 'B')],
+          relationships: [
+            Relationship(
+              from: 'A',
+              to: 'B',
+              kind: RelationshipKind.directedAssociation,
+            ),
+            Relationship(
+              from: 'B',
+              to: 'A',
+              kind: RelationshipKind.directedAssociation,
+            ),
+          ],
+        ),
+        measurer,
+      );
+      final lines = scene.shapes.whereType<SceneLine>().toList();
+      expect(lines.where((line) => line.head == ArrowHead.open), hasLength(2));
+      expect(lines.length, greaterThan(2));
+      expect(lines.first.to.dx, isNot(lines[3].to.dx));
     });
 
     test('object emits outer box + header box + underlined name text', () {
@@ -1581,10 +1711,8 @@ void main() {
         ]),
         measurer,
       );
-      final bodyTexts = scene.shapes
-          .whereType<SceneText>()
-          .map((t) => t.text)
-          .toList();
+      final bodyTexts =
+          scene.shapes.whereType<SceneText>().map((t) => t.text).toList();
       expect(bodyTexts.any((t) => t.contains('* id: int <<PK>>')), isTrue);
     });
 
@@ -1595,10 +1723,8 @@ void main() {
         ]),
         measurer,
       );
-      final texts = scene.shapes
-          .whereType<SceneText>()
-          .map((t) => t.text)
-          .toList();
+      final texts =
+          scene.shapes.whereType<SceneText>().map((t) => t.text).toList();
       expect(texts, contains('<<Aggregate>>'));
       expect(texts, contains('Order'));
     });
@@ -1610,10 +1736,8 @@ void main() {
         ]),
         measurer,
       );
-      final texts = scene.shapes
-          .whereType<SceneText>()
-          .map((t) => t.text)
-          .toList();
+      final texts =
+          scene.shapes.whereType<SceneText>().map((t) => t.text).toList();
       expect(texts, contains('AggregateRoot<ID>'));
     });
 
@@ -1624,10 +1748,8 @@ void main() {
         ]),
         measurer,
       );
-      final texts = scene.shapes
-          .whereType<SceneText>()
-          .map((t) => t.text)
-          .toList();
+      final texts =
+          scene.shapes.whereType<SceneText>().map((t) => t.text).toList();
       expect(texts, contains('<<record>>'));
     });
 
@@ -1637,8 +1759,7 @@ void main() {
           classes: [ClassDecl(name: 'Foo')],
           freeNotes: [FreeNote(alias: 'N1', text: 'hello')],
           relationships: [
-            Relationship(
-                from: 'N1', to: 'Foo', kind: RelationshipKind.link),
+            Relationship(from: 'N1', to: 'Foo', kind: RelationshipKind.link),
           ],
         ),
         measurer,
@@ -1718,8 +1839,7 @@ void main() {
                 alias: 'UC2', label: 'B', kind: UseCaseNodeKind.useCase),
           ],
           boundaries: [
-            UseCaseBoundary(
-                label: 'System', containedAliases: ['UC1', 'UC2']),
+            UseCaseBoundary(label: 'System', containedAliases: ['UC1', 'UC2']),
           ],
         ),
         measurer,
@@ -1759,10 +1879,8 @@ void main() {
       final scene = layout.layout(
         const UseCaseDiagram(
           nodes: [
-            UseCaseNode(
-                alias: 'A', label: 'A', kind: UseCaseNodeKind.useCase),
-            UseCaseNode(
-                alias: 'B', label: 'B', kind: UseCaseNodeKind.useCase),
+            UseCaseNode(alias: 'A', label: 'A', kind: UseCaseNodeKind.useCase),
+            UseCaseNode(alias: 'B', label: 'B', kind: UseCaseNodeKind.useCase),
           ],
           relations: [
             UseCaseRelation(
@@ -1789,17 +1907,13 @@ void main() {
             UseCaseNode(
                 alias: 'Admin', label: 'Admin', kind: UseCaseNodeKind.actor),
             UseCaseNode(
-                alias: 'UC1',
-                label: 'Browse',
-                kind: UseCaseNodeKind.useCase),
+                alias: 'UC1', label: 'Browse', kind: UseCaseNodeKind.useCase),
             UseCaseNode(
                 alias: 'UC2',
                 label: 'Place Order',
                 kind: UseCaseNodeKind.useCase),
             UseCaseNode(
-                alias: 'UC3',
-                label: 'Manage',
-                kind: UseCaseNodeKind.useCase),
+                alias: 'UC3', label: 'Manage', kind: UseCaseNodeKind.useCase),
             UseCaseNode(
                 alias: 'UC4', label: 'Login', kind: UseCaseNodeKind.useCase),
           ],
@@ -1893,10 +2007,8 @@ void main() {
       );
       final boxes = scene.shapes.whereType<SceneRoundedBox>().toList();
       expect(boxes, hasLength(2));
-      final thenBox =
-          boxes.firstWhere((b) => b.label == 'Yes path');
-      final elseBox =
-          boxes.firstWhere((b) => b.label == 'No path');
+      final thenBox = boxes.firstWhere((b) => b.label == 'Yes path');
+      final elseBox = boxes.firstWhere((b) => b.label == 'No path');
       expect(thenBox.rect.left, lessThan(elseBox.rect.left));
       expect(
         (thenBox.rect.top - elseBox.rect.top).abs() < 1,
@@ -2196,10 +2308,8 @@ void main() {
         ),
         measurer,
       );
-      final ringed = scene.shapes
-          .whereType<SceneCircle>()
-          .where((c) => c.ring)
-          .toList();
+      final ringed =
+          scene.shapes.whereType<SceneCircle>().where((c) => c.ring).toList();
       expect(ringed, hasLength(1));
     });
 
@@ -2258,10 +2368,8 @@ void main() {
         ),
         measurer,
       );
-      final dashed = scene.shapes
-          .whereType<SceneLine>()
-          .where((l) => l.dashed)
-          .toList();
+      final dashed =
+          scene.shapes.whereType<SceneLine>().where((l) => l.dashed).toList();
       expect(dashed, hasLength(1));
     });
 
@@ -2363,8 +2471,10 @@ void main() {
         ),
         measurer,
       );
-      final lines =
-          scene.shapes.whereType<SceneLine>().where((l) => l.head == null).toList();
+      final lines = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head == null)
+          .toList();
       expect(lines.length, greaterThanOrEqualTo(3));
     });
 
@@ -2415,9 +2525,7 @@ void main() {
         const ComponentDiagram(
           nodes: [
             ComponentNode(
-                alias: 'I',
-                label: 'Inside',
-                kind: ComponentNodeKind.component),
+                alias: 'I', label: 'Inside', kind: ComponentNodeKind.component),
           ],
           containers: [
             ComponentContainer(
@@ -2436,7 +2544,8 @@ void main() {
         measurer,
       );
       final texts = scene.shapes.whereType<SceneText>().toList();
-      expect(texts.map((t) => t.text), containsAll(['Outer', 'Inner', 'Inside']));
+      expect(
+          texts.map((t) => t.text), containsAll(['Outer', 'Inner', 'Inside']));
     });
 
     test('relation emits a SceneLine with arrow head', () {
@@ -2454,8 +2563,10 @@ void main() {
         ),
         measurer,
       );
-      final lines =
-          scene.shapes.whereType<SceneLine>().where((l) => l.head != null).toList();
+      final lines = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head != null)
+          .toList();
       expect(lines, hasLength(1));
       expect(lines.single.head, ArrowHead.open);
     });
@@ -2555,8 +2666,8 @@ void main() {
       final lines = scene.shapes.whereType<SceneLine>().toList();
       final headed = lines.where((l) => l.head != null).toList();
       expect(headed, hasLength(1));
-      expect(lines.where((l) => l.head == null).length,
-          greaterThanOrEqualTo(2));
+      expect(
+          lines.where((l) => l.head == null).length, greaterThanOrEqualTo(2));
     });
 
     test('checkout sample parses, lays out, and renders all 5 relations', () {
@@ -2754,10 +2865,8 @@ void main() {
             text: 'Root',
             depth: 1,
             children: [
-              MindmapNode(
-                  text: 'R', depth: 2, side: MindmapSide.right),
-              MindmapNode(
-                  text: 'L', depth: 2, side: MindmapSide.left),
+              MindmapNode(text: 'R', depth: 2, side: MindmapSide.right),
+              MindmapNode(text: 'L', depth: 2, side: MindmapSide.left),
             ],
           ),
         ),
@@ -2917,10 +3026,9 @@ void main() {
         const DataDiagram(
           format: DataFormat.json,
           root: DataObject([
-            MapEntry('name',
-                DataScalar(value: 'Alice', kind: ScalarKind.string)),
-            MapEntry('age',
-                DataScalar(value: '30', kind: ScalarKind.number)),
+            MapEntry(
+                'name', DataScalar(value: 'Alice', kind: ScalarKind.string)),
+            MapEntry('age', DataScalar(value: '30', kind: ScalarKind.number)),
           ]),
         ),
         measurer,
@@ -2963,15 +3071,13 @@ void main() {
       expect(outerBoxes, hasLength(2));
       final dots = scene.shapes.whereType<SceneCircle>().toList();
       expect(dots, hasLength(1));
-      final dashed = scene.shapes
-          .whereType<SceneLine>()
-          .where((l) => l.dashed)
-          .toList();
+      final dashed =
+          scene.shapes.whereType<SceneLine>().where((l) => l.dashed).toList();
       expect(dashed, hasLength(1));
-      final parent = outerBoxes
-          .firstWhere((b) => b.rect.left < outerBoxes[1].rect.left);
-      final child = outerBoxes
-          .firstWhere((b) => b.rect.left > parent.rect.left);
+      final parent =
+          outerBoxes.firstWhere((b) => b.rect.left < outerBoxes[1].rect.left);
+      final child =
+          outerBoxes.firstWhere((b) => b.rect.left > parent.rect.left);
       expect(child.rect.left, greaterThan(parent.rect.right));
     });
 
@@ -2987,8 +3093,8 @@ void main() {
                   'b',
                   DataArray([
                     DataObject([
-                      MapEntry('c',
-                          DataScalar(value: '1', kind: ScalarKind.number)),
+                      MapEntry(
+                          'c', DataScalar(value: '1', kind: ScalarKind.number)),
                     ]),
                   ]),
                 ),
@@ -3003,10 +3109,8 @@ void main() {
           .where((b) => b.strokeWidth > 0)
           .toList();
       expect(outerBoxes, hasLength(4));
-      final dashed = scene.shapes
-          .whereType<SceneLine>()
-          .where((l) => l.dashed)
-          .toList();
+      final dashed =
+          scene.shapes.whereType<SceneLine>().where((l) => l.dashed).toList();
       expect(dashed, hasLength(3));
       final dots = scene.shapes.whereType<SceneCircle>().toList();
       expect(dots, hasLength(3));
@@ -3036,14 +3140,10 @@ void main() {
         const DataDiagram(
           format: DataFormat.json,
           root: DataObject([
-            MapEntry('s',
-                DataScalar(value: 'x', kind: ScalarKind.string)),
-            MapEntry('n',
-                DataScalar(value: '1', kind: ScalarKind.number)),
-            MapEntry('b',
-                DataScalar(value: 'true', kind: ScalarKind.boolean)),
-            MapEntry('z',
-                DataScalar(value: 'null', kind: ScalarKind.null_)),
+            MapEntry('s', DataScalar(value: 'x', kind: ScalarKind.string)),
+            MapEntry('n', DataScalar(value: '1', kind: ScalarKind.number)),
+            MapEntry('b', DataScalar(value: 'true', kind: ScalarKind.boolean)),
+            MapEntry('z', DataScalar(value: 'null', kind: ScalarKind.null_)),
           ]),
         ),
         measurer,
@@ -3208,7 +3308,8 @@ void main() {
         ]),
         measurer,
       );
-      expect(scene.shapes.whereType<SceneLine>().length, greaterThanOrEqualTo(1));
+      expect(
+          scene.shapes.whereType<SceneLine>().length, greaterThanOrEqualTo(1));
       final texts = scene.shapes.whereType<SceneText>().toList();
       expect(texts.any((t) => t.text == 'Phase 1'), isTrue);
     });
