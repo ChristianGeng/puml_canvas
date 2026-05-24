@@ -33,3 +33,6 @@ migrate_working_dir/
 
 # Tooling-local state
 .claude/
+
+# flutter_test golden-diff artifacts
+test/failures/
