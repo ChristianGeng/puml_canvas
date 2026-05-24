@@ -1180,6 +1180,18 @@ class Parser {
     if (_isKeyword('partition')) {
       return _parsePartition();
     }
+    if (_isKeyword('detach')) {
+      _advance();
+      return const Detach();
+    }
+    if (_isKeyword('break')) {
+      _advance();
+      return const Break();
+    }
+    if (_isKeyword('kill')) {
+      _advance();
+      return const Kill();
+    }
     if (_isKeyword('note')) {
       // Skip standalone activity notes for now (parser robustness).
       _skipUntilNewline();
@@ -1324,6 +1336,8 @@ class Parser {
     final body = _parseActivityBlock(
         () => _isKeyword('repeat') && _peekAhead(1, 'while'));
     String? whileCondition;
+    String? isLabel;
+    String? notLabel;
     if (_isKeyword('repeat') && _peekAhead(1, 'while')) {
       _advance();
       _advance();
@@ -1334,10 +1348,35 @@ class Parser {
         }
         if (_check(TokenType.rightParen)) _advance();
       }
+      for (var i = 0; i < 2; i++) {
+        if (_isKeyword('is') && isLabel == null) {
+          _advance();
+          if (_check(TokenType.leftParen)) {
+            _advance();
+            if (_check(TokenType.text)) {
+              isLabel = _advance().lexeme;
+            }
+            if (_check(TokenType.rightParen)) _advance();
+          }
+        } else if (_isKeyword('not') && notLabel == null) {
+          _advance();
+          if (_check(TokenType.leftParen)) {
+            _advance();
+            if (_check(TokenType.text)) {
+              notLabel = _advance().lexeme;
+            }
+            if (_check(TokenType.rightParen)) _advance();
+          }
+        } else {
+          break;
+        }
+      }
     }
     return RepeatBlock(
       body: List.unmodifiable(body),
       whileCondition: whileCondition,
+      isLabel: isLabel,
+      notLabel: notLabel,
     );
   }
 

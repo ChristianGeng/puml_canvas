@@ -1913,6 +1913,54 @@ void main() {
       expect((r.body.single as Action).text, 'Task');
     });
 
+    test('parses repeat while with is (label) modifier', () {
+      final d = parseActivity('@startuml\n'
+          'repeat\n'
+          '  :Task;\n'
+          'repeat while (c) is (yes)\n'
+          '@enduml\n');
+      final r = d.nodes.single as RepeatBlock;
+      expect(r.whileCondition, 'c');
+      expect(r.isLabel, 'yes');
+      expect(r.notLabel, isNull);
+    });
+
+    test('parses repeat while with is and not label modifiers', () {
+      final d = parseActivity('@startuml\n'
+          'repeat\n'
+          '  :Task;\n'
+          'repeat while (c) is (yes) not (no)\n'
+          '@enduml\n');
+      final r = d.nodes.single as RepeatBlock;
+      expect(r.whileCondition, 'c');
+      expect(r.isLabel, 'yes');
+      expect(r.notLabel, 'no');
+    });
+
+    test('parses repeat while with only not (label) modifier', () {
+      final d = parseActivity('@startuml\n'
+          'repeat\n'
+          '  :Task;\n'
+          'repeat while (c) not (no)\n'
+          '@enduml\n');
+      final r = d.nodes.single as RepeatBlock;
+      expect(r.whileCondition, 'c');
+      expect(r.isLabel, isNull);
+      expect(r.notLabel, 'no');
+    });
+
+    test('parses while (c) is (yes) ... endwhile (no)', () {
+      final d = parseActivity('@startuml\n'
+          'while (c) is (yes)\n'
+          '  :Step;\n'
+          'endwhile (no)\n'
+          '@enduml\n');
+      final w = d.nodes.single as WhileBlock;
+      expect(w.condition, 'c');
+      expect(w.isLabel, 'yes');
+      expect(w.endLabel, 'no');
+    });
+
     test('parses fork/fork again/end fork', () {
       final d = parseActivity('@startuml\n'
           'fork\n'
@@ -1968,6 +2016,56 @@ void main() {
       expect(d.nodes[4], isA<ForkBlock>());
       expect(d.nodes[5], isA<Action>());
       expect(d.nodes[6], isA<StopNode>());
+    });
+
+    test('parses detach terminator after an action', () {
+      final d = parseActivity('@startuml\n'
+          'start\n'
+          ':Do something;\n'
+          'detach\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(3));
+      expect(d.nodes[0], isA<StartNode>());
+      expect(d.nodes[1], isA<Action>());
+      expect(d.nodes[2], isA<Detach>());
+    });
+
+    test('parses break terminator inside a loop body', () {
+      final d = parseActivity('@startuml\n'
+          'while (cond?) is (yes)\n'
+          '  :Step;\n'
+          '  break\n'
+          'endwhile (no)\n'
+          '@enduml\n');
+      final w = d.nodes.single as WhileBlock;
+      expect(w.body, hasLength(2));
+      expect(w.body[0], isA<Action>());
+      expect(w.body[1], isA<Break>());
+    });
+
+    test('parses kill terminator after an action', () {
+      final d = parseActivity('@startuml\n'
+          'start\n'
+          ':Do something;\n'
+          'kill\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(3));
+      expect(d.nodes[2], isA<Kill>());
+    });
+
+    test('parses detach inside an if branch', () {
+      final d = parseActivity('@startuml\n'
+          'if (dup?) then (yes)\n'
+          '  :Attach;\n'
+          '  detach\n'
+          'else (no)\n'
+          '  :Create;\n'
+          'endif\n'
+          '@enduml\n');
+      final ifBlock = d.nodes.single as IfBlock;
+      expect(ifBlock.branches.single.body, hasLength(2));
+      expect(ifBlock.branches.single.body[1], isA<Detach>());
+      expect(ifBlock.elseBody.single, isA<Action>());
     });
   });
 

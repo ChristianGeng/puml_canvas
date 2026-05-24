@@ -27,6 +27,7 @@ class ActivityLayout implements DiagramLayout {
   static const _minBranchWidth = 100.0;
   static const _interBranchGap = 30.0;
   static const _mergeDiamondSize = 24.0;
+  static const _killSize = 14.0;
 
   static const _actionStyle = TextStyle(
     color: Color(0xFF000000),
@@ -199,6 +200,11 @@ class ActivityLayout implements DiagramLayout {
         return _layoutFork(node, ctx, centerX, topY);
       case Partition():
         return _layoutPartition(node, ctx, centerX, topY);
+      case Detach():
+      case Break():
+        return _layoutSilentTerminator(ctx, centerX, topY);
+      case Kill():
+        return _layoutKill(ctx, centerX, topY);
     }
   }
 
@@ -249,6 +255,11 @@ class ActivityLayout implements DiagramLayout {
             _partitionLabelHeight +
             _partitionPadding * 2;
         return Size(w, h);
+      case Detach():
+      case Break():
+        return Size.zero;
+      case Kill():
+        return const Size(_killSize, _killSize);
     }
   }
 
@@ -351,6 +362,50 @@ class ActivityLayout implements DiagramLayout {
       hasExit: node is StartNode,
       left: center.dx - _startStopRadius,
       right: center.dx + _startStopRadius,
+    );
+  }
+
+  _Flow _layoutSilentTerminator(
+    _LayoutContext ctx,
+    double centerX,
+    double topY,
+  ) {
+    return _Flow(
+      topY: topY,
+      bottomY: topY,
+      hasEntry: false,
+      hasExit: false,
+      left: centerX,
+      right: centerX,
+    );
+  }
+
+  _Flow _layoutKill(
+    _LayoutContext ctx,
+    double centerX,
+    double topY,
+  ) {
+    final half = _killSize / 2;
+    final center = Offset(centerX, topY + half);
+    ctx.shapes.add(SceneLine(
+      from: Offset(center.dx - half, center.dy - half),
+      to: Offset(center.dx + half, center.dy + half),
+      head: null,
+      stroke: _strokeColor,
+    ));
+    ctx.shapes.add(SceneLine(
+      from: Offset(center.dx + half, center.dy - half),
+      to: Offset(center.dx - half, center.dy + half),
+      head: null,
+      stroke: _strokeColor,
+    ));
+    return _Flow(
+      topY: topY,
+      bottomY: topY + _killSize,
+      hasEntry: true,
+      hasExit: false,
+      left: center.dx - half,
+      right: center.dx + half,
     );
   }
 
@@ -463,6 +518,7 @@ class ActivityLayout implements DiagramLayout {
           toY: flow.topY,
           label: br.label,
         );
+        br.exits = flow.hasExit;
         if (flow.bottomY > maxBranchBottom) maxBranchBottom = flow.bottomY;
         if (flow.left < minLeft) minLeft = flow.left;
         if (flow.right > maxRight) maxRight = flow.right;
@@ -501,6 +557,7 @@ class ActivityLayout implements DiagramLayout {
       cursor += br.width + _interBranchGap;
 
       if (br.body.isEmpty) continue;
+      if (!br.exits) continue;
       final lastBottomY = branchTopY + br.height;
       _emitTail(
         ctx,
@@ -707,12 +764,34 @@ class ActivityLayout implements DiagramLayout {
       fill: _diamondFill,
       stroke: _strokeColor,
     ));
-    ctx.shapes.add(SceneLine(
-      from: Offset(centerX, flow.bottomY),
-      to: Offset(centerX, whileRect.top),
-      head: ArrowHead.filled,
-      stroke: _strokeColor,
-    ));
+    if (block.body.isEmpty || flow.hasExit) {
+      ctx.shapes.add(SceneLine(
+        from: Offset(centerX, flow.bottomY),
+        to: Offset(centerX, whileRect.top),
+        head: ArrowHead.filled,
+        stroke: _strokeColor,
+      ));
+    }
+    if (block.isLabel != null && block.isLabel!.isNotEmpty) {
+      ctx.shapes.add(SceneText(
+        offset: Offset(
+          whileRect.right + _branchLabelGap,
+          whileRect.center.dy - 6,
+        ),
+        text: block.isLabel!,
+        textStyle: _branchLabelStyle,
+      ));
+    }
+    if (block.notLabel != null && block.notLabel!.isNotEmpty) {
+      ctx.shapes.add(SceneText(
+        offset: Offset(
+          centerX + _branchLabelGap,
+          whileRect.bottom + 2,
+        ),
+        text: block.notLabel!,
+        textStyle: _branchLabelStyle,
+      ));
+    }
     return _Flow(
       topY: topY,
       bottomY: whileRect.bottom,
@@ -781,6 +860,7 @@ class ActivityLayout implements DiagramLayout {
           toCenterX: colCenter,
           toY: flow.topY,
         );
+        br.exits = flow.hasExit;
         if (flow.bottomY > maxBranchBottom) maxBranchBottom = flow.bottomY;
         if (flow.left < minLeft) minLeft = flow.left;
         if (flow.right > maxRight) maxRight = flow.right;
@@ -809,6 +889,7 @@ class ActivityLayout implements DiagramLayout {
       cursor += br.width + _interBranchGap;
 
       if (br.body.isEmpty) continue;
+      if (!br.exits) continue;
       final lastBottomY = branchTopY + br.height;
       _emitTail(
         ctx,
@@ -898,8 +979,9 @@ class _BranchSpec {
   final double width;
   final double height;
   final String? label;
+  bool exits = true;
 
-  const _BranchSpec({
+  _BranchSpec({
     required this.body,
     required this.width,
     required this.height,

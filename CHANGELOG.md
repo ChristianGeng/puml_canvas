@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.2
+
+### Fixed
+
+- Activity diagram now accepts `detach`, `break`, and `kill` terminator
+  keywords (previously the parser rejected them as `Unexpected token in
+  activity diagram`).
+- Activity diagram `while` and `repeat while` loops now accept the
+  PlantUML `is (label)` (yes-edge) and `not (label)` (no-edge / repeat
+  exit) modifiers, e.g. `repeat while (cond) is (yes) not (no)`. Labels
+  render as small italic text next to the corresponding loop arrows.
+
 ## 0.7.1
 
 ### Fixed

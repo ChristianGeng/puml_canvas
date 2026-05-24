@@ -617,10 +617,14 @@ class WhileBlock extends ActivityNode {
 class RepeatBlock extends ActivityNode {
   final List<ActivityNode> body;
   final String? whileCondition;
+  final String? isLabel;
+  final String? notLabel;
 
   const RepeatBlock({
     this.body = const [],
     this.whileCondition,
+    this.isLabel,
+    this.notLabel,
   });
 }
 
@@ -635,6 +639,18 @@ class Partition extends ActivityNode {
   final List<ActivityNode> body;
 
   const Partition({required this.name, this.body = const []});
+}
+
+class Detach extends ActivityNode {
+  const Detach();
+}
+
+class Break extends ActivityNode {
+  const Break();
+}
+
+class Kill extends ActivityNode {
+  const Kill();
 }
 
 class StateDiagram extends Diagram {

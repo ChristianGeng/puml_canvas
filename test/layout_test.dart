@@ -1955,6 +1955,124 @@ void main() {
         expect(l.head, isNotNull);
       }
     });
+
+    test('sequence ending in detach produces no trailing arrow', () {
+      final withDetach = layout.layout(
+        const ActivityDiagram(nodes: [
+          Action(text: 'A'),
+          Action(text: 'B'),
+          Detach(),
+        ]),
+        measurer,
+      );
+      final withoutDetach = layout.layout(
+        const ActivityDiagram(nodes: [
+          Action(text: 'A'),
+          Action(text: 'B'),
+        ]),
+        measurer,
+      );
+      final arrowsWith = withDetach.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head != null)
+          .toList();
+      final arrowsWithout = withoutDetach.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head != null)
+          .toList();
+      expect(arrowsWith.length, arrowsWithout.length,
+          reason: 'detach must not introduce a new outgoing arrow');
+    });
+
+    test('sequence ending in kill emits two crossed lines', () {
+      final scene = layout.layout(
+        const ActivityDiagram(nodes: [
+          Action(text: 'A'),
+          Kill(),
+        ]),
+        measurer,
+      );
+      final crossLines = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) =>
+              l.head == null &&
+              (l.from.dx - l.to.dx).abs() > 0 &&
+              (l.from.dy - l.to.dy).abs() > 0)
+          .toList();
+      expect(crossLines, hasLength(2));
+    });
+
+    test('parses and lays out the nested-partitions terminator sample', () {
+      const src = '@startuml\n'
+          'title Incident response workflow with partitions, detach, kill, fork, and repeat\n'
+          '\n'
+          'start\n'
+          'partition "Detector" {\n'
+          '  :Receive alert;\n'
+          '  if (Duplicate?) then (yes)\n'
+          '    :Attach to existing incident;\n'
+          '    detach\n'
+          '  else (no)\n'
+          '    :Create incident;\n'
+          '  endif\n'
+          '}\n'
+          '\n'
+          'partition "Triage" {\n'
+          '  repeat\n'
+          '    :Collect logs;\n'
+          '    :Query metrics;\n'
+          '    if (Signal sufficient?) then (yes)\n'
+          '      break\n'
+          '    else (no)\n'
+          '      :Ask service owner;\n'
+          '    endif\n'
+          '  repeat while (within 10 min?) is (yes)\n'
+          '}\n'
+          '\n'
+          'fork\n'
+          '  partition "Comms" {\n'
+          '    :Post status page update;\n'
+          '    :Notify stakeholders;\n'
+          '  }\n'
+          'fork again\n'
+          '  partition "Mitigation" {\n'
+          '    if (Feature flag exists?) then (yes)\n'
+          '      :Disable risky feature;\n'
+          '    else (no)\n'
+          '      :Rollback deployment;\n'
+          '      if (Rollback fails?) then (yes)\n'
+          '        kill\n'
+          '      endif\n'
+          '    endif\n'
+          '  }\n'
+          'fork again\n'
+          '  partition "Evidence" {\n'
+          '    :Snapshot dashboards;\n'
+          '    :Export traces;\n'
+          '  }\n'
+          'end fork\n'
+          '\n'
+          'while (Error rate above SLO?) is (yes)\n'
+          '  :Apply next mitigation;\n'
+          'endwhile (no)\n'
+          ':Write postmortem draft;\n'
+          'stop\n'
+          '@enduml\n';
+      final tokens = Lexer().tokenize(src);
+      final diagram = Parser().parse(tokens) as ActivityDiagram;
+      final scene = layout.layout(diagram, measurer);
+      expect(scene.size.width, greaterThan(0));
+      expect(scene.size.height, greaterThan(0));
+      final crossLines = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) =>
+              l.head == null &&
+              (l.from.dx - l.to.dx).abs() > 0 &&
+              (l.from.dy - l.to.dy).abs() > 0)
+          .toList();
+      expect(crossLines.length, greaterThanOrEqualTo(2),
+          reason: 'kill should emit two crossed lines');
+    });
   });
 
   group('StateLayout', () {
