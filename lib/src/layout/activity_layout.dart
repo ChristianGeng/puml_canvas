@@ -576,7 +576,7 @@ class ActivityLayout implements DiagramLayout {
     required double fromY,
     required Offset to,
   }) {
-    final midY = (fromY + to.dy) / 2;
+    final midY = math.max(fromY + 1, to.dy - _vGap / 2);
     if ((fromCenterX - to.dx).abs() < 0.5) {
       ctx.shapes.add(SceneLine(
         from: Offset(fromCenterX, fromY),

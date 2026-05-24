@@ -285,23 +285,24 @@ class ClassLayout implements DiagramLayout {
     final children = <String, List<String>>{
       for (final n in names) n: <String>[],
     };
-    final inheritParents = <String, List<String>>{
-      for (final n in names) n: <String>[],
+    final inDegree = <String, int>{
+      for (final n in names) n: 0,
     };
     for (final r in diagram.relationships) {
       if (!indexOf.containsKey(r.from) || !indexOf.containsKey(r.to)) continue;
       children[r.from]!.add(r.to);
       children[r.to]!.add(r.from);
-      if (r.kind == RelationshipKind.inheritance ||
-          r.kind == RelationshipKind.realization) {
-        inheritParents[r.to]!.add(r.from);
+      final isDirected = r.kind != RelationshipKind.association &&
+          r.kind != RelationshipKind.link;
+      if (isDirected) {
+        inDegree[r.to] = inDegree[r.to]! + 1;
       }
     }
 
     final level = <String, int>{};
     final roots = <String>[];
     for (final n in names) {
-      if (inheritParents[n]!.isEmpty) roots.add(n);
+      if (inDegree[n]! == 0) roots.add(n);
     }
     if (roots.isEmpty && names.isNotEmpty) roots.add(names.first);
 

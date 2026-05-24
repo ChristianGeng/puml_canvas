@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.1
+
+### Fixed
+
+- Activity diagram tail arrows no longer cross through other branches'
+  content boxes. The Manhattan tail's horizontal segment now sits just
+  above the merge diamond (below all branches' content) instead of at
+  the source-to-merge midpoint, which previously caused short branches
+  to draw their tail through deeper sibling branches.
+- Class / object / ER diagram BFS levelling now counts every directed
+  relationship (composition, aggregation, association arrows,
+  dependency, realization) toward a class's indegree, not just
+  inheritance. Diagrams that use only associations (no inheritance) now
+  lay out top-down by relationship direction instead of collapsing
+  every class into a single row.
+
 ## 0.7.0
 
 ### Changed
