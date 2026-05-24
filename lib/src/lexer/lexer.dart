@@ -339,6 +339,40 @@ class Lexer {
           dataEndKeyword = '@endgantt';
         } else if (word == '@endgantt') {
           emit(TokenType.endGantt, word, startCol);
+        } else if (word == '@startebnf') {
+          emit(TokenType.startEbnf, word, startCol);
+          while (i < source.length && source[i] != '\n') {
+            i++;
+            col++;
+          }
+          if (i < source.length && source[i] == '\n') {
+            emit(TokenType.newline, '\n', col);
+            i++;
+            line++;
+            col = 1;
+          }
+          inDataBody = true;
+          dataEndType = TokenType.endEbnf;
+          dataEndKeyword = '@endebnf';
+        } else if (word == '@endebnf') {
+          emit(TokenType.endEbnf, word, startCol);
+        } else if (word == '@startregex') {
+          emit(TokenType.startEbnf, '@startebnf', startCol);
+          while (i < source.length && source[i] != '\n') {
+            i++;
+            col++;
+          }
+          if (i < source.length && source[i] == '\n') {
+            emit(TokenType.newline, '\n', col);
+            i++;
+            line++;
+            col = 1;
+          }
+          inDataBody = true;
+          dataEndType = TokenType.endEbnf;
+          dataEndKeyword = '@endregex';
+        } else if (word == '@endregex') {
+          emit(TokenType.endEbnf, '@endebnf', startCol);
         } else if (word == '@startnwdiag') {
           emit(TokenType.startNwdiag, word, startCol);
           while (i < source.length && source[i] != '\n') {
@@ -586,12 +620,75 @@ class Lexer {
         throw LexerException("Unexpected '+'", line, col);
       }
 
+      if (c == '&' && _isLineStart(tokens)) {
+        i++;
+        col++;
+        continue;
+      }
+
+      if (c == '\$' && _isLineStart(tokens)) {
+        while (i < source.length && source[i] != '\n') {
+          i++;
+          col++;
+        }
+        continue;
+      }
+
       if (c == '!') {
         final startCol = col;
         if (i + 1 < source.length && source[i + 1] == '!') {
+          if (_isLineStart(tokens)) {
+            while (i < source.length && source[i] != '\n') {
+              i++;
+              col++;
+            }
+            continue;
+          }
           emit(TokenType.bangBang, '!!', startCol);
           i += 2;
           col += 2;
+          continue;
+        }
+        if (_isLineStart(tokens)) {
+          final lineEnd = source.indexOf('\n', i);
+          final lineText = source
+              .substring(i + 1, lineEnd < 0 ? source.length : lineEnd)
+              .trimLeft()
+              .toLowerCase();
+          while (i < source.length && source[i] != '\n') {
+            i++;
+            col++;
+          }
+          if (lineText.startsWith('procedure') ||
+              lineText.startsWith('function') ||
+              lineText.startsWith('definelong')) {
+            while (i < source.length) {
+              if (source[i] == '\n') {
+                i++;
+                line++;
+                col = 1;
+                continue;
+              }
+              if (col == 1 && source[i] == '!') {
+                final e = source.indexOf('\n', i);
+                final text = source
+                    .substring(i + 1, e < 0 ? source.length : e)
+                    .trimLeft()
+                    .toLowerCase();
+                if (text.startsWith('endprocedure') ||
+                    text.startsWith('endfunction') ||
+                    text.startsWith('enddefinelong')) {
+                  while (i < source.length && source[i] != '\n') {
+                    i++;
+                    col++;
+                  }
+                  break;
+                }
+              }
+              i++;
+              col++;
+            }
+          }
           continue;
         }
         throw LexerException("Unexpected '!'", line, col);
@@ -902,6 +999,11 @@ class Lexer {
     return true;
   }
 
+  static bool _isLineStart(List<Token> tokens) {
+    if (tokens.isEmpty) return true;
+    return tokens.last.type == TokenType.newline;
+  }
+
   static bool _isIdentStart(String c) {
     final code = c.codeUnitAt(0);
     return (code >= 0x41 && code <= 0x5A) ||
@@ -1067,6 +1169,15 @@ class Lexer {
     }
     if (first == '<') {
       var j = i + 1;
+      if (j < n && source[j] == '-') {
+        var k = j;
+        while (k < n && source[k] == '-') {
+          k++;
+        }
+        if (k < n && source[k] == '>') {
+          return source.substring(start, k + 1);
+        }
+      }
       if (j < n && source[j] == '<') {
         j++;
         if (j >= n || source[j] != '-') return null;

@@ -81,6 +81,11 @@ class Parser {
       _skipNewlines();
       return _parseNetworkDiagram();
     }
+    if (_check(TokenType.startEbnf)) {
+      _advance();
+      _skipNewlines();
+      return _parseEbnfDiagram();
+    }
     _expect(TokenType.startUml);
     _skipNewlines();
 
@@ -492,6 +497,21 @@ class Parser {
   }
 
   void _parseEvent(List<SequenceEvent> out) {
+    if (_check(TokenType.leftBrace) &&
+        _pos + 2 < _tokens.length &&
+        _tokens[_pos + 1].type == TokenType.identifier &&
+        _tokens[_pos + 2].type == TokenType.rightBrace) {
+      _advance();
+      _advance();
+      _advance();
+      if (_check(TokenType.newline) || _check(TokenType.eof)) {
+        return;
+      }
+      if (_check(TokenType.arrow)) {
+        _collectLineRemainder();
+        return;
+      }
+    }
     if (_isKeyword('autonumber')) {
       _parseAutonumber();
       return;
@@ -536,6 +556,16 @@ class Parser {
       _advance();
       final title = _collectLineRemainder();
       out.add(NewPage(title));
+      return;
+    }
+    if (_isKeyword('return')) {
+      _advance();
+      _collectLineRemainder();
+      return;
+    }
+    if (_isKeyword('break')) {
+      _advance();
+      _collectLineRemainder();
       return;
     }
     if (_check(TokenType.identifier)) {
@@ -1517,6 +1547,8 @@ class Parser {
         addState(_parseStateDecl());
       } else if (_isKeyword('note')) {
         _skipUntilNewline();
+      } else if (_isKeyword('hide') || _isKeyword('show')) {
+        _consumeRestOfLine();
       } else {
         final t = _parseStateTransitionOrRef(addState);
         if (t != null) transitions.add(t);
@@ -1552,6 +1584,10 @@ class Parser {
       final t = _peek();
       throw ParserException(
           'Expected state name, got ${t.type}', t.line, t.column);
+    }
+
+    if (_check(TokenType.stereotype)) {
+      _advance();
     }
 
     final nested = <StateDecl>[];
@@ -1604,6 +1640,8 @@ class Parser {
           addNested(_parseStateDecl());
         } else if (_isKeyword('note')) {
           _skipUntilNewline();
+        } else if (_isKeyword('hide') || _isKeyword('show')) {
+          _consumeRestOfLine();
         } else {
           final t = _parseStateTransitionOrRef(addNested);
           if (t != null) nestedTrans.add(t);
@@ -1830,6 +1868,42 @@ class Parser {
       freeNotes: List.unmodifiable(freeNotes),
       decorations: _decorations.build(),
     );
+  }
+
+  void _skipNoteBlock() {
+    final headerEnd = _findNextNewline();
+    final sawNewlineInHeader = headerEnd != null;
+    while (!_check(TokenType.newline) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      _advance();
+    }
+    if (!sawNewlineInHeader) return;
+    if (_check(TokenType.newline)) _advance();
+    while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
+      if (_check(TokenType.identifier) && _peek().lexeme == 'end') {
+        final save = _pos;
+        _advance();
+        if (_check(TokenType.identifier) && _peek().lexeme == 'note') {
+          _advance();
+          return;
+        }
+        _pos = save;
+      }
+      if (_check(TokenType.identifier) && _peek().lexeme == 'endnote') {
+        _advance();
+        return;
+      }
+      _advance();
+    }
+  }
+
+  int? _findNextNewline() {
+    for (var k = _pos; k < _tokens.length; k++) {
+      if (_tokens[k].type == TokenType.newline) return k;
+      if (_tokens[k].type == TokenType.eof) return null;
+    }
+    return null;
   }
 
   void _consumeRestOfLine() {
@@ -2469,6 +2543,16 @@ class Parser {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
       if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('hide') || _isKeyword('show')) {
+        _consumeRestOfLine();
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('note')) {
+        _skipNoteBlock();
         _skipNewlines();
         continue;
       }
@@ -3226,7 +3310,7 @@ class Parser {
   }
 
   bool _looksLikeTimingDiagram() {
-    const laneKeywords = {'robust', 'concise', 'clock'};
+    const laneKeywords = {'robust', 'concise', 'clock', 'binary'};
     var atLineStart = true;
     for (var k = _pos; k < _tokens.length; k++) {
       final t = _tokens[k];
@@ -3265,6 +3349,10 @@ class Parser {
         lanes.add(_parseTimingLane(TimingLaneKind.concise));
       } else if (_isKeyword('clock')) {
         lanes.add(_parseTimingLane(TimingLaneKind.clock));
+      } else if (_isKeyword('binary')) {
+        lanes.add(_parseTimingLane(TimingLaneKind.binary));
+      } else if (_isKeyword('highlight') || _isKeyword('hide')) {
+        _consumeRestOfLine();
       } else if (_check(TokenType.atTime)) {
         currentTime = int.parse(_advance().lexeme);
       } else {
@@ -3535,9 +3623,14 @@ class Parser {
             'Expected JSON body line, got ${t.type}', t.line, t.column);
       }
       final t = _advance();
+      final raw = t.lexeme;
+      final trimmed = raw.trimLeft();
+      if (trimmed.startsWith('#')) {
+        continue;
+      }
       firstLine ??= t.line;
       firstCol ??= t.column;
-      buf.writeln(t.lexeme);
+      buf.writeln(raw);
     }
     if (_check(TokenType.endJson)) {
       _advance();
@@ -3605,13 +3698,19 @@ class Parser {
             'Expected YAML body line, got ${t.type}', t.line, t.column);
       }
       final t = _advance();
-      lines.add(_YamlSourceLine(raw: t.lexeme, line: t.line));
+      final raw = t.lexeme;
+      if (raw.trimLeft().startsWith('#')) {
+        continue;
+      }
+      lines.add(_YamlSourceLine(raw: raw, line: t.line));
     }
     if (_check(TokenType.endYaml)) {
       _advance();
     }
     final firstLine = lines.isEmpty ? 1 : lines.first.line;
+    _yamlAnchors = <String, DataNode>{};
     final root = _parseYamlValue(lines, 0, lines.length, -1, firstLine);
+    _yamlAnchors = <String, DataNode>{};
     if (root == null) {
       throw ParserException('Empty YAML body', firstLine, 1);
     }
@@ -3621,6 +3720,8 @@ class Parser {
       decorations: _decorations.build(),
     );
   }
+
+  Map<String, DataNode> _yamlAnchors = <String, DataNode>{};
 
   DataNode? _parseYamlValue(
     List<_YamlSourceLine> lines,
@@ -3765,16 +3866,47 @@ class Parser {
         if (_yamlIndent(bl.raw) <= indent) break;
         blockEnd++;
       }
-      if (rest.isEmpty) {
+      if (key == '<<') {
+        if (rest.startsWith('*')) {
+          final alias = rest.substring(1).trim();
+          final ref = _yamlAnchors[alias];
+          if (ref is DataObject) {
+            for (final e in ref.entries) {
+              entries.add(e);
+            }
+          }
+        }
+        i = blockEnd;
+        continue;
+      }
+      String? anchorName;
+      var restValue = rest;
+      if (restValue.startsWith('&')) {
+        var k = 1;
+        while (k < restValue.length &&
+            restValue[k] != ' ' &&
+            restValue[k] != '\t') {
+          k++;
+        }
+        anchorName = restValue.substring(1, k);
+        restValue = restValue.substring(k).trim();
+      }
+      DataNode value;
+      if (restValue.isEmpty) {
         final nested =
             _parseYamlValue(lines, blockStart, blockEnd, indent, line.line);
-        entries.add(MapEntry(
-          key,
-          nested ?? const DataScalar(value: '', kind: ScalarKind.null_),
-        ));
+        value = nested ?? const DataScalar(value: '', kind: ScalarKind.null_);
+      } else if (restValue.startsWith('*')) {
+        final alias = restValue.substring(1).trim();
+        final ref = _yamlAnchors[alias];
+        value = ref ?? DataScalar(value: restValue, kind: ScalarKind.string);
       } else {
-        entries.add(MapEntry(key, _yamlScalar(rest)));
+        value = _yamlScalar(restValue);
       }
+      if (anchorName != null) {
+        _yamlAnchors[anchorName] = value;
+      }
+      entries.add(MapEntry(key, value));
       i = blockEnd;
     }
   }
@@ -3905,6 +4037,8 @@ class Parser {
     final sectionRe = RegExp(r'^--\s*(.*?)\s*--\s*$');
     final lastsRe = RegExp(
         r'^\[(.+?)\]\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s*$');
+    final lastsAndStartsRe = RegExp(
+        r"^\[(.+?)\]\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s+and\s+starts?\s+at\s+\[(.+?)\]'s\s+(end|start)\s*$");
     final startsDateRe = RegExp(
         r'^\[(.+?)\]\s+starts?\s+(?:on\s+|at\s+)?(\d{4}-\d{2}-\d{2})\s*$');
     final startsAtRe =
@@ -3912,13 +4046,74 @@ class Parser {
     final happensRe = RegExp(
         r"^\[(.+?)\]\s+happens?\s+(?:on\s+|at\s+)?(?:\[(.+?)\]'s\s+(end|start)|(\d{4}-\d{2}-\d{2}))\s*$");
     final coloredRe = RegExp(r'^\[(.+?)\]\s+is\s+colored?\s+in\s+(\S+)\s*$');
+    final closedDayRe = RegExp(
+        r'^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+(?:are|is)\s+(closed|open)\s*$',
+        caseSensitive: false);
+    final requiresRe = RegExp(
+        r'^\[(.+?)\]\s+requires?\s+\d+\s+\w+\s*$');
+    final thenLastsRe = RegExp(
+        r'^then\s+\[(.+?)\]\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s*$',
+        caseSensitive: false);
 
+    _GanttTaskBuilder? previousTask;
     for (final src in rawLines) {
       final s = src.raw.trim();
       if (s.isEmpty) continue;
+      if (s.toLowerCase().startsWith('title ') ||
+          s.toLowerCase() == 'title') {
+        continue;
+      }
+      if (closedDayRe.hasMatch(s)) {
+        continue;
+      }
+      if (requiresRe.hasMatch(s)) {
+        continue;
+      }
+      final tlm = thenLastsRe.firstMatch(s);
+      if (tlm != null) {
+        final name = tlm.group(1)!.trim();
+        final n = int.parse(tlm.group(2)!);
+        final unit = tlm.group(3)!.toLowerCase();
+        final days = unit.startsWith('week')
+            ? n * 7
+            : unit.startsWith('month')
+                ? n * 30
+                : n;
+        final builder =
+            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
+        builder.duration = Duration(days: days);
+        if (previousTask != null) {
+          builder.startsAtRef = previousTask.name;
+          builder.startsAtEnd = true;
+        }
+        if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
+        continue;
+      }
       final pm = projectRe.firstMatch(s);
       if (pm != null) {
         projectStart = DateTime.parse(pm.group(1)!);
+        continue;
+      }
+      final lasm = lastsAndStartsRe.firstMatch(s);
+      if (lasm != null) {
+        final name = lasm.group(1)!.trim();
+        final n = int.parse(lasm.group(2)!);
+        final unit = lasm.group(3)!.toLowerCase();
+        final ref = lasm.group(4)!.trim();
+        final endpoint = lasm.group(5)!.toLowerCase();
+        final days = unit.startsWith('week')
+            ? n * 7
+            : unit.startsWith('month')
+                ? n * 30
+                : n;
+        final builder =
+            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
+        builder.duration = Duration(days: days);
+        builder.startsAtRef = ref;
+        builder.startsAtEnd = endpoint == 'end';
+        if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
         continue;
       }
       final sm = sectionRe.firstMatch(s);
@@ -3940,6 +4135,7 @@ class Parser {
             tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
         builder.duration = Duration(days: days);
         if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
         continue;
       }
       final sdm = startsDateRe.firstMatch(s);
@@ -3950,6 +4146,7 @@ class Parser {
             tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
         builder.explicitStart = date;
         if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
         continue;
       }
       final sam = startsAtRe.firstMatch(s);
@@ -3962,6 +4159,7 @@ class Parser {
         builder.startsAtRef = ref;
         builder.startsAtEnd = endpoint == 'end';
         if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
         continue;
       }
       final hm = happensRe.firstMatch(s);
@@ -4079,6 +4277,38 @@ class Parser {
       return;
     }
     m.resolvedDate = projectStart;
+  }
+
+  EbnfDiagram _parseEbnfDiagram() {
+    final buf = StringBuffer();
+    while (!_check(TokenType.endEbnf) && !_check(TokenType.eof)) {
+      if (_check(TokenType.newline)) {
+        _advance();
+        continue;
+      }
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected EBNF body line, got ${t.type}', t.line, t.column);
+      }
+      final t = _advance();
+      final raw = t.lexeme;
+      final trimmed = raw.trimLeft();
+      if (trimmed.startsWith('#')) {
+        continue;
+      }
+      if (trimmed.toLowerCase().startsWith('title ')) {
+        continue;
+      }
+      buf.writeln(raw);
+    }
+    if (_check(TokenType.endEbnf)) {
+      _advance();
+    }
+    return EbnfDiagram(
+      text: buf.toString().trimRight(),
+      decorations: _decorations.build(),
+    );
   }
 
   NetworkDiagram _parseNetworkDiagram() {

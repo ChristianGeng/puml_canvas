@@ -15,6 +15,8 @@ enum TokenType {
   endGantt,
   startNwdiag,
   endNwdiag,
+  startEbnf,
+  endEbnf,
   identifier,
   stringLiteral,
   arrow,

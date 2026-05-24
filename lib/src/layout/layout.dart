@@ -3,6 +3,7 @@ import 'activity_layout.dart';
 import 'class_layout.dart';
 import 'component_layout.dart';
 import 'data_layout.dart';
+import 'ebnf_layout.dart';
 import 'gantt_layout.dart';
 import 'mindmap_layout.dart';
 import 'network_layout.dart';
@@ -38,6 +39,7 @@ class AutoLayout implements DiagramLayout {
       SaltDiagram() => const SaltLayout().layout(diagram, measurer),
       GanttDiagram() => const GanttLayout().layout(diagram, measurer),
       NetworkDiagram() => const NetworkLayout().layout(diagram, measurer),
+      EbnfDiagram() => const EbnfLayout().layout(diagram, measurer),
     };
   }
 }

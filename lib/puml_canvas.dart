@@ -9,6 +9,7 @@ export 'src/layout/activity_layout.dart';
 export 'src/layout/class_layout.dart';
 export 'src/layout/component_layout.dart';
 export 'src/layout/data_layout.dart';
+export 'src/layout/ebnf_layout.dart';
 export 'src/layout/gantt_layout.dart';
 export 'src/layout/layout.dart';
 export 'src/layout/mindmap_layout.dart';

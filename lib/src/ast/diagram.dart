@@ -787,7 +787,7 @@ class ComponentDiagram extends Diagram {
   });
 }
 
-enum TimingLaneKind { robust, concise, clock }
+enum TimingLaneKind { robust, concise, clock, binary }
 
 class TimingLane {
   final String alias;
@@ -918,6 +918,17 @@ class DataDiagram extends Diagram {
   const DataDiagram({
     required this.root,
     required this.format,
+    this.decorations = const DiagramDecorations(),
+  });
+}
+
+class EbnfDiagram extends Diagram {
+  final String text;
+  @override
+  final DiagramDecorations decorations;
+
+  const EbnfDiagram({
+    required this.text,
     this.decorations = const DiagramDecorations(),
   });
 }

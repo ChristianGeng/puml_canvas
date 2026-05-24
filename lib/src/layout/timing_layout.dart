@@ -101,6 +101,8 @@ class TimingLayout implements DiagramLayout {
           bodyHeight = _conciseMinHeight;
         case TimingLaneKind.clock:
           bodyHeight = _clockMinHeight;
+        case TimingLaneKind.binary:
+          bodyHeight = _robustMinHeight;
       }
       laneHeights[lane.alias] =
           bodyHeight + _laneTopPadding + _laneBottomPadding;
@@ -214,6 +216,18 @@ class TimingLayout implements DiagramLayout {
           );
         case TimingLaneKind.clock:
           break;
+        case TimingLaneKind.binary:
+          _renderRobustLane(
+            shapes: shapes,
+            lane: lane,
+            laneEvents: laneEvents,
+            states: statesByLane[lane.alias]!,
+            top: laneTops[lane.alias]!,
+            height: laneHeights[lane.alias]!,
+            plotRight: plotRight,
+            timeToX: timeToX,
+            measurer: measurer,
+          );
       }
     }
 

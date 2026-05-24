@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.7.6
+
+### Fixed
+
+- Lexer: `!`-prefixed directives at the start of a line (e.g.
+  `!pragma teoz true`, `!theme spacelab`, `!if`, `!else`, `!endif`,
+  `!$var = value`) are now silently consumed instead of raising
+  `LexerException("Unexpected '!'")`. The full body between
+  `!procedure ... !endprocedure` (and `!function`/`!definelong`)
+  is also skipped, so procedure definitions no longer pollute
+  the token stream.
+- Lexer: lines starting with `$` (procedure-call invocations such
+  as `$service("Gateway", #LightBlue)`) are silently skipped at
+  line start, matching the lenient handling of `!` directives.
+- Lexer: `&` at the start of a line (PlantUML teoz "in parallel
+  with previous" continuation) is consumed silently so the rest
+  of the line parses as a normal sequence message.
+- Lexer: bidirectional arrows `<->`, `<-->`, etc. are now
+  recognized as `arrow` tokens.
+- Lexer: new `@startebnf`/`@endebnf` and `@startregex`/`@endregex`
+  diagram boundaries. The body is captured as raw text and
+  rendered as a monospace code listing.
+- Parser (timing): added `binary` lane kind, rendered as a
+  two-state robust lane. `highlight ...` and `hide ...` lines are
+  silently skipped.
+- Parser (state): `hide`/`show` directives are silently consumed
+  in both top-level and nested state bodies. `state H <<history>>`
+  declarations now parse — the trailing stereotype is accepted
+  after the state name.
+- Parser (gantt): `title ...` is accepted as a no-op decoration.
+  `<weekday> are closed` and `[Task] requires N people` lines are
+  silently skipped. New compound forms parse:
+  `[Task] lasts N days and starts at [Other]'s end` and
+  `then [Task] lasts N days` (chains to the previous task's end).
+- Parser (json): `#highlight` / `#`-prefixed directive lines in
+  the JSON body are stripped before `jsonDecode`, so the
+  highlight annotation no longer breaks the parse.
+- Parser (yaml): `#highlight` lines are stripped. YAML anchors
+  (`key: &name value`), references (`key: *name`), and merge keys
+  (`<<: *name`) are now supported. Anchored values are captured
+  and inlined when referenced; merge keys expand the referenced
+  object's entries into the current mapping.
+- Parser (sequence): `return ...`, `break ...`, and teoz timing
+  markers like `{name}` at the start of a line (including the
+  bidirectional `{start} <-> {end}` SLA-window form) are silently
+  consumed so the surrounding diagram still parses.
+- Parser (component): top-level `note <pos> of X ... end note`
+  blocks and `hide`/`show` directives are silently skipped so
+  deployment-style diagrams with annotation notes parse cleanly.
+- AST: new `EbnfDiagram` with a `text` field; rendered by the new
+  `EbnfLayout` as a bordered monospace code block. `TimingLaneKind`
+  gains a `binary` variant.
+- Colors: expanded the named-color table with `lightyellow`,
+  `lightpink`, `lightcyan`, `salmon`, `gold`, `silver`, `cyan`,
+  `magenta`, and other CSS standard names so `#LightYellow`,
+  `#Salmon`, `#Gold`, etc. parse without "Unknown color" errors.
+
 ## 0.7.5
 
 ### Fixed
