@@ -1433,6 +1433,98 @@ void main() {
       expect(r.toMultiplicity, '*');
       expect(r.label, 'has');
     });
+
+    test('parses class with header stereotype', () {
+      final d = parseClass('@startuml\n'
+          'class Order <<Aggregate>>\n'
+          '@enduml\n');
+      expect(d.classes.single.stereotype, 'Aggregate');
+    });
+
+    test('parses class with generics on header', () {
+      final d = parseClass('@startuml\n'
+          'class AggregateRoot<ID>\n'
+          '@enduml\n');
+      expect(d.classes.single.generics, 'ID');
+    });
+
+    test('parses nested generics in interface header', () {
+      final d = parseClass('@startuml\n'
+          'interface Repository<T extends AggregateRoot<ID>, ID>\n'
+          '@enduml\n');
+      expect(d.classes.single.kind, ClassKind.interface);
+      expect(d.classes.single.generics,
+          'T extends AggregateRoot<ID>, ID');
+    });
+
+    test('parses record keyword as record kind', () {
+      final d = parseClass('@startuml\n'
+          'record Money {\n'
+          '  amount: BigDecimal\n'
+          '  currency: Currency\n'
+          '}\n'
+          '@enduml\n');
+      expect(d.classes.single.kind, ClassKind.record_);
+      expect(d.classes.single.members, hasLength(2));
+    });
+
+    test('silently consumes hide directives', () {
+      final d = parseClass('@startuml\n'
+          'hide empty members\n'
+          'hide circle\n'
+          'class Foo\n'
+          '@enduml\n');
+      expect(d.classes, hasLength(1));
+    });
+
+    test('parses free note with alias', () {
+      final d = parseClass('@startuml\n'
+          'class Foo\n'
+          'note "hello" as N1\n'
+          'N1 .. Foo\n'
+          '@enduml\n');
+      expect(d.freeNotes, hasLength(1));
+      expect(d.freeNotes.single.alias, 'N1');
+      expect(d.freeNotes.single.text, 'hello');
+      expect(d.freeNotes.single.attachedTo, isNull);
+      expect(d.relationships.single.from, 'N1');
+      expect(d.relationships.single.to, 'Foo');
+    });
+
+    test('parses multi-line note attached to a class', () {
+      final d = parseClass('@startuml\n'
+          'class Order\n'
+          'note right of Order\n'
+          '  invariant 1\n'
+          '  invariant 2\n'
+          'end note\n'
+          '@enduml\n');
+      expect(d.freeNotes, hasLength(1));
+      expect(d.freeNotes.single.attachedTo, 'Order');
+      expect(d.freeNotes.single.text, contains('invariant 1'));
+    });
+
+    test('package wrapper flattens its body into the class diagram', () {
+      final d = parseClass('@startuml\n'
+          'package "domain" <<Layer>> {\n'
+          '  class Foo\n'
+          '  class Bar\n'
+          '}\n'
+          '@enduml\n');
+      expect(d.classes.map((c) => c.name), ['Foo', 'Bar']);
+    });
+
+    test('drops generics on relationship endpoints', () {
+      final d = parseClass('@startuml\n'
+          'interface Repository<T>\n'
+          'class OrderRepository\n'
+          'Repository<T> <|.. OrderRepository\n'
+          '@enduml\n');
+      final r = d.relationships.single;
+      expect(r.from, 'Repository');
+      expect(r.to, 'OrderRepository');
+      expect(r.kind, RelationshipKind.realization);
+    });
   });
 
   group('object diagram', () {
@@ -3224,6 +3316,72 @@ Developer --> Open
 Developer --> Upload
 Upload --> Copy
 Reviewer --> OpenLink
+@enduml
+''');
+
+    smoke('class_generics_annotations', '''@startuml
+title Domain model with generics, stereotypes, notes, and constraints
+
+hide empty members
+skinparam classAttributeIconSize 0
+
+package "ordering.domain" <<Layer>> {
+  abstract class AggregateRoot<ID> {
+    - id: ID
+    + pullEvents(): List<DomainEvent>
+  }
+
+  interface Repository<T extends AggregateRoot<ID>, ID> {
+    + findById(id: ID): Optional<T>
+    + save(entity: T): Unit
+  }
+
+  annotation Audited {
+    + reason: String
+  }
+
+  class Order <<Aggregate>> {
+    - lines: List<OrderLine>
+    - status: OrderStatus
+    + place(command: PlaceOrder): Order
+    + cancel(reason: String): void
+  }
+
+  class OrderLine <<ValueObject>> {
+    + sku: SKU
+    + quantity: Quantity
+    + price: Money
+  }
+
+  enum OrderStatus {
+    Draft
+    Placed
+    Paid
+    Cancelled
+  }
+
+  record Money {
+    amount: BigDecimal
+    currency: Currency
+  }
+}
+
+Repository <|.. OrderRepository
+AggregateRoot <|-- Order
+Order "1" *-- "1..*" OrderLine : contains >
+Order --> OrderStatus
+OrderLine --> Money
+Audited .. Order
+
+note right of Order
+  Invariants:
+  * total must be positive
+  * cannot cancel after shipment
+  * status transitions are monotonic
+end note
+
+note "Generic bound and record syntax are intentionally parser-hostile." as N1
+N1 .. Repository
 @enduml
 ''');
   });

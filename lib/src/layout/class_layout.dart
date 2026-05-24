@@ -66,6 +66,10 @@ class ClassLayout implements DiagramLayout {
     color: Color(0xFF000000),
     fontSize: 10,
   );
+  static const _noteTextStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 11,
+  );
 
   static const _classFill = Color(0xFFFFFFCC);
   static const _classStroke = Color(0xFF000000);
@@ -84,7 +88,7 @@ class ClassLayout implements DiagramLayout {
       throw ArgumentError('ClassLayout expects ClassDiagram');
     }
 
-    if (diagram.classes.isEmpty) {
+    if (diagram.classes.isEmpty && diagram.freeNotes.isEmpty) {
       return wrapWithDecorations(
         Scene(
           size: Size.zero,
@@ -110,6 +114,30 @@ class ClassLayout implements DiagramLayout {
       if (b.rect.right > width) width = b.rect.right;
       if (b.rect.bottom > height) height = b.rect.bottom;
     }
+
+    final noteRects = <String, Rect>{};
+    if (diagram.freeNotes.isNotEmpty) {
+      var nx = _padding;
+      var ny = (height > 0 ? height + _rowGap : _padding);
+      var rowMaxHeight = 0.0;
+      for (final note in diagram.freeNotes) {
+        final size = _measureNote(note.text, measurer);
+        if (nx > _padding && nx + size.width > width) {
+          nx = _padding;
+          ny += rowMaxHeight + _rowGap;
+          rowMaxHeight = 0.0;
+        }
+        noteRects[note.alias] =
+            Rect.fromLTWH(nx, ny, size.width, size.height);
+        nx += size.width + _colGap;
+        if (size.height > rowMaxHeight) rowMaxHeight = size.height;
+      }
+      for (final r in noteRects.values) {
+        if (r.right > width) width = r.right;
+        if (r.bottom > height) height = r.bottom;
+      }
+    }
+
     width += _padding;
     height += _padding;
 
@@ -119,11 +147,43 @@ class ClassLayout implements DiagramLayout {
       _emitClassBox(shapes, box);
     }
 
+    final notesByAlias = <String, FreeNote>{
+      for (final n in diagram.freeNotes) n.alias: n,
+    };
+
     for (final rel in diagram.relationships) {
       final a = boxes[rel.from];
       final b = boxes[rel.to];
-      if (a == null || b == null) continue;
-      _emitRelationship(shapes, rel, a, b, measurer);
+      if (a != null && b != null) {
+        _emitRelationship(shapes, rel, a, b, measurer);
+        continue;
+      }
+      final fromIsNote = notesByAlias.containsKey(rel.from);
+      final toIsNote = notesByAlias.containsKey(rel.to);
+      if (fromIsNote || toIsNote) {
+        final fromRect = a?.rect ?? noteRects[rel.from];
+        final toRect = b?.rect ?? noteRects[rel.to];
+        if (fromRect != null && toRect != null) {
+          _emitNoteConnector(shapes, fromRect, toRect);
+        }
+      }
+    }
+
+    for (final note in diagram.freeNotes) {
+      final rect = noteRects[note.alias];
+      if (rect == null) continue;
+      shapes.add(SceneNote(
+        rect: rect,
+        text: note.text,
+        textStyle: _noteTextStyle,
+      ));
+      final attached = note.attachedTo;
+      if (attached != null) {
+        final target = boxes[attached];
+        if (target != null) {
+          _emitNoteConnector(shapes, rect, target.rect);
+        }
+      }
     }
 
     return wrapWithDecorations(
@@ -137,6 +197,31 @@ class ClassLayout implements DiagramLayout {
     );
   }
 
+  Size _measureNote(String text, TextMeasurer measurer) {
+    final lines = text.split('\n');
+    var maxW = 0.0;
+    var sumH = 0.0;
+    for (final l in lines) {
+      final s = measurer.measure(l.isEmpty ? ' ' : l, _noteTextStyle);
+      if (s.width > maxW) maxW = s.width;
+      sumH += s.height;
+    }
+    return Size(maxW + 16, sumH + 12);
+  }
+
+  void _emitNoteConnector(List<SceneShape> shapes, Rect a, Rect b) {
+    final fromEdge = _edgePoint(a, b.center);
+    final toEdge = _edgePoint(b, a.center);
+    shapes.add(SceneLine(
+      from: fromEdge,
+      to: toEdge,
+      dashed: true,
+      head: null,
+      stroke: const Color(0xFF000000),
+      strokeWidth: 1.0,
+    ));
+  }
+
   _ClassBox _measureClass(ClassDecl c, TextMeasurer measurer) {
     TextStyle headerStyle;
     if (c.kind == ClassKind.abstractClass) {
@@ -146,10 +231,13 @@ class ClassLayout implements DiagramLayout {
     } else {
       headerStyle = _headerStyle;
     }
+    final baseName = c.generics == null ? c.name : '${c.name}<${c.generics}>';
     final headerText =
-        c.instanceOf == null ? c.name : '${c.name} : ${c.instanceOf}';
+        c.instanceOf == null ? baseName : '$baseName : ${c.instanceOf}';
     final nameSize = measurer.measure(headerText, headerStyle);
-    final stereotype = _stereotype(c.kind);
+    final stereotype = c.stereotype != null
+        ? '<<${c.stereotype}>>'
+        : _stereotype(c.kind);
     final stereotypeSize = stereotype == null
         ? Size.zero
         : measurer.measure(stereotype, _stereotypeStyle);
@@ -621,6 +709,8 @@ class ClassLayout implements DiagramLayout {
         return '<<map>>';
       case ClassKind.entity_:
         return '<<entity>>';
+      case ClassKind.record_:
+        return '<<record>>';
     }
   }
 

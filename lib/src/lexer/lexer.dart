@@ -673,7 +673,56 @@ class Lexer {
           col += lexeme.length;
           continue;
         }
-        throw LexerException("Unexpected '<'", line, col);
+        if (i + 1 < source.length && source[i + 1] == '<') {
+          final close = source.indexOf('>>', i + 2);
+          if (close < 0) {
+            throw LexerException(
+                "Unterminated '<<' stereotype", line, startCol);
+          }
+          final nl = source.indexOf('\n', i + 2);
+          if (nl >= 0 && nl < close) {
+            throw LexerException(
+                "Unterminated '<<' stereotype", line, startCol);
+          }
+          final inner = source.substring(i + 2, close).trim();
+          emit(TokenType.stereotype, inner, startCol);
+          final consumed = close + 2 - i;
+          i = close + 2;
+          col += consumed;
+          continue;
+        }
+        var depth = 1;
+        var j = i + 1;
+        final n = source.length;
+        var ok = false;
+        while (j < n) {
+          final ch = source[j];
+          if (ch == '\n') break;
+          if (ch == '<') {
+            depth++;
+            j++;
+            continue;
+          }
+          if (ch == '>') {
+            depth--;
+            j++;
+            if (depth == 0) {
+              ok = true;
+              break;
+            }
+            continue;
+          }
+          j++;
+        }
+        if (!ok) {
+          throw LexerException("Unexpected '<'", line, col);
+        }
+        final inner = source.substring(i + 1, j - 1);
+        emit(TokenType.generics, inner, startCol);
+        final consumed = j - i;
+        i = j;
+        col += consumed;
+        continue;
       }
 
       if (c == '#') {
@@ -746,6 +795,7 @@ class Lexer {
       'object',
       'map',
       'entity',
+      'record',
     };
     return headers.contains(first.lexeme);
   }

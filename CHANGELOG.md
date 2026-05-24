@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.7.3
+
+### Added
+
+- Class diagram header stereotype: `class Foo <<Aggregate>>` and
+  `interface Repository<T>` style declarations now parse and render
+  with the stereotype text shown in a small italic font above the
+  class name (the same area used by the synthetic `<<interface>>` /
+  `<<enum>>` etc. labels). A new `String? stereotype` field is
+  available on `ClassDecl`.
+- Generic type parameters on class / interface / record headers:
+  `class AggregateRoot<ID>` and nested forms such as
+  `interface Repository<T extends AggregateRoot<ID>, ID>` are
+  accepted; the generics text is appended to the displayed header
+  name as `Name<...>` and stored on a new `String? generics` field.
+  Generics on relationship endpoints (e.g. `Repository<T> <|.. R`)
+  are accepted and dropped.
+- `record` class kind. `record Money { amount: BigDecimal }` parses
+  as a `ClassDecl` with `ClassKind.record_` and renders with a
+  `<<record>>` stereotype label.
+- Free-floating notes in class diagrams: `note "text" as N1`
+  declares a `FreeNote` attached to alias `N1`; subsequent
+  `N1 .. SomeClass` lines connect the note to the class with a
+  dashed line. Multi-line `note <pos> of Class ... end note`
+  blocks now also work inside class diagrams and are stored as
+  `FreeNote` entries with `attachedTo` set. Notes render as
+  yellow `SceneNote` shapes placed below the class grid.
+- `package "label" <<Stereotype>> { ... }` wrapper blocks are
+  accepted at the top level of a class diagram; the wrapper is
+  unmodeled and its body classes / relationships are flattened
+  into the surrounding diagram.
+- `hide empty members` / `hide circle` / `hide ...` directives at
+  the top of a class diagram are silently consumed.
+
+### Fixed
+
+- Lexer no longer throws `Unexpected '<'` for the angle bracket
+  forms used in class diagrams. `<<...>>` (followed by anything
+  other than `-`) is now a `TokenType.stereotype` token and a
+  single `<...>` (with balanced nested angle brackets) is a
+  `TokenType.generics` token. The existing arrow forms (`<-`,
+  `<--`, `<<-`, `<<--`, `<|--`, `<|..`) are preserved.
+
 ## 0.7.2
 
 ### Fixed

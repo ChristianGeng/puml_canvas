@@ -96,6 +96,9 @@ class Parser {
     if (_looksLikeStateDiagram()) {
       return _parseStateDiagram();
     }
+    if (_hasUnambiguousClassMarker()) {
+      return _parseClassDiagram();
+    }
     if (_looksLikeComponentDiagram()) {
       return _parseComponentDiagram();
     }
@@ -1691,6 +1694,35 @@ class Parser {
     return false;
   }
 
+  bool _hasUnambiguousClassMarker() {
+    const classOnly = {
+      'class',
+      'abstract',
+      'enum',
+      'annotation',
+      'exception',
+      'object',
+      'map',
+      'record',
+    };
+    var atLineStart = true;
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.newline) {
+        atLineStart = true;
+        continue;
+      }
+      if (atLineStart &&
+          t.type == TokenType.identifier &&
+          classOnly.contains(t.lexeme)) {
+        return true;
+      }
+      atLineStart = false;
+    }
+    return false;
+  }
+
   bool _looksLikeClassDiagram() {
     const headers = {
       'class',
@@ -1701,6 +1733,7 @@ class Parser {
       'exception',
       'object',
       'map',
+      'record',
     };
     for (var k = _pos; k < _tokens.length; k++) {
       final t = _tokens[k];
@@ -1746,6 +1779,33 @@ class Parser {
   ClassDiagram _parseClassDiagram() {
     final classes = <ClassDecl>[];
     final relationships = <Relationship>[];
+    final freeNotes = <FreeNote>[];
+    var attachedNoteCounter = 0;
+
+    void parseEntry() {
+      if (_isKeyword('hide')) {
+        _consumeRestOfLine();
+        return;
+      }
+      if (_isKeyword('package')) {
+        _parseClassPackage(classes, relationships, freeNotes,
+            () => attachedNoteCounter++);
+        return;
+      }
+      if (_isKeyword('note')) {
+        final note = _tryParseClassNote(() => attachedNoteCounter++);
+        if (note != null) {
+          freeNotes.add(note);
+          return;
+        }
+      }
+      if (_isClassHeaderKeyword()) {
+        classes.add(_parseClassDecl());
+      } else {
+        _parseClassRelationship(relationships, freeNotes);
+      }
+    }
+
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
@@ -1753,19 +1813,133 @@ class Parser {
         _skipNewlines();
         continue;
       }
-      if (_isClassHeaderKeyword()) {
-        classes.add(_parseClassDecl());
-      } else {
-        _parseClassRelationship(relationships);
-      }
+      parseEntry();
       _skipNewlines();
     }
     _expect(TokenType.endUml);
     return ClassDiagram(
       classes: List.unmodifiable(classes),
       relationships: List.unmodifiable(relationships),
+      freeNotes: List.unmodifiable(freeNotes),
       decorations: _decorations.build(),
     );
+  }
+
+  void _consumeRestOfLine() {
+    while (!_check(TokenType.newline) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      _advance();
+    }
+  }
+
+  void _parseClassPackage(
+    List<ClassDecl> classes,
+    List<Relationship> relationships,
+    List<FreeNote> freeNotes,
+    int Function() nextAttachedId,
+  ) {
+    _advance();
+    if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+      _advance();
+    }
+    if (_check(TokenType.stereotype)) {
+      _advance();
+    }
+    if (!_check(TokenType.leftBrace)) {
+      _consumeRestOfLine();
+      return;
+    }
+    _advance();
+    _skipNewlines();
+    while (!_check(TokenType.rightBrace) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('hide')) {
+        _consumeRestOfLine();
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('package')) {
+        _parseClassPackage(classes, relationships, freeNotes, nextAttachedId);
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('note')) {
+        final note = _tryParseClassNote(nextAttachedId);
+        if (note != null) {
+          freeNotes.add(note);
+          _skipNewlines();
+          continue;
+        }
+      }
+      if (_isClassHeaderKeyword()) {
+        classes.add(_parseClassDecl());
+      } else {
+        _parseClassRelationship(relationships, freeNotes);
+      }
+      _skipNewlines();
+    }
+    if (_check(TokenType.rightBrace)) _advance();
+  }
+
+  FreeNote? _tryParseClassNote(int Function() nextAttachedId) {
+    final saved = _pos;
+    _advance();
+    if (_check(TokenType.stringLiteral)) {
+      final text = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier)) {
+          final alias = _advance().lexeme;
+          return FreeNote(alias: alias, text: text);
+        }
+      }
+      _pos = saved;
+      return null;
+    }
+    NotePosition? position;
+    if (_isKeyword('left')) {
+      _advance();
+      if (_isKeyword('of')) {
+        _advance();
+        position = NotePosition.leftOf;
+      }
+    } else if (_isKeyword('right')) {
+      _advance();
+      if (_isKeyword('of')) {
+        _advance();
+        position = NotePosition.rightOf;
+      }
+    } else if (_isKeyword('over')) {
+      _advance();
+      position = NotePosition.over;
+    }
+    if (position == null) {
+      _pos = saved;
+      return null;
+    }
+    if (!_check(TokenType.identifier)) {
+      _pos = saved;
+      return null;
+    }
+    final target = _advance().lexeme;
+    String text;
+    if (_check(TokenType.colon)) {
+      _advance();
+      text = _check(TokenType.text) ? _advance().lexeme : '';
+    } else if (_check(TokenType.newline)) {
+      text = _consumeMultilineNoteBody();
+    } else {
+      _pos = saved;
+      return null;
+    }
+    final alias = '__note_${nextAttachedId()}';
+    return FreeNote(alias: alias, text: text, attachedTo: target);
   }
 
   bool _isClassHeaderKeyword() {
@@ -1780,6 +1954,7 @@ class Parser {
       'object',
       'map',
       'entity',
+      'record',
     };
     return headers.contains(_peek().lexeme);
   }
@@ -1810,6 +1985,8 @@ class Parser {
           kind = ClassKind.map_;
         case 'entity':
           kind = ClassKind.entity_;
+        case 'record':
+          kind = ClassKind.record_;
       }
     }
     if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
@@ -1818,6 +1995,17 @@ class Parser {
           'Expected class name, got ${t.type}', t.line, t.column);
     }
     final name = _advance().lexeme;
+    String? generics;
+    String? stereotype;
+    for (var k = 0; k < 2; k++) {
+      if (_check(TokenType.generics) && generics == null) {
+        generics = _advance().lexeme;
+      } else if (_check(TokenType.stereotype) && stereotype == null) {
+        stereotype = _advance().lexeme;
+      } else {
+        break;
+      }
+    }
 
     String? instanceOf;
     if ((kind == ClassKind.object_ || kind == ClassKind.map_) &&
@@ -1878,6 +2066,8 @@ class Parser {
       kind: kind,
       members: List.unmodifiable(members),
       instanceOf: instanceOf,
+      stereotype: stereotype,
+      generics: generics,
     );
   }
 
@@ -2013,9 +2203,13 @@ class Parser {
     );
   }
 
-  void _parseClassRelationship(List<Relationship> out) {
+  void _parseClassRelationship(
+      List<Relationship> out, [List<FreeNote>? freeNotes]) {
     String? fromMult;
     final from = _readRelationshipEnd();
+    if (_check(TokenType.generics)) {
+      _advance();
+    }
     if (_check(TokenType.stringLiteral)) {
       fromMult = _advance().lexeme;
     }
@@ -2036,6 +2230,9 @@ class Parser {
       toMult = _advance().lexeme;
     }
     final to = _readRelationshipEnd();
+    if (_check(TokenType.generics)) {
+      _advance();
+    }
     String? label;
     if (_check(TokenType.colon)) {
       _advance();

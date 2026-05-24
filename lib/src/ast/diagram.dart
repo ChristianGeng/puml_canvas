@@ -336,13 +336,27 @@ class Group extends SequenceEvent {
 class ClassDiagram extends Diagram {
   final List<ClassDecl> classes;
   final List<Relationship> relationships;
+  final List<FreeNote> freeNotes;
   @override
   final DiagramDecorations decorations;
 
   const ClassDiagram({
     this.classes = const [],
     this.relationships = const [],
+    this.freeNotes = const [],
     this.decorations = const DiagramDecorations(),
+  });
+}
+
+class FreeNote {
+  final String alias;
+  final String text;
+  final String? attachedTo;
+
+  const FreeNote({
+    required this.alias,
+    required this.text,
+    this.attachedTo,
   });
 }
 
@@ -356,6 +370,7 @@ enum ClassKind {
   object_,
   map_,
   entity_,
+  record_,
 }
 
 enum CrowFoot { one, zeroOrOne, zeroOrMany, oneOrMany }
@@ -369,12 +384,16 @@ class ClassDecl {
   final ClassKind kind;
   final List<ClassMember> members;
   final String? instanceOf;
+  final String? stereotype;
+  final String? generics;
 
   const ClassDecl({
     required this.name,
     this.kind = ClassKind.class_,
     this.members = const [],
     this.instanceOf,
+    this.stereotype,
+    this.generics,
   });
 }
 

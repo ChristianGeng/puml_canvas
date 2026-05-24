@@ -1587,6 +1587,86 @@ void main() {
           .toList();
       expect(bodyTexts.any((t) => t.contains('* id: int <<PK>>')), isTrue);
     });
+
+    test('class header stereotype is rendered above the name', () {
+      final scene = layout.layout(
+        const ClassDiagram(classes: [
+          ClassDecl(name: 'Order', stereotype: 'Aggregate'),
+        ]),
+        measurer,
+      );
+      final texts = scene.shapes
+          .whereType<SceneText>()
+          .map((t) => t.text)
+          .toList();
+      expect(texts, contains('<<Aggregate>>'));
+      expect(texts, contains('Order'));
+    });
+
+    test('generics are appended to the header name', () {
+      final scene = layout.layout(
+        const ClassDiagram(classes: [
+          ClassDecl(name: 'AggregateRoot', generics: 'ID'),
+        ]),
+        measurer,
+      );
+      final texts = scene.shapes
+          .whereType<SceneText>()
+          .map((t) => t.text)
+          .toList();
+      expect(texts, contains('AggregateRoot<ID>'));
+    });
+
+    test('record kind shows <<record>> stereotype', () {
+      final scene = layout.layout(
+        const ClassDiagram(classes: [
+          ClassDecl(name: 'Money', kind: ClassKind.record_),
+        ]),
+        measurer,
+      );
+      final texts = scene.shapes
+          .whereType<SceneText>()
+          .map((t) => t.text)
+          .toList();
+      expect(texts, contains('<<record>>'));
+    });
+
+    test('free notes are emitted as SceneNote shapes', () {
+      final scene = layout.layout(
+        const ClassDiagram(
+          classes: [ClassDecl(name: 'Foo')],
+          freeNotes: [FreeNote(alias: 'N1', text: 'hello')],
+          relationships: [
+            Relationship(
+                from: 'N1', to: 'Foo', kind: RelationshipKind.link),
+          ],
+        ),
+        measurer,
+      );
+      final notes = scene.shapes.whereType<SceneNote>().toList();
+      expect(notes, hasLength(1));
+      expect(notes.single.text, 'hello');
+      final dashed =
+          scene.shapes.whereType<SceneLine>().where((l) => l.dashed).toList();
+      expect(dashed, isNotEmpty);
+    });
+
+    test('attached note connects via a dashed line to its class', () {
+      final scene = layout.layout(
+        const ClassDiagram(
+          classes: [ClassDecl(name: 'Foo')],
+          freeNotes: [
+            FreeNote(alias: '__note_0', text: 'inv', attachedTo: 'Foo'),
+          ],
+        ),
+        measurer,
+      );
+      final notes = scene.shapes.whereType<SceneNote>().toList();
+      expect(notes, hasLength(1));
+      final dashed =
+          scene.shapes.whereType<SceneLine>().where((l) => l.dashed).toList();
+      expect(dashed, isNotEmpty);
+    });
   });
 
   group('UseCaseLayout', () {

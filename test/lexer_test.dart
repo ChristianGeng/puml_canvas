@@ -447,5 +447,55 @@ void main() {
         ]);
       });
     });
+
+    group('angle bracket disambiguation', () {
+      test('emits a stereotype token for <<Name>>', () {
+        final tokens =
+            Lexer().tokenize('@startuml\nclass Foo <<Aggregate>>\n@enduml\n');
+        final stereos = tokens
+            .where((t) => t.type == TokenType.stereotype)
+            .map((t) => t.lexeme)
+            .toList();
+        expect(stereos, ['Aggregate']);
+      });
+
+      test('emits a generics token with balanced angle brackets', () {
+        final tokens = Lexer().tokenize(
+            '@startuml\nclass Foo<T extends Bar<U>, V>\n@enduml\n');
+        final generics = tokens
+            .where((t) => t.type == TokenType.generics)
+            .map((t) => t.lexeme)
+            .toList();
+        expect(generics, ['T extends Bar<U>, V']);
+      });
+
+      test('preserves backward arrows after generics rule', () {
+        final tokens = Lexer().tokenize('@startuml\nA <-- B\n@enduml\n');
+        final arrows = tokens
+            .where((t) => t.type == TokenType.arrow)
+            .map((t) => t.lexeme)
+            .toList();
+        expect(arrows, ['<--']);
+      });
+
+      test('preserves class inheritance arrows', () {
+        final tokens =
+            Lexer().tokenize('@startuml\nA <|-- B\nC <|.. D\n@enduml\n');
+        final arrows = tokens
+            .where((t) => t.type == TokenType.arrow)
+            .map((t) => t.lexeme)
+            .toList();
+        expect(arrows, ['<|--', '<|..']);
+      });
+
+      test('preserves <<-- backward open V arrow', () {
+        final tokens = Lexer().tokenize('@startuml\nA <<-- B\n@enduml\n');
+        final arrows = tokens
+            .where((t) => t.type == TokenType.arrow)
+            .map((t) => t.lexeme)
+            .toList();
+        expect(arrows, ['<<--']);
+      });
+    });
   });
 }

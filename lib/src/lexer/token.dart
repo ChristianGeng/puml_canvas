@@ -21,6 +21,8 @@ enum TokenType {
   colon,
   comma,
   text,
+  stereotype,
+  generics,
   plusPlus,
   minusMinus,
   starStar,
