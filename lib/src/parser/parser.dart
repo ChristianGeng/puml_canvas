@@ -1,0 +1,4016 @@
+import 'dart:convert';
+
+import 'package:flutter/painting.dart';
+
+import '../ast/diagram.dart';
+import '../lexer/token.dart';
+import '../text/colors.dart' as text_colors;
+
+class ParserException implements Exception {
+  final String message;
+  final int line;
+  final int column;
+  ParserException(this.message, this.line, this.column);
+  @override
+  String toString() => 'ParserException($line:$column): $message';
+}
+
+const _groupKinds = <String, GroupKind>{
+  'alt': GroupKind.alt,
+  'opt': GroupKind.opt,
+  'loop': GroupKind.loop,
+  'par': GroupKind.par,
+};
+
+const _participantKinds = <String, ParticipantKind>{
+  'participant': ParticipantKind.participant,
+  'actor': ParticipantKind.actor,
+  'boundary': ParticipantKind.boundary,
+  'control': ParticipantKind.control,
+  'entity': ParticipantKind.entity,
+  'database': ParticipantKind.database,
+  'collections': ParticipantKind.collections,
+  'queue': ParticipantKind.queue,
+};
+
+class Parser {
+  late List<Token> _tokens;
+  var _pos = 0;
+  final _autonumber = _AutonumberState();
+  var _skin = const SkinParams();
+
+  Diagram parse(List<Token> tokens) {
+    _tokens = tokens;
+    _pos = 0;
+    _autonumber.reset();
+    _skin = const SkinParams();
+
+    _skipNewlines();
+    if (_check(TokenType.startMindmap)) {
+      _advance();
+      _skipNewlines();
+      return _parseMindmapDiagram();
+    }
+    if (_check(TokenType.startWbs)) {
+      _advance();
+      _skipNewlines();
+      return _parseWbsDiagram();
+    }
+    if (_check(TokenType.startJson)) {
+      _advance();
+      _skipNewlines();
+      return _parseJsonDiagram();
+    }
+    if (_check(TokenType.startYaml)) {
+      _advance();
+      _skipNewlines();
+      return _parseYamlDiagram();
+    }
+    if (_check(TokenType.startSalt)) {
+      _advance();
+      _skipNewlines();
+      return _parseSaltDiagram();
+    }
+    if (_check(TokenType.startGantt)) {
+      _advance();
+      _skipNewlines();
+      return _parseGanttDiagram();
+    }
+    if (_check(TokenType.startNwdiag)) {
+      _advance();
+      _skipNewlines();
+      return _parseNetworkDiagram();
+    }
+    _expect(TokenType.startUml);
+    _skipNewlines();
+
+    if (_looksLikeTimingDiagram()) {
+      return _parseTimingDiagram();
+    }
+    if (_looksLikeActivityDiagram()) {
+      return _parseActivityDiagram();
+    }
+    if (_looksLikeUseCaseDiagram()) {
+      return _parseUseCaseDiagram();
+    }
+    if (_looksLikeStateDiagram()) {
+      return _parseStateDiagram();
+    }
+    if (_looksLikeComponentDiagram()) {
+      return _parseComponentDiagram();
+    }
+    if (_looksLikeClassDiagram()) {
+      return _parseClassDiagram();
+    }
+
+    final participants = <Participant>[];
+    final events = <SequenceEvent>[];
+    final boxes = <ParticipantBox>[];
+    String? title;
+    String? caption;
+    HeaderFooter? header;
+    HeaderFooter? footer;
+    Legend? legend;
+    while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
+      final kind = _check(TokenType.identifier)
+          ? _participantKinds[_peek().lexeme]
+          : null;
+      if (kind != null) {
+        participants.add(_parseParticipant(kind));
+      } else if (_isKeyword('create')) {
+        _parseCreate(participants, events);
+      } else if (_isKeyword('destroy')) {
+        _parseDestroy(events);
+      } else if (_isKeyword('box')) {
+        boxes.add(_parseBox(participants));
+      } else if (_isKeyword('autonumber')) {
+        _parseAutonumber();
+      } else if (_isKeyword('title')) {
+        final t = _peek();
+        if (title != null) {
+          throw ParserException(
+              'Duplicate title directive', t.line, t.column);
+        }
+        title = _parseDecorationText('title');
+      } else if (_isKeyword('caption')) {
+        final t = _peek();
+        if (caption != null) {
+          throw ParserException(
+              'Duplicate caption directive', t.line, t.column);
+        }
+        caption = _parseDecorationText('caption');
+      } else if (_isKeyword('header')) {
+        final t = _peek();
+        if (header != null) {
+          throw ParserException(
+              'Duplicate header directive', t.line, t.column);
+        }
+        header = _parseHeaderFooter('header');
+      } else if (_isKeyword('footer')) {
+        final t = _peek();
+        if (footer != null) {
+          throw ParserException(
+              'Duplicate footer directive', t.line, t.column);
+        }
+        footer = _parseHeaderFooter('footer');
+      } else if (_isKeyword('legend')) {
+        final t = _peek();
+        if (legend != null) {
+          throw ParserException(
+              'Duplicate legend directive', t.line, t.column);
+        }
+        legend = _parseLegend();
+      } else if (_isKeyword('skinparam')) {
+        _parseSkinparam();
+      } else {
+        _parseEvent(events);
+      }
+      _skipNewlines();
+    }
+
+    _expect(TokenType.endUml);
+    return SequenceDiagram(
+      participants: List.unmodifiable(participants),
+      events: List.unmodifiable(events),
+      boxes: List.unmodifiable(boxes),
+      title: title,
+      caption: caption,
+      header: header,
+      footer: footer,
+      legend: legend,
+      skin: _skin,
+    );
+  }
+
+  void _parseSkinparam() {
+    _advance();
+    if (_check(TokenType.leftBrace)) {
+      _parseSkinparamBlock('');
+      return;
+    }
+    if (!_check(TokenType.identifier)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected skinparam key, got ${t.type}", t.line, t.column);
+    }
+    final first = _advance().lexeme;
+    if (_check(TokenType.leftBrace)) {
+      _parseSkinparamBlock(first);
+      return;
+    }
+    _applySkinparam(first, _readSkinparamValue());
+    if (_check(TokenType.newline)) _advance();
+  }
+
+  void _parseSkinparamBlock(String prefix) {
+    _advance();
+    _skipNewlines();
+    while (!_check(TokenType.rightBrace) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      if (!_check(TokenType.identifier)) {
+        final t = _peek();
+        throw ParserException(
+            "Expected skinparam key inside block, got ${t.type}",
+            t.line,
+            t.column);
+      }
+      final key = _advance().lexeme;
+      final value = _readSkinparamValue();
+      _applySkinparam('$prefix$key', value);
+      _skipNewlines();
+    }
+    if (_check(TokenType.rightBrace)) {
+      _advance();
+    }
+  }
+
+  Token _readSkinparamValue() {
+    if (_check(TokenType.hashColor) ||
+        _check(TokenType.identifier) ||
+        _check(TokenType.stringLiteral)) {
+      return _advance();
+    }
+    final t = _peek();
+    throw ParserException(
+        "Expected skinparam value, got ${t.type}", t.line, t.column);
+  }
+
+  void _applySkinparam(String key, Token value) {
+    final lower = key.toLowerCase();
+    Color? parseColor() {
+      return text_colors.tryParseColor(value.lexeme);
+    }
+
+    double? parseSize() {
+      final n = int.tryParse(value.lexeme);
+      return n?.toDouble();
+    }
+
+    SkinParams? update;
+    switch (lower) {
+      case 'backgroundcolor':
+        final c = parseColor();
+        if (c != null) update = SkinParams(backgroundColor: c);
+      case 'defaultfontsize':
+        final s = parseSize();
+        if (s != null) update = SkinParams(defaultFontSize: s);
+      case 'sequencearrowcolor':
+        final c = parseColor();
+        if (c != null) update = SkinParams(sequenceArrowColor: c);
+      case 'sequencelifelinebackgroundcolor':
+        final c = parseColor();
+        if (c != null) update = SkinParams(sequenceLifeLineBackgroundColor: c);
+      case 'participantbackgroundcolor':
+        final c = parseColor();
+        if (c != null) update = SkinParams(participantBackgroundColor: c);
+      case 'participantbordercolor':
+        final c = parseColor();
+        if (c != null) update = SkinParams(participantBorderColor: c);
+      case 'notebackgroundcolor':
+        final c = parseColor();
+        if (c != null) update = SkinParams(noteBackgroundColor: c);
+      case 'notebordercolor':
+        final c = parseColor();
+        if (c != null) update = SkinParams(noteBorderColor: c);
+      default:
+        return;
+    }
+    if (update != null) {
+      _skin = _skin.merge(update);
+    }
+  }
+
+  String _parseDecorationText(String keyword) {
+    final startToken = _advance();
+    if (_check(TokenType.newline)) {
+      return _consumeMultilineBody(keyword, startToken);
+    }
+    final text = _collectInlineText();
+    if (text == null) {
+      throw ParserException(
+          "Expected text after '$keyword'", startToken.line, startToken.column);
+    }
+    return text;
+  }
+
+  HeaderFooter _parseHeaderFooter(String keyword) {
+    final startToken = _advance();
+    var align = TextAlign.center;
+    if (_check(TokenType.identifier)) {
+      final word = _peek().lexeme;
+      if (word == 'center' || word == 'left' || word == 'right') {
+        final next = _pos + 1 < _tokens.length ? _tokens[_pos + 1] : null;
+        if (next != null &&
+            (next.type == TokenType.newline ||
+                next.type == TokenType.identifier ||
+                next.type == TokenType.stringLiteral ||
+                next.type == TokenType.text ||
+                next.type == TokenType.colon)) {
+          _advance();
+          switch (word) {
+            case 'left':
+              align = TextAlign.left;
+            case 'right':
+              align = TextAlign.right;
+            default:
+              align = TextAlign.center;
+          }
+        }
+      }
+    }
+    if (_check(TokenType.newline)) {
+      final body = _consumeMultilineBody(keyword, startToken);
+      return HeaderFooter(text: body, align: align);
+    }
+    final text = _collectInlineText();
+    if (text == null) {
+      throw ParserException(
+          "Expected text after '$keyword'", startToken.line, startToken.column);
+    }
+    return HeaderFooter(text: text, align: align);
+  }
+
+  String? _collectInlineText() {
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) return _advance().lexeme;
+      return null;
+    }
+    final parts = <String>[];
+    while (!_check(TokenType.newline) && !_check(TokenType.eof)) {
+      parts.add(_advance().lexeme);
+    }
+    return parts.isEmpty ? null : parts.join(' ');
+  }
+
+  Legend _parseLegend() {
+    final startToken = _advance();
+    var align = TextAlign.left;
+    if (_check(TokenType.identifier)) {
+      final word = _peek().lexeme;
+      if (word == 'center' || word == 'left' || word == 'right') {
+        final next = _pos + 1 < _tokens.length ? _tokens[_pos + 1] : null;
+        if (next != null && next.type == TokenType.newline) {
+          _advance();
+          switch (word) {
+            case 'left':
+              align = TextAlign.left;
+            case 'right':
+              align = TextAlign.right;
+            default:
+              align = TextAlign.center;
+          }
+        }
+      }
+    }
+    if (!_check(TokenType.newline)) {
+      throw ParserException(
+          "Expected newline after 'legend'", startToken.line, startToken.column);
+    }
+    _advance();
+    final lines = <String>[];
+    while (true) {
+      if (_check(TokenType.eof) || _check(TokenType.endUml)) {
+        throw ParserException(
+            "Expected 'endlegend' to close legend",
+            startToken.line,
+            startToken.column);
+      }
+      if (_check(TokenType.identifier) && _peek().lexeme == 'endlegend') {
+        _advance();
+        return Legend(text: lines.join('\n'), align: align);
+      }
+      if (_isKeyword('end') &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          _tokens[_pos + 1].lexeme == 'legend') {
+        _advance();
+        _advance();
+        return Legend(text: lines.join('\n'), align: align);
+      }
+      if (_check(TokenType.text)) {
+        lines.add(_advance().lexeme);
+      }
+      if (_check(TokenType.newline)) _advance();
+    }
+  }
+
+  String _consumeMultilineBody(String keyword, Token openToken) {
+    _advance();
+    final lines = <String>[];
+    var current = <String>[];
+    while (true) {
+      if (_check(TokenType.eof) || _check(TokenType.endUml)) {
+        throw ParserException(
+            "Expected 'end $keyword' to close multi-line $keyword",
+            openToken.line,
+            openToken.column);
+      }
+      final atLineStart =
+          _pos == 0 || _tokens[_pos - 1].type == TokenType.newline;
+      if (atLineStart &&
+          _isKeyword('end') &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          _tokens[_pos + 1].lexeme == keyword) {
+        _advance();
+        _advance();
+        return lines.join('\n');
+      }
+      if (_check(TokenType.newline)) {
+        _advance();
+        lines.add(current.join(' '));
+        current = <String>[];
+        continue;
+      }
+      current.add(_advance().lexeme);
+    }
+  }
+
+  ParticipantBox _parseBox(List<Participant> topLevelParticipants) {
+    final boxToken = _advance();
+    if (!_check(TokenType.stringLiteral)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected box label string after 'box', got ${t.type}",
+          t.line,
+          t.column);
+    }
+    final label = _advance().lexeme;
+
+    Color? color;
+    if (_check(TokenType.hashColor)) {
+      final t = _advance();
+      color = _parseColor(t.lexeme, t);
+    }
+
+    _skipNewlines();
+
+    final inner = <Participant>[];
+    while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
+      if (_isKeyword('end') &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          _tokens[_pos + 1].lexeme == 'box') {
+        _advance();
+        _advance();
+        return ParticipantBox(
+          label: label,
+          color: color,
+          participants: List.unmodifiable(inner),
+        );
+      }
+      if (_isKeyword('box')) {
+        final t = _peek();
+        throw ParserException(
+            'Nested box is not allowed', t.line, t.column);
+      }
+      final kind = _check(TokenType.identifier)
+          ? _participantKinds[_peek().lexeme]
+          : null;
+      if (kind == null) {
+        final t = _peek();
+        throw ParserException(
+            'Only participant declarations are allowed inside a box, got \'${t.lexeme}\'',
+            t.line,
+            t.column);
+      }
+      final p = _parseParticipant(kind);
+      inner.add(p);
+      topLevelParticipants.add(p);
+      _skipNewlines();
+    }
+    throw ParserException(
+        "Expected 'end box' to close box", boxToken.line, boxToken.column);
+  }
+
+  void _parseEvent(List<SequenceEvent> out) {
+    if (_isKeyword('autonumber')) {
+      _parseAutonumber();
+      return;
+    }
+    if (_isKeyword('note')) {
+      out.add(_parseNote());
+      return;
+    }
+    if (_isKeyword('ref')) {
+      out.add(_parseRef());
+      return;
+    }
+    if (_isKeyword('activate')) {
+      _advance();
+      out.add(Activate(_expect(TokenType.identifier).lexeme));
+      return;
+    }
+    if (_isKeyword('deactivate')) {
+      _advance();
+      out.add(Deactivate(_expect(TokenType.identifier).lexeme));
+      return;
+    }
+    if (_check(TokenType.doubleEquals)) {
+      out.add(_parseTitleSeparator());
+      return;
+    }
+    if (_check(TokenType.doublePipe)) {
+      out.add(_parseDelaySeparator());
+      return;
+    }
+    if (_check(TokenType.dotDotDot)) {
+      _advance();
+      out.add(const Separator(kind: SeparatorKind.skip));
+      return;
+    }
+    if (_check(TokenType.minusMinus)) {
+      _advance();
+      out.add(const Separator(kind: SeparatorKind.dash));
+      return;
+    }
+    if (_isKeyword('newpage')) {
+      _advance();
+      final title = _collectLineRemainder();
+      out.add(NewPage(title));
+      return;
+    }
+    if (_check(TokenType.identifier)) {
+      final kind = _groupKinds[_peek().lexeme];
+      if (kind != null) {
+        out.add(_parseGroup(kind));
+        return;
+      }
+    }
+    _parseMessage(out);
+  }
+
+  Separator _parseTitleSeparator() {
+    final open = _advance();
+    String? label;
+    if (_check(TokenType.text)) {
+      label = _advance().lexeme;
+    }
+    if (!_check(TokenType.doubleEquals)) {
+      throw ParserException(
+          "Expected closing '==' for title separator", open.line, open.column);
+    }
+    _advance();
+    return Separator(kind: SeparatorKind.title, label: label);
+  }
+
+  Separator _parseDelaySeparator() {
+    final open = _advance();
+    int? pixels;
+    if (_check(TokenType.text)) {
+      final t = _advance();
+      pixels = int.tryParse(t.lexeme);
+      if (pixels == null) {
+        throw ParserException(
+            "Expected integer between '||' markers, got '${t.lexeme}'",
+            t.line,
+            t.column);
+      }
+    }
+    if (!_check(TokenType.doublePipe)) {
+      throw ParserException(
+          "Expected closing '||' for delay separator", open.line, open.column);
+    }
+    _advance();
+    return Separator(kind: SeparatorKind.delay, delayPixels: pixels);
+  }
+
+  void _parseCreate(
+      List<Participant> participants, List<SequenceEvent> events) {
+    _advance();
+    if (_check(TokenType.identifier)) {
+      final kind = _participantKinds[_peek().lexeme];
+      if (kind != null) {
+        final participant = _parseParticipant(kind);
+        participants.add(participant);
+        events.add(Create(participant.alias));
+        return;
+      }
+    }
+    if (!_check(TokenType.identifier)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected participant name after 'create', got ${t.type}",
+          t.line,
+          t.column);
+    }
+    events.add(Create(_advance().lexeme));
+  }
+
+  void _parseAutonumber() {
+    _advance();
+
+    if (_isKeyword('stop')) {
+      _advance();
+      _autonumber.stopped = true;
+      return;
+    }
+    if (_isKeyword('resume')) {
+      _advance();
+      _autonumber.stopped = false;
+      if (_check(TokenType.identifier)) {
+        final t = _peek();
+        final start = int.tryParse(t.lexeme);
+        if (start != null) {
+          _advance();
+          _autonumber.current = start;
+        }
+      }
+      return;
+    }
+
+    var start = 1;
+    var increment = 1;
+    var format = '%d';
+    var hasNumber = false;
+
+    if (_check(TokenType.identifier)) {
+      final t = _peek();
+      final n = int.tryParse(t.lexeme);
+      if (n != null) {
+        _advance();
+        start = n;
+        hasNumber = true;
+        if (_check(TokenType.identifier)) {
+          final t2 = _peek();
+          final m = int.tryParse(t2.lexeme);
+          if (m != null) {
+            _advance();
+            increment = m;
+          }
+        }
+      }
+    }
+
+    if (_check(TokenType.stringLiteral)) {
+      format = _advance().lexeme;
+    }
+
+    _autonumber.current = hasNumber ? start : 1;
+    _autonumber.increment = increment;
+    _autonumber.format = format;
+    _autonumber.stopped = false;
+  }
+
+  String _formatAutonumber(int n, String format) {
+    final marker = RegExp(r'%(0([1-9]))?d');
+    final match = marker.firstMatch(format);
+    if (match == null) {
+      return '$format $n';
+    }
+    final widthGroup = match.group(2);
+    final String numberText;
+    if (widthGroup != null) {
+      final width = int.parse(widthGroup);
+      numberText = n.toString().padLeft(width, '0');
+    } else {
+      numberText = n.toString();
+    }
+    return format.replaceRange(match.start, match.end, numberText);
+  }
+
+  void _parseDestroy(List<SequenceEvent> events) {
+    _advance();
+    if (!_check(TokenType.identifier)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected participant name after 'destroy', got ${t.type}",
+          t.line,
+          t.column);
+    }
+    events.add(Destroy(_advance().lexeme));
+  }
+
+  Participant _parseParticipant(ParticipantKind kind) {
+    _advance();
+
+    String? displayName;
+    final String alias;
+
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      _expectKeyword('as');
+      alias = _expect(TokenType.identifier).lexeme;
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        displayName = first;
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected participant name, got ${t.type}', t.line, t.column);
+    }
+
+    return Participant(alias: alias, displayName: displayName, kind: kind);
+  }
+
+  Note _parseNote() {
+    _advance();
+
+    final NotePosition position;
+    if (_isKeyword('left')) {
+      _advance();
+      _expectKeyword('of');
+      position = NotePosition.leftOf;
+    } else if (_isKeyword('right')) {
+      _advance();
+      _expectKeyword('of');
+      position = NotePosition.rightOf;
+    } else if (_isKeyword('over')) {
+      _advance();
+      position = NotePosition.over;
+    } else {
+      final t = _peek();
+      throw ParserException(
+          "Expected 'left of', 'right of', or 'over', got '${t.lexeme}'",
+          t.line,
+          t.column);
+    }
+
+    final participants = <String>[_expect(TokenType.identifier).lexeme];
+    if (position == NotePosition.over) {
+      while (_check(TokenType.comma)) {
+        _advance();
+        participants.add(_expect(TokenType.identifier).lexeme);
+      }
+    }
+
+    final String text;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected note text, got ${t.type}', t.line, t.column);
+      }
+      text = _advance().lexeme;
+    } else if (_check(TokenType.newline)) {
+      text = _consumeMultilineNoteBody();
+    } else {
+      final t = _peek();
+      throw ParserException(
+          "Expected ':' or newline after note header, got ${t.type}",
+          t.line,
+          t.column);
+    }
+
+    return Note(
+      position: position,
+      participants: List.unmodifiable(participants),
+      text: text,
+    );
+  }
+
+  String _consumeMultilineNoteBody() {
+    _advance();
+    final lines = <String>[];
+    while (true) {
+      if (_check(TokenType.eof) || _check(TokenType.endUml)) {
+        final t = _peek();
+        throw ParserException(
+            "Expected 'end note' to close multi-line note", t.line, t.column);
+      }
+      final atLineStart =
+          _pos == 0 || _tokens[_pos - 1].type == TokenType.newline;
+      if (atLineStart &&
+          _isKeyword('end') &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          _tokens[_pos + 1].lexeme == 'note') {
+        _advance();
+        _advance();
+        return lines.join('\n');
+      }
+      if (_check(TokenType.text)) {
+        lines.add(_advance().lexeme);
+      }
+      if (_check(TokenType.newline)) _advance();
+    }
+  }
+
+  RefBox _parseRef() {
+    _advance();
+    if (!_isKeyword('over')) {
+      final t = _peek();
+      throw ParserException(
+          "Expected 'over' after 'ref', got '${t.lexeme}'", t.line, t.column);
+    }
+    _advance();
+
+    final participants = <String>[_expect(TokenType.identifier).lexeme];
+    while (_check(TokenType.comma)) {
+      _advance();
+      participants.add(_expect(TokenType.identifier).lexeme);
+    }
+
+    _expect(TokenType.colon);
+    if (!_check(TokenType.text)) {
+      final t = _peek();
+      throw ParserException(
+          'Expected ref text, got ${t.type}', t.line, t.column);
+    }
+    final text = _advance().lexeme;
+
+    return RefBox(
+      participants: List.unmodifiable(participants),
+      text: text,
+    );
+  }
+
+  Group _parseGroup(GroupKind kind) {
+    _advance();
+    final firstLabel = _collectLineRemainder();
+    _skipNewlines();
+
+    final branches = <GroupBranch>[];
+    final firstEvents = <SequenceEvent>[];
+    while (!_isKeyword('else') &&
+        !_isKeyword('end') &&
+        !_check(TokenType.endUml) &&
+        !_check(TokenType.eof)) {
+      _parseEvent(firstEvents);
+      _skipNewlines();
+    }
+    branches.add(GroupBranch(
+        label: firstLabel, events: List.unmodifiable(firstEvents)));
+
+    while (_isKeyword('else')) {
+      _advance();
+      final label = _collectLineRemainder();
+      _skipNewlines();
+      final inner = <SequenceEvent>[];
+      while (!_isKeyword('else') &&
+          !_isKeyword('end') &&
+          !_check(TokenType.endUml) &&
+          !_check(TokenType.eof)) {
+        _parseEvent(inner);
+        _skipNewlines();
+      }
+      branches.add(
+          GroupBranch(label: label, events: List.unmodifiable(inner)));
+    }
+
+    _expectKeyword('end');
+    return Group(kind: kind, branches: List.unmodifiable(branches));
+  }
+
+  String? _collectLineRemainder() {
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) return _advance().lexeme;
+      return null;
+    }
+    final parts = <String>[];
+    while (!_check(TokenType.newline) && !_check(TokenType.eof)) {
+      parts.add(_advance().lexeme);
+    }
+    return parts.isEmpty ? null : parts.join(' ');
+  }
+
+  void _parseMessage(List<SequenceEvent> out) {
+    if (!_check(TokenType.identifier)) {
+      final t = _peek();
+      throw ParserException(
+          'Expected participant, got ${t.type}', t.line, t.column);
+    }
+    final from = _advance().lexeme;
+
+    if (!_check(TokenType.arrow)) {
+      final t = _peek();
+      throw ParserException(
+          'Expected arrow after participant, got ${t.type}', t.line, t.column);
+    }
+    final arrowToken = _advance();
+    final decoded = _decodeArrow(arrowToken);
+
+    if (!_check(TokenType.identifier)) {
+      final t = _peek();
+      throw ParserException(
+          'Expected participant, got ${t.type}', t.line, t.column);
+    }
+    final to = _advance().lexeme;
+
+    ActivationSuffix? activation;
+    if (_check(TokenType.plusPlus)) {
+      _advance();
+      activation = ActivationSuffix.activateTarget;
+    } else if (_check(TokenType.minusMinus)) {
+      _advance();
+      activation = ActivationSuffix.deactivateSource;
+    } else if (_check(TokenType.starStar)) {
+      _advance();
+      activation = ActivationSuffix.createTarget;
+    } else if (_check(TokenType.bangBang)) {
+      _advance();
+      activation = ActivationSuffix.destroyTarget;
+    }
+
+    String? label;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        label = _advance().lexeme;
+      }
+    }
+
+    if (_check(TokenType.plusPlus) ||
+        _check(TokenType.minusMinus) ||
+        _check(TokenType.starStar) ||
+        _check(TokenType.bangBang)) {
+      final t = _peek();
+      throw ParserException(
+          "Activation suffix '${t.lexeme}' must appear immediately after the target identifier",
+          t.line,
+          t.column);
+    }
+
+    String? finalLabel = label;
+    if (!_autonumber.stopped) {
+      final formatted =
+          _formatAutonumber(_autonumber.current, _autonumber.format);
+      if (label == null || label.isEmpty) {
+        finalLabel = formatted;
+      } else {
+        finalLabel = '$formatted $label';
+      }
+      _autonumber.current += _autonumber.increment;
+    }
+
+    final message = Message(
+      from: from,
+      to: to,
+      label: finalLabel,
+      lineStyle: decoded.lineStyle,
+      head: decoded.head,
+      direction: decoded.direction,
+      hidden: decoded.hidden,
+      color: decoded.color,
+      activation: activation,
+    );
+    out.add(message);
+    switch (activation) {
+      case ActivationSuffix.activateTarget:
+        out.add(Activate(to));
+      case ActivationSuffix.deactivateSource:
+        out.add(Deactivate(from));
+      case ActivationSuffix.createTarget:
+        out.add(Create(to));
+      case ActivationSuffix.destroyTarget:
+        out.add(Destroy(to));
+      case null:
+        break;
+    }
+  }
+
+  _DecodedArrow _decodeArrow(Token token) {
+    final lexeme = token.lexeme;
+    final openBracket = lexeme.indexOf('[');
+    var stripped = lexeme;
+    var hidden = false;
+    Color? color;
+    if (openBracket >= 0) {
+      final closeBracket = lexeme.indexOf(']', openBracket + 1);
+      final modifier = lexeme.substring(openBracket + 1, closeBracket);
+      var afterClose = closeBracket + 1;
+      while (afterClose < lexeme.length && lexeme[afterClose] == '-') {
+        afterClose++;
+      }
+      stripped = lexeme.substring(0, openBracket) + lexeme.substring(afterClose);
+      if (modifier == 'hidden') {
+        hidden = true;
+      } else {
+        color = _parseColor(modifier, token);
+      }
+    }
+    final base = _decodeBareArrow(stripped, token);
+    return _DecodedArrow(
+      base.lineStyle,
+      base.head,
+      base.direction,
+      hidden: hidden,
+      color: color,
+    );
+  }
+
+  _DecodedArrow _decodeBareArrow(String lexeme, Token token) {
+    switch (lexeme) {
+      case '->':
+        return const _DecodedArrow(
+            LineStyle.solid, ArrowHead.filled, MessageDirection.forward);
+      case '-->':
+        return const _DecodedArrow(
+            LineStyle.dashed, ArrowHead.filled, MessageDirection.forward);
+      case '->>':
+        return const _DecodedArrow(
+            LineStyle.solid, ArrowHead.open, MessageDirection.forward);
+      case '-->>':
+        return const _DecodedArrow(
+            LineStyle.dashed, ArrowHead.open, MessageDirection.forward);
+      case '->o':
+        return const _DecodedArrow(
+            LineStyle.solid, ArrowHead.openCircle, MessageDirection.forward);
+      case '-->o':
+        return const _DecodedArrow(
+            LineStyle.dashed, ArrowHead.openCircle, MessageDirection.forward);
+      case '->x':
+        return const _DecodedArrow(
+            LineStyle.solid, ArrowHead.cross, MessageDirection.forward);
+      case '-->x':
+        return const _DecodedArrow(
+            LineStyle.dashed, ArrowHead.cross, MessageDirection.forward);
+      case '<-':
+        return const _DecodedArrow(
+            LineStyle.solid, ArrowHead.filled, MessageDirection.backward);
+      case '<--':
+        return const _DecodedArrow(
+            LineStyle.dashed, ArrowHead.filled, MessageDirection.backward);
+      case '<<-':
+        return const _DecodedArrow(
+            LineStyle.solid, ArrowHead.open, MessageDirection.backward);
+      case '<<--':
+        return const _DecodedArrow(
+            LineStyle.dashed, ArrowHead.open, MessageDirection.backward);
+      default:
+        throw ParserException(
+            "Unknown arrow form '${token.lexeme}'", token.line, token.column);
+    }
+  }
+
+  Color _parseColor(String spec, Token token) {
+    final color = text_colors.tryParseColor(spec);
+    if (color == null) {
+      throw ParserException(
+          "Unknown color '$spec'", token.line, token.column);
+    }
+    return color;
+  }
+
+  Token _peek() => _tokens[_pos];
+
+  Token _advance() => _tokens[_pos++];
+
+  bool _check(TokenType type) => _tokens[_pos].type == type;
+
+  bool _isKeyword(String word) =>
+      _check(TokenType.identifier) && _peek().lexeme == word;
+
+  Token _expect(TokenType type) {
+    if (!_check(type)) {
+      final t = _peek();
+      throw ParserException(
+          'Expected $type, got ${t.type}', t.line, t.column);
+    }
+    return _advance();
+  }
+
+  void _expectKeyword(String word) {
+    if (!_isKeyword(word)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected '$word', got '${t.lexeme}'", t.line, t.column);
+    }
+    _advance();
+  }
+
+  void _skipNewlines() {
+    while (_check(TokenType.newline)) {
+      _advance();
+    }
+  }
+
+  bool _looksLikeActivityDiagram() {
+    var atLineStart = true;
+    for (var k = _pos; k < _tokens.length - 1; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.newline) {
+        atLineStart = true;
+        continue;
+      }
+      final next = _tokens[k + 1];
+      if (atLineStart && t.type == TokenType.colon) {
+        if (next.type == TokenType.text &&
+            next.lexeme.endsWith(';')) {
+          return true;
+        }
+      }
+      if (atLineStart && t.type == TokenType.identifier) {
+        final nextIsNewlineOrEnd = next.type == TokenType.newline ||
+            next.type == TokenType.endUml ||
+            next.type == TokenType.eof;
+        if ((t.lexeme == 'start' ||
+                t.lexeme == 'stop') &&
+            nextIsNewlineOrEnd) {
+          return true;
+        }
+        if (t.lexeme == 'if' || t.lexeme == 'while') {
+          if (next.type == TokenType.leftParen) return true;
+        }
+        if (t.lexeme == 'repeat' &&
+            (nextIsNewlineOrEnd ||
+                (next.type == TokenType.identifier &&
+                    next.lexeme == 'while'))) {
+          return true;
+        }
+        if (t.lexeme == 'fork' && nextIsNewlineOrEnd) {
+          return true;
+        }
+        if (t.lexeme == 'partition') {
+          return true;
+        }
+      }
+      atLineStart = false;
+    }
+    return false;
+  }
+
+  ActivityDiagram _parseActivityDiagram() {
+    final nodes = <ActivityNode>[];
+    while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
+      _skipNewlines();
+      if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+      if (_isKeyword('skinparam')) {
+        _parseSkinparam();
+        _skipNewlines();
+        continue;
+      }
+      final node = _parseActivityNode();
+      if (node != null) nodes.add(node);
+      _skipNewlines();
+    }
+    _expect(TokenType.endUml);
+    return ActivityDiagram(
+      nodes: List.unmodifiable(nodes),
+      skin: _skin,
+    );
+  }
+
+  ActivityNode? _parseActivityNode() {
+    if (_check(TokenType.colon)) {
+      return _parseAction();
+    }
+    if (_isKeyword('start')) {
+      _advance();
+      return const StartNode();
+    }
+    if (_isKeyword('stop')) {
+      _advance();
+      return const StopNode();
+    }
+    if (_isKeyword('end')) {
+      _advance();
+      return const EndNode();
+    }
+    if (_isKeyword('if')) {
+      return _parseIfBlock();
+    }
+    if (_isKeyword('while')) {
+      return _parseWhileBlock();
+    }
+    if (_isKeyword('repeat')) {
+      return _parseRepeatBlock();
+    }
+    if (_isKeyword('fork')) {
+      return _parseForkBlock();
+    }
+    if (_isKeyword('partition')) {
+      return _parsePartition();
+    }
+    if (_isKeyword('note')) {
+      // Skip standalone activity notes for now (parser robustness).
+      _skipUntilNewline();
+      return null;
+    }
+    final t = _peek();
+    throw ParserException(
+        "Unexpected token '${t.lexeme}' in activity diagram", t.line, t.column);
+  }
+
+  Action _parseAction() {
+    _advance();
+    String text = '';
+    if (_check(TokenType.text)) {
+      text = _advance().lexeme;
+    }
+    if (text.endsWith(';')) {
+      text = text.substring(0, text.length - 1).trimRight();
+    }
+    return Action(text: text);
+  }
+
+  IfBlock _parseIfBlock() {
+    final branches = <IfBranch>[];
+    final first = _readIfHeader('if');
+    branches.add(IfBranch(
+      condition: first.condition,
+      thenLabel: first.thenLabel,
+      body: _parseActivityBlock(_ifBlockTerminator),
+    ));
+    while (_isKeyword('elseif')) {
+      final more = _readIfHeader('elseif');
+      branches.add(IfBranch(
+        condition: more.condition,
+        thenLabel: more.thenLabel,
+        body: _parseActivityBlock(_ifBlockTerminator),
+      ));
+    }
+    String? elseLabel;
+    var elseBody = const <ActivityNode>[];
+    if (_isKeyword('else')) {
+      _advance();
+      if (_check(TokenType.leftParen)) {
+        _advance();
+        if (_check(TokenType.text)) {
+          elseLabel = _advance().lexeme;
+        }
+        if (_check(TokenType.rightParen)) _advance();
+      }
+      elseBody = _parseActivityBlock(_ifBlockTerminator);
+    }
+    if (!_isKeyword('endif')) {
+      final t = _peek();
+      throw ParserException(
+          "Expected 'endif' to close if block, got '${t.lexeme}'",
+          t.line,
+          t.column);
+    }
+    _advance();
+    return IfBlock(
+      branches: List.unmodifiable(branches),
+      elseLabel: elseLabel,
+      elseBody: List.unmodifiable(elseBody),
+    );
+  }
+
+  bool _ifBlockTerminator() =>
+      _isKeyword('elseif') || _isKeyword('else') || _isKeyword('endif');
+
+  _IfHeader _readIfHeader(String kw) {
+    _advance();
+    String condition = '';
+    if (_check(TokenType.leftParen)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        condition = _advance().lexeme;
+      }
+      if (_check(TokenType.rightParen)) _advance();
+    }
+    String? thenLabel;
+    if (_isKeyword('then')) {
+      _advance();
+      if (_check(TokenType.leftParen)) {
+        _advance();
+        if (_check(TokenType.text)) {
+          thenLabel = _advance().lexeme;
+        }
+        if (_check(TokenType.rightParen)) _advance();
+      }
+    }
+    return _IfHeader(condition: condition, thenLabel: thenLabel);
+  }
+
+  WhileBlock _parseWhileBlock() {
+    _advance();
+    String condition = '';
+    if (_check(TokenType.leftParen)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        condition = _advance().lexeme;
+      }
+      if (_check(TokenType.rightParen)) _advance();
+    }
+    String? isLabel;
+    if (_isKeyword('is')) {
+      _advance();
+      if (_check(TokenType.leftParen)) {
+        _advance();
+        if (_check(TokenType.text)) {
+          isLabel = _advance().lexeme;
+        }
+        if (_check(TokenType.rightParen)) _advance();
+      }
+    }
+    final body = _parseActivityBlock(() => _isKeyword('endwhile'));
+    if (!_isKeyword('endwhile')) {
+      final t = _peek();
+      throw ParserException(
+          "Expected 'endwhile' to close while block, got '${t.lexeme}'",
+          t.line,
+          t.column);
+    }
+    _advance();
+    String? endLabel;
+    if (_check(TokenType.leftParen)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        endLabel = _advance().lexeme;
+      }
+      if (_check(TokenType.rightParen)) _advance();
+    }
+    return WhileBlock(
+      condition: condition,
+      isLabel: isLabel,
+      endLabel: endLabel,
+      body: List.unmodifiable(body),
+    );
+  }
+
+  RepeatBlock _parseRepeatBlock() {
+    _advance();
+    final body = _parseActivityBlock(
+        () => _isKeyword('repeat') && _peekAhead(1, 'while'));
+    String? whileCondition;
+    if (_isKeyword('repeat') && _peekAhead(1, 'while')) {
+      _advance();
+      _advance();
+      if (_check(TokenType.leftParen)) {
+        _advance();
+        if (_check(TokenType.text)) {
+          whileCondition = _advance().lexeme;
+        }
+        if (_check(TokenType.rightParen)) _advance();
+      }
+    }
+    return RepeatBlock(
+      body: List.unmodifiable(body),
+      whileCondition: whileCondition,
+    );
+  }
+
+  ForkBlock _parseForkBlock() {
+    _advance();
+    final branches = <List<ActivityNode>>[];
+    branches.add(_parseActivityBlock(
+        () => (_isKeyword('fork') && _peekAhead(1, 'again')) || _isEndFork()));
+    while (_isKeyword('fork') && _peekAhead(1, 'again')) {
+      _advance();
+      _advance();
+      branches.add(_parseActivityBlock(
+          () => (_isKeyword('fork') && _peekAhead(1, 'again')) || _isEndFork()));
+    }
+    if (!_isEndFork()) {
+      final t = _peek();
+      throw ParserException(
+          "Expected 'end fork' to close fork block, got '${t.lexeme}'",
+          t.line,
+          t.column);
+    }
+    _advance();
+    _advance();
+    return ForkBlock(branches: List.unmodifiable(branches));
+  }
+
+  bool _isEndFork() =>
+      _isKeyword('end') && _peekAhead(1, 'fork');
+
+  Partition _parsePartition() {
+    _advance();
+    String name = '';
+    if (_check(TokenType.stringLiteral)) {
+      name = _advance().lexeme;
+    } else if (_check(TokenType.identifier)) {
+      name = _advance().lexeme;
+    }
+    if (!_check(TokenType.leftBrace)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected '{' after partition name, got ${t.type}",
+          t.line,
+          t.column);
+    }
+    _advance();
+    final body = _parseActivityBlock(() => _check(TokenType.rightBrace));
+    if (!_check(TokenType.rightBrace)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected '}' to close partition", t.line, t.column);
+    }
+    _advance();
+    return Partition(name: name, body: List.unmodifiable(body));
+  }
+
+  List<ActivityNode> _parseActivityBlock(bool Function() terminator) {
+    final body = <ActivityNode>[];
+    _skipNewlines();
+    while (!_check(TokenType.endUml) &&
+        !_check(TokenType.eof) &&
+        !terminator()) {
+      final node = _parseActivityNode();
+      if (node != null) body.add(node);
+      _skipNewlines();
+    }
+    return body;
+  }
+
+  bool _peekAhead(int offset, String word) {
+    final k = _pos + offset;
+    if (k >= _tokens.length) return false;
+    final t = _tokens[k];
+    return t.type == TokenType.identifier && t.lexeme == word;
+  }
+
+  void _skipUntilNewline() {
+    while (!_check(TokenType.newline) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      _advance();
+    }
+  }
+
+  bool _looksLikeStateDiagram() {
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.identifier && t.lexeme == 'state') {
+        return true;
+      }
+      if (t.type == TokenType.leftBracket) {
+        if (k + 2 < _tokens.length &&
+            _tokens[k + 1].type == TokenType.identifier &&
+            _tokens[k + 1].lexeme == '*' &&
+            _tokens[k + 2].type == TokenType.rightBracket) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  StateDiagram _parseStateDiagram() {
+    final states = <StateDecl>[];
+    final transitions = <StateTransition>[];
+    final byName = <String, int>{};
+
+    void addState(StateDecl decl) {
+      final idx = byName[decl.name];
+      if (idx != null) {
+        final existing = states[idx];
+        states[idx] = StateDecl(
+          name: existing.name,
+          displayName: decl.displayName ?? existing.displayName,
+          nestedStates: decl.nestedStates.isNotEmpty
+              ? decl.nestedStates
+              : existing.nestedStates,
+          nestedTransitions: decl.nestedTransitions.isNotEmpty
+              ? decl.nestedTransitions
+              : existing.nestedTransitions,
+          concurrentRegions: decl.concurrentRegions.isNotEmpty
+              ? decl.concurrentRegions
+              : existing.concurrentRegions,
+        );
+        return;
+      }
+      byName[decl.name] = states.length;
+      states.add(decl);
+    }
+
+    while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
+      _skipNewlines();
+      if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+      if (_isKeyword('skinparam')) {
+        _parseSkinparam();
+      } else if (_isKeyword('state')) {
+        addState(_parseStateDecl());
+      } else if (_isKeyword('note')) {
+        _skipUntilNewline();
+      } else {
+        final t = _parseStateTransitionOrRef(addState);
+        if (t != null) transitions.add(t);
+      }
+      _skipNewlines();
+    }
+    _expect(TokenType.endUml);
+    return StateDiagram(
+      states: List.unmodifiable(states),
+      transitions: List.unmodifiable(transitions),
+      skin: _skin,
+    );
+  }
+
+  StateDecl _parseStateDecl() {
+    _advance();
+    String name;
+    String? displayName;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      _expectKeyword('as');
+      name = _expect(TokenType.identifier).lexeme;
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        displayName = first;
+        name = _expect(TokenType.identifier).lexeme;
+      } else {
+        name = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected state name, got ${t.type}', t.line, t.column);
+    }
+
+    final nested = <StateDecl>[];
+    final nestedTrans = <StateTransition>[];
+    final regions = <List<StateDecl>>[];
+    var currentRegion = <StateDecl>[];
+    var hasRegions = false;
+
+    if (_check(TokenType.leftBrace)) {
+      _advance();
+      _skipNewlines();
+
+      final byName = <String, int>{};
+      void addNested(StateDecl decl) {
+        final idx = byName[decl.name];
+        if (idx != null) {
+          final existing = nested[idx];
+          nested[idx] = StateDecl(
+            name: existing.name,
+            displayName: decl.displayName ?? existing.displayName,
+            nestedStates: decl.nestedStates.isNotEmpty
+                ? decl.nestedStates
+                : existing.nestedStates,
+            nestedTransitions: decl.nestedTransitions.isNotEmpty
+                ? decl.nestedTransitions
+                : existing.nestedTransitions,
+            concurrentRegions: decl.concurrentRegions.isNotEmpty
+                ? decl.concurrentRegions
+                : existing.concurrentRegions,
+          );
+          return;
+        }
+        byName[decl.name] = nested.length;
+        nested.add(decl);
+        currentRegion.add(decl);
+      }
+
+      while (!_check(TokenType.rightBrace) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        if (_check(TokenType.minusMinus)) {
+          _advance();
+          hasRegions = true;
+          regions.add(List<StateDecl>.from(currentRegion));
+          currentRegion = <StateDecl>[];
+          _skipNewlines();
+          continue;
+        }
+        if (_isKeyword('state')) {
+          addNested(_parseStateDecl());
+        } else if (_isKeyword('note')) {
+          _skipUntilNewline();
+        } else {
+          final t = _parseStateTransitionOrRef(addNested);
+          if (t != null) nestedTrans.add(t);
+        }
+        _skipNewlines();
+      }
+      if (_check(TokenType.rightBrace)) {
+        _advance();
+      }
+      if (hasRegions) {
+        regions.add(List<StateDecl>.from(currentRegion));
+      }
+    }
+
+    return StateDecl(
+      name: name,
+      displayName: displayName,
+      nestedStates: List.unmodifiable(nested),
+      nestedTransitions: List.unmodifiable(nestedTrans),
+      concurrentRegions: hasRegions
+          ? List.unmodifiable(regions.map(List<StateDecl>.unmodifiable))
+          : const [],
+    );
+  }
+
+  StateTransition? _parseStateTransitionOrRef(
+      void Function(StateDecl) addState) {
+    final from = _readStateRef();
+    if (!_check(TokenType.arrow)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected arrow after state name, got ${t.type}", t.line, t.column);
+    }
+    _advance();
+    final to = _readStateRef();
+    String? label;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        label = _advance().lexeme;
+      }
+    }
+    if (from != '[*]') {
+      addState(StateDecl(name: from));
+    }
+    if (to != '[*]') {
+      addState(StateDecl(name: to));
+    }
+    return StateTransition(from: from, to: to, label: label);
+  }
+
+  String _readStateRef() {
+    if (_check(TokenType.leftBracket)) {
+      _advance();
+      if (!_check(TokenType.identifier) || _peek().lexeme != '*') {
+        final t = _peek();
+        throw ParserException(
+            "Expected '*' inside '[]', got '${t.lexeme}'", t.line, t.column);
+      }
+      _advance();
+      if (!_check(TokenType.rightBracket)) {
+        final t = _peek();
+        throw ParserException(
+            "Expected ']' to close pseudo-state, got ${t.type}",
+            t.line,
+            t.column);
+      }
+      _advance();
+      return '[*]';
+    }
+    if (_check(TokenType.identifier)) {
+      return _advance().lexeme;
+    }
+    final t = _peek();
+    throw ParserException(
+        "Expected state name, got ${t.type}", t.line, t.column);
+  }
+
+  bool _looksLikeUseCaseDiagram() {
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.identifier &&
+          (t.lexeme == 'usecase' || t.lexeme == 'rectangle')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _looksLikeClassDiagram() {
+    const headers = {
+      'class',
+      'interface',
+      'enum',
+      'abstract',
+      'annotation',
+      'exception',
+      'object',
+      'map',
+    };
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.identifier && headers.contains(t.lexeme)) {
+        return true;
+      }
+      if (t.type == TokenType.identifier && t.lexeme == 'entity') {
+        if (_entityIsClassHeader(k)) return true;
+      }
+      if (t.type == TokenType.arrow && _isUnambiguousClassArrow(t.lexeme)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _entityIsClassHeader(int k) {
+    var j = k + 1;
+    while (j < _tokens.length) {
+      final t = _tokens[j];
+      if (t.type == TokenType.newline) return false;
+      if (t.type == TokenType.leftBrace) return true;
+      if (t.type == TokenType.eof || t.type == TokenType.endUml) return false;
+      j++;
+    }
+    return false;
+  }
+
+  static bool _isUnambiguousClassArrow(String lexeme) {
+    // Arrows that cannot appear in sequence diagrams: any arrow involving '|'
+    // (inheritance triangle), filled/hollow diamond ends, '..' dependency,
+    // or trailing '*' / 'o' that wasn't preceded by '-'/'>' (those would be
+    // sequence arrow ends like '->o'). Sequence arrows allow trailing 'o'
+    // and 'x' but never lead with them.
+    if (lexeme.contains('|')) return true;
+    if (lexeme.startsWith('*') || lexeme.startsWith('o')) return true;
+    if (lexeme.endsWith('*')) return true;
+    if (lexeme.contains('..')) return true;
+    return false;
+  }
+
+  ClassDiagram _parseClassDiagram() {
+    final classes = <ClassDecl>[];
+    final relationships = <Relationship>[];
+    while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
+      _skipNewlines();
+      if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+      if (_isClassHeaderKeyword()) {
+        classes.add(_parseClassDecl());
+      } else if (_isKeyword('skinparam')) {
+        _parseSkinparam();
+      } else {
+        _parseClassRelationship(relationships);
+      }
+      _skipNewlines();
+    }
+    _expect(TokenType.endUml);
+    return ClassDiagram(
+      classes: List.unmodifiable(classes),
+      relationships: List.unmodifiable(relationships),
+      skin: _skin,
+    );
+  }
+
+  bool _isClassHeaderKeyword() {
+    if (!_check(TokenType.identifier)) return false;
+    const headers = {
+      'class',
+      'interface',
+      'enum',
+      'abstract',
+      'annotation',
+      'exception',
+      'object',
+      'map',
+      'entity',
+    };
+    return headers.contains(_peek().lexeme);
+  }
+
+  ClassDecl _parseClassDecl() {
+    var kind = ClassKind.class_;
+    final firstWord = _advance().lexeme;
+    if (firstWord == 'abstract') {
+      kind = ClassKind.abstractClass;
+      if (_isKeyword('class')) {
+        _advance();
+      }
+    } else {
+      switch (firstWord) {
+        case 'class':
+          kind = ClassKind.class_;
+        case 'interface':
+          kind = ClassKind.interface;
+        case 'enum':
+          kind = ClassKind.enum_;
+        case 'annotation':
+          kind = ClassKind.annotation;
+        case 'exception':
+          kind = ClassKind.exception;
+        case 'object':
+          kind = ClassKind.object_;
+        case 'map':
+          kind = ClassKind.map_;
+        case 'entity':
+          kind = ClassKind.entity_;
+      }
+    }
+    if (!_check(TokenType.identifier) &&
+        !_check(TokenType.stringLiteral)) {
+      final t = _peek();
+      throw ParserException(
+          'Expected class name, got ${t.type}', t.line, t.column);
+    }
+    final name = _advance().lexeme;
+
+    String? instanceOf;
+    if ((kind == ClassKind.object_ || kind == ClassKind.map_) &&
+        _check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        instanceOf = _advance().lexeme;
+      } else if (_check(TokenType.identifier)) {
+        instanceOf = _advance().lexeme;
+      }
+    }
+
+    // Skip optional 'extends X' / 'implements Y' (ignored at AST level;
+    // relationships should be expressed via explicit relationship lines).
+    while (_check(TokenType.identifier) &&
+        (_peek().lexeme == 'extends' || _peek().lexeme == 'implements')) {
+      _advance();
+      while (_check(TokenType.identifier)) {
+        _advance();
+        if (_check(TokenType.comma)) {
+          _advance();
+        } else {
+          break;
+        }
+      }
+    }
+
+    final members = <ClassMember>[];
+    if (_check(TokenType.leftBrace)) {
+      _advance();
+      _skipNewlines();
+      while (!_check(TokenType.rightBrace) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        if (_check(TokenType.text)) {
+          final line = _advance().lexeme;
+          final ClassMember? parsed;
+          if (kind == ClassKind.object_) {
+            parsed = _parseAttributeLine(line, isMap: false);
+          } else if (kind == ClassKind.map_) {
+            parsed = _parseAttributeLine(line, isMap: true);
+          } else {
+            parsed = _parseMemberLine(line, kind);
+          }
+          if (parsed != null) members.add(parsed);
+        } else {
+          // Skip stray tokens defensively.
+          _advance();
+        }
+        _skipNewlines();
+      }
+      if (_check(TokenType.rightBrace)) {
+        _advance();
+      }
+    }
+    return ClassDecl(
+      name: name,
+      kind: kind,
+      members: List.unmodifiable(members),
+      instanceOf: instanceOf,
+    );
+  }
+
+  ClassMember? _parseAttributeLine(String raw, {required bool isMap}) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    if (trimmed == '--') return const MemberDivider(DividerKind.solid);
+    if (trimmed == '..') return const MemberDivider(DividerKind.dashed);
+    if (trimmed == '==') return const MemberDivider(DividerKind.doubleLine);
+    final sep = isMap ? '=>' : '=';
+    final idx = trimmed.indexOf(sep);
+    if (idx < 0) {
+      return Attribute(name: trimmed, value: '', isMap: isMap);
+    }
+    final name = trimmed.substring(0, idx).trim();
+    var value = trimmed.substring(idx + sep.length).trim();
+    if (value.length >= 2 &&
+        value.startsWith('"') &&
+        value.endsWith('"')) {
+      value = value.substring(1, value.length - 1);
+    }
+    return Attribute(name: name, value: value, isMap: isMap);
+  }
+
+  ClassMember? _parseMemberLine(String raw, ClassKind classKind) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    if (trimmed == '--') return const MemberDivider(DividerKind.solid);
+    if (trimmed == '..') return const MemberDivider(DividerKind.dashed);
+    if (trimmed == '==') return const MemberDivider(DividerKind.doubleLine);
+
+    if (classKind == ClassKind.enum_) {
+      final hasParens = trimmed.contains('(');
+      final firstChar = trimmed[0];
+      if (!hasParens && !'+-#~{'.contains(firstChar)) {
+        return EnumValue(trimmed);
+      }
+    }
+
+    var rest = trimmed;
+    var isRequired = false;
+    if (rest.startsWith('*')) {
+      rest = rest.substring(1).trimLeft();
+      isRequired = true;
+    }
+    String? stereotype;
+    final stereoEnd = rest.lastIndexOf('>>');
+    if (stereoEnd >= 0) {
+      final stereoStart = rest.lastIndexOf('<<', stereoEnd);
+      if (stereoStart >= 0 && stereoEnd == rest.length - 2) {
+        stereotype = rest.substring(stereoStart + 2, stereoEnd).trim();
+        rest = rest.substring(0, stereoStart).trimRight();
+      }
+    }
+    var visibility = Visibility.public;
+    if (rest.isEmpty) return null;
+    final firstChar = rest[0];
+    switch (firstChar) {
+      case '+':
+        visibility = Visibility.public;
+        rest = rest.substring(1).trimLeft();
+      case '-':
+        visibility = Visibility.private;
+        rest = rest.substring(1).trimLeft();
+      case '#':
+        visibility = Visibility.protected;
+        rest = rest.substring(1).trimLeft();
+      case '~':
+        visibility = Visibility.packagePrivate;
+        rest = rest.substring(1).trimLeft();
+    }
+
+    var isStatic = false;
+    var isAbstract = false;
+    while (rest.startsWith('{')) {
+      final close = rest.indexOf('}');
+      if (close < 0) break;
+      final modifier = rest.substring(1, close).trim().toLowerCase();
+      if (modifier == 'static') isStatic = true;
+      if (modifier == 'abstract') isAbstract = true;
+      rest = rest.substring(close + 1).trimLeft();
+    }
+    if (rest.isEmpty) return null;
+
+    final parenIdx = rest.indexOf('(');
+    if (parenIdx >= 0) {
+      final closeParen = rest.indexOf(')', parenIdx);
+      if (closeParen < 0) {
+        final name = rest.substring(0, parenIdx);
+        return Method(
+          name: name,
+          visibility: visibility,
+          isStatic: isStatic,
+          isAbstract: isAbstract,
+          signature: rest,
+        );
+      }
+      final name = rest.substring(0, parenIdx);
+      final signature = rest.substring(0, closeParen + 1);
+      String? returnType;
+      final tail = rest.substring(closeParen + 1).trim();
+      if (tail.startsWith(':')) {
+        returnType = tail.substring(1).trim();
+      } else if (tail.isNotEmpty) {
+        returnType = tail;
+      }
+      return Method(
+        name: name,
+        visibility: visibility,
+        isStatic: isStatic,
+        isAbstract: isAbstract,
+        signature: signature,
+        returnType: returnType,
+      );
+    }
+    final colonIdx = rest.indexOf(':');
+    if (colonIdx >= 0) {
+      final name = rest.substring(0, colonIdx).trim();
+      final type = rest.substring(colonIdx + 1).trim();
+      return Field(
+        name: name,
+        visibility: visibility,
+        isStatic: isStatic,
+        type: type.isEmpty ? null : type,
+        required: isRequired,
+        stereotype: stereotype,
+      );
+    }
+    return Field(
+      name: rest,
+      visibility: visibility,
+      isStatic: isStatic,
+      required: isRequired,
+      stereotype: stereotype,
+    );
+  }
+
+  void _parseClassRelationship(List<Relationship> out) {
+    String? fromMult;
+    final from = _readRelationshipEnd();
+    if (_check(TokenType.stringLiteral)) {
+      fromMult = _advance().lexeme;
+    }
+    Token arrowToken;
+    if (_check(TokenType.arrow)) {
+      arrowToken = _advance();
+    } else if (_check(TokenType.minusMinus)) {
+      arrowToken = _advance();
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected relationship arrow after \'$from\', got ${t.type}',
+          t.line,
+          t.column);
+    }
+    String? toMult;
+    if (_check(TokenType.stringLiteral)) {
+      toMult = _advance().lexeme;
+    }
+    final to = _readRelationshipEnd();
+    String? label;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        label = _advance().lexeme;
+      }
+    }
+    final decoded = _decodeRelationshipArrow(arrowToken);
+    String resolvedFrom = from;
+    String resolvedTo = to;
+    String? resolvedFromMult = fromMult;
+    String? resolvedToMult = toMult;
+    CrowFoot? resolvedFromCrow = decoded.fromCrowFoot;
+    CrowFoot? resolvedToCrow = decoded.toCrowFoot;
+    if (decoded.reverse) {
+      resolvedFrom = to;
+      resolvedTo = from;
+      resolvedFromMult = toMult;
+      resolvedToMult = fromMult;
+      resolvedFromCrow = decoded.toCrowFoot;
+      resolvedToCrow = decoded.fromCrowFoot;
+    }
+    out.add(Relationship(
+      from: resolvedFrom,
+      to: resolvedTo,
+      kind: decoded.kind,
+      label: label,
+      fromMultiplicity: resolvedFromMult,
+      toMultiplicity: resolvedToMult,
+      fromCrowFoot: resolvedFromCrow,
+      toCrowFoot: resolvedToCrow,
+    ));
+  }
+
+  String _readRelationshipEnd() {
+    if (_check(TokenType.identifier)) {
+      return _advance().lexeme;
+    }
+    if (_check(TokenType.stringLiteral)) {
+      return _advance().lexeme;
+    }
+    final t = _peek();
+    throw ParserException(
+        'Expected class name, got ${t.type}', t.line, t.column);
+  }
+
+  _DecodedRelArrow _decodeRelationshipArrow(Token token) {
+    final lexeme = token.lexeme;
+    final crow = _decodeCrowFootArrow(lexeme);
+    if (crow != null) return crow;
+    final hasLeftTriangle = lexeme.startsWith('<|');
+    final hasRightTriangle = lexeme.endsWith('|>');
+    final startsDiamondFilled = lexeme.startsWith('*');
+    final endsDiamondFilled = lexeme.endsWith('*');
+    final startsDiamondHollow = lexeme.startsWith('o');
+    final endsDiamondHollow = lexeme.endsWith('o');
+    final hasLeftArrow = lexeme.startsWith('<');
+    final hasRightArrow = lexeme.endsWith('>') && !hasRightTriangle;
+    final dashed = lexeme.contains('.');
+
+    if (hasLeftTriangle) {
+      return _DecodedRelArrow(
+        dashed ? RelationshipKind.realization : RelationshipKind.inheritance,
+        reverse: false,
+      );
+    }
+    if (hasRightTriangle) {
+      return _DecodedRelArrow(
+        dashed ? RelationshipKind.realization : RelationshipKind.inheritance,
+        reverse: true,
+      );
+    }
+    if (startsDiamondFilled) {
+      return _DecodedRelArrow(RelationshipKind.composition, reverse: false);
+    }
+    if (endsDiamondFilled) {
+      return _DecodedRelArrow(RelationshipKind.composition, reverse: true);
+    }
+    if (startsDiamondHollow) {
+      return _DecodedRelArrow(RelationshipKind.aggregation, reverse: false);
+    }
+    if (endsDiamondHollow) {
+      return _DecodedRelArrow(RelationshipKind.aggregation, reverse: true);
+    }
+    if (hasRightArrow) {
+      return _DecodedRelArrow(
+        dashed
+            ? RelationshipKind.dependency
+            : RelationshipKind.directedAssociation,
+        reverse: false,
+      );
+    }
+    if (hasLeftArrow) {
+      return _DecodedRelArrow(
+        dashed
+            ? RelationshipKind.dependency
+            : RelationshipKind.directedAssociation,
+        reverse: true,
+      );
+    }
+    return _DecodedRelArrow(
+      dashed ? RelationshipKind.link : RelationshipKind.association,
+      reverse: false,
+    );
+  }
+
+  _DecodedRelArrow? _decodeCrowFootArrow(String lexeme) {
+    if (lexeme.length < 5) return null;
+    const leftEnds = {'||', '|o', '}o', '}|'};
+    const rightEnds = {'||', 'o|', 'o{', '|{'};
+    final left = lexeme.substring(0, 2);
+    final right = lexeme.substring(lexeme.length - 2);
+    if (!leftEnds.contains(left) || !rightEnds.contains(right)) return null;
+    final body = lexeme.substring(2, lexeme.length - 2);
+    if (body.isEmpty) return null;
+    final isDashes = body.split('').every((c) => c == '-');
+    final isDots = body.split('').every((c) => c == '.');
+    if (!isDashes && !isDots) return null;
+    CrowFoot fromKind;
+    switch (left) {
+      case '||':
+        fromKind = CrowFoot.one;
+      case '|o':
+        fromKind = CrowFoot.zeroOrOne;
+      case '}o':
+        fromKind = CrowFoot.zeroOrMany;
+      case '}|':
+        fromKind = CrowFoot.oneOrMany;
+      default:
+        return null;
+    }
+    CrowFoot toKind;
+    switch (right) {
+      case '||':
+        toKind = CrowFoot.one;
+      case 'o|':
+        toKind = CrowFoot.zeroOrOne;
+      case 'o{':
+        toKind = CrowFoot.zeroOrMany;
+      case '|{':
+        toKind = CrowFoot.oneOrMany;
+      default:
+        return null;
+    }
+    return _DecodedRelArrow(
+      isDots ? RelationshipKind.link : RelationshipKind.association,
+      reverse: false,
+      fromCrowFoot: fromKind,
+      toCrowFoot: toKind,
+    );
+  }
+
+  bool _looksLikeComponentDiagram() {
+    const containerKeywords = {'package', 'node', 'cloud', 'frame'};
+    var atLineStart = true;
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.newline) {
+        atLineStart = true;
+        continue;
+      }
+      if (atLineStart && t.type == TokenType.identifier) {
+        if (t.lexeme == 'component') return true;
+        if (t.lexeme == 'artifact') return true;
+        if (containerKeywords.contains(t.lexeme)) return true;
+      }
+      if (atLineStart && t.type == TokenType.leftBracket) {
+        if (k + 2 < _tokens.length &&
+            _tokens[k + 1].type == TokenType.identifier &&
+            _tokens[k + 1].lexeme == '*' &&
+            _tokens[k + 2].type == TokenType.rightBracket) {
+          // Skip: this is the state pseudo-state literal.
+        } else {
+          var found = false;
+          for (var j = k + 1; j < _tokens.length; j++) {
+            final tt = _tokens[j];
+            if (tt.type == TokenType.rightBracket) {
+              found = true;
+              break;
+            }
+            if (tt.type == TokenType.newline ||
+                tt.type == TokenType.eof ||
+                tt.type == TokenType.endUml) {
+              break;
+            }
+          }
+          if (found) return true;
+        }
+      }
+      if (atLineStart &&
+          t.type == TokenType.leftParen &&
+          k + 1 < _tokens.length &&
+          _tokens[k + 1].type == TokenType.rightParen) {
+        return true;
+      }
+      atLineStart = false;
+    }
+    return false;
+  }
+
+  ComponentDiagram _parseComponentDiagram() {
+    final nodes = <ComponentNode>[];
+    final containers = <ComponentContainer>[];
+    final relations = <ComponentRelation>[];
+    final seenAliases = <String>{};
+
+    void addNode(ComponentNode node) {
+      if (seenAliases.add(node.alias)) {
+        nodes.add(node);
+      }
+    }
+
+    while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
+      _skipNewlines();
+      if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+      if (_isKeyword('skinparam')) {
+        _parseSkinparam();
+      } else if (_isKeyword('component')) {
+        addNode(_parseComponentDecl());
+      } else if (_isKeyword('artifact')) {
+        addNode(_parseArtifactDecl());
+      } else if (_isKeyword('interface')) {
+        addNode(_parseInterfaceDecl());
+      } else if (_isComponentContainerKeyword()) {
+        containers.add(_parseComponentContainer(addNode));
+      } else if (_check(TokenType.leftBracket) &&
+          !_bracketIsRelationStart()) {
+        addNode(_parseBracketComponent());
+      } else if (_check(TokenType.leftParen) &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.rightParen &&
+          !_parenIsRelationStart()) {
+        addNode(_parseParenInterface());
+      } else {
+        _parseComponentRelation(relations, addNode);
+      }
+      _skipNewlines();
+    }
+    _expect(TokenType.endUml);
+    return ComponentDiagram(
+      nodes: List.unmodifiable(nodes),
+      containers: List.unmodifiable(containers),
+      relations: List.unmodifiable(relations),
+      skin: _skin,
+    );
+  }
+
+  bool _isComponentContainerKeyword() {
+    if (!_check(TokenType.identifier)) return false;
+    const kws = {'package', 'node', 'cloud', 'frame'};
+    return kws.contains(_peek().lexeme);
+  }
+
+  bool _bracketIsRelationStart() {
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.rightBracket) {
+        if (k + 1 < _tokens.length) {
+          final next = _tokens[k + 1].type;
+          return next == TokenType.arrow || next == TokenType.minusMinus;
+        }
+        return false;
+      }
+      if (t.type == TokenType.newline ||
+          t.type == TokenType.eof ||
+          t.type == TokenType.endUml) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  bool _parenIsRelationStart() {
+    var k = _pos + 2;
+    if (k >= _tokens.length) return false;
+    while (k < _tokens.length) {
+      final t = _tokens[k];
+      if (t.type == TokenType.arrow || t.type == TokenType.minusMinus) {
+        return true;
+      }
+      if (t.type == TokenType.newline ||
+          t.type == TokenType.eof ||
+          t.type == TokenType.endUml ||
+          t.type == TokenType.colon) {
+        return false;
+      }
+      k++;
+    }
+    return false;
+  }
+
+  ContainerKind _containerKindFor(String keyword) {
+    switch (keyword) {
+      case 'package':
+        return ContainerKind.package;
+      case 'node':
+        return ContainerKind.node;
+      case 'cloud':
+        return ContainerKind.cloud;
+      case 'frame':
+        return ContainerKind.frame;
+    }
+    return ContainerKind.package;
+  }
+
+  ComponentNode _parseComponentDecl() {
+    _advance();
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = first;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected component name, got ${t.type}', t.line, t.column);
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: ComponentNodeKind.component,
+    );
+  }
+
+  ComponentNode _parseArtifactDecl() {
+    _advance();
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = first;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected artifact name, got ${t.type}', t.line, t.column);
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: ComponentNodeKind.artifact,
+    );
+  }
+
+  ComponentNode _parseInterfaceDecl() {
+    _advance();
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = first;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected interface name, got ${t.type}', t.line, t.column);
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: ComponentNodeKind.interface,
+    );
+  }
+
+  String _readBracketedName() {
+    _advance();
+    if (_check(TokenType.stringLiteral)) {
+      final name = _advance().lexeme;
+      if (!_check(TokenType.rightBracket)) {
+        final t = _peek();
+        throw ParserException(
+            "Expected ']' to close bracketed component, got ${t.type}",
+            t.line,
+            t.column);
+      }
+      _advance();
+      return name;
+    }
+    final parts = <String>[];
+    while (!_check(TokenType.rightBracket) &&
+        !_check(TokenType.newline) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      parts.add(_advance().lexeme);
+    }
+    if (!_check(TokenType.rightBracket)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected ']' to close bracketed component, got ${t.type}",
+          t.line,
+          t.column);
+    }
+    _advance();
+    if (parts.isEmpty) {
+      final t = _peek();
+      throw ParserException(
+          "Expected component name inside '[]'", t.line, t.column);
+    }
+    return parts.join(' ');
+  }
+
+  ComponentNode _parseBracketComponent() {
+    final name = _readBracketedName();
+    String alias = name;
+    String? displayName;
+    if (_isKeyword('as')) {
+      _advance();
+      alias = _expect(TokenType.identifier).lexeme;
+      displayName = name;
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: ComponentNodeKind.component,
+    );
+  }
+
+  ComponentNode _parseParenInterface() {
+    _advance();
+    _expect(TokenType.rightParen);
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = first;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected interface name after \'()\', got ${t.type}',
+          t.line,
+          t.column);
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: ComponentNodeKind.interface,
+    );
+  }
+
+  ComponentContainer _parseComponentContainer(
+      void Function(ComponentNode) addNode) {
+    final kwToken = _advance();
+    final kind = _containerKindFor(kwToken.lexeme);
+    String? label;
+    if (_check(TokenType.stringLiteral)) {
+      label = _advance().lexeme;
+    } else if (_check(TokenType.identifier) && !_check(TokenType.leftBrace)) {
+      if (_peek().lexeme != 'as') {
+        label = _advance().lexeme;
+      }
+    }
+    if (_isKeyword('as')) {
+      _advance();
+      _expect(TokenType.identifier);
+    }
+    final contained = <String>[];
+    final nested = <ComponentContainer>[];
+    if (_check(TokenType.leftBrace)) {
+      _advance();
+      _skipNewlines();
+      while (!_check(TokenType.rightBrace) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        if (_isKeyword('component')) {
+          final node = _parseComponentDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('artifact')) {
+          final node = _parseArtifactDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('interface')) {
+          final node = _parseInterfaceDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_check(TokenType.leftBracket)) {
+          final node = _parseBracketComponent();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_check(TokenType.leftParen) &&
+            _pos + 1 < _tokens.length &&
+            _tokens[_pos + 1].type == TokenType.rightParen) {
+          final node = _parseParenInterface();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isComponentContainerKeyword()) {
+          nested.add(_parseComponentContainer(addNode));
+        } else {
+          final t = _peek();
+          throw ParserException(
+              "Unexpected '${t.lexeme}' inside ${kwToken.lexeme} container",
+              t.line,
+              t.column);
+        }
+        _skipNewlines();
+      }
+      if (!_check(TokenType.rightBrace)) {
+        throw ParserException(
+            "Expected '}' to close ${kwToken.lexeme}",
+            kwToken.line,
+            kwToken.column);
+      }
+      _advance();
+    }
+    return ComponentContainer(
+      label: label,
+      kind: kind,
+      nodeAliases: List.unmodifiable(contained),
+      nestedContainers: List.unmodifiable(nested),
+    );
+  }
+
+  void _parseComponentRelation(
+      List<ComponentRelation> out, void Function(ComponentNode) addNode) {
+    final from = _readComponentRelationEnd();
+    if (!_check(TokenType.arrow) && !_check(TokenType.minusMinus)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected relationship arrow after '${from.alias}', got ${t.type}",
+          t.line,
+          t.column);
+    }
+    final arrowToken = _advance();
+    final to = _readComponentRelationEnd();
+    String? label;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        label = _advance().lexeme;
+      }
+    }
+    final decoded = _decodeUseCaseArrow(arrowToken);
+    final fromAlias =
+        decoded.direction == MessageDirection.backward ? to.alias : from.alias;
+    final toAlias =
+        decoded.direction == MessageDirection.backward ? from.alias : to.alias;
+    if (from.declared) {
+      addNode(ComponentNode(
+        alias: from.alias,
+        label: from.alias,
+        kind: ComponentNodeKind.component,
+      ));
+    }
+    if (to.declared) {
+      addNode(ComponentNode(
+        alias: to.alias,
+        label: to.alias,
+        kind: ComponentNodeKind.component,
+      ));
+    }
+    out.add(ComponentRelation(
+      from: fromAlias,
+      to: toAlias,
+      lineStyle: decoded.lineStyle,
+      head: decoded.head,
+      direction: MessageDirection.forward,
+      label: label,
+    ));
+  }
+
+  _ComponentRelEnd _readComponentRelationEnd() {
+    if (_check(TokenType.leftBracket)) {
+      final name = _readBracketedName();
+      return _ComponentRelEnd(name, declared: true);
+    }
+    if (_check(TokenType.identifier)) {
+      return _ComponentRelEnd(_advance().lexeme, declared: false);
+    }
+    if (_check(TokenType.stringLiteral)) {
+      return _ComponentRelEnd(_advance().lexeme, declared: false);
+    }
+    final t = _peek();
+    throw ParserException(
+        'Expected component name, got ${t.type}', t.line, t.column);
+  }
+
+  UseCaseDiagram _parseUseCaseDiagram() {
+    final nodes = <UseCaseNode>[];
+    final relations = <UseCaseRelation>[];
+    final boundaries = <UseCaseBoundary>[];
+    final seenAliases = <String>{};
+
+    void addNode(UseCaseNode node) {
+      if (seenAliases.add(node.alias)) {
+        nodes.add(node);
+      }
+    }
+
+    while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
+      _skipNewlines();
+      if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+      if (_isKeyword('actor')) {
+        addNode(_parseUseCaseNode(UseCaseNodeKind.actor));
+      } else if (_isKeyword('usecase')) {
+        addNode(_parseUseCaseNode(UseCaseNodeKind.useCase));
+      } else if (_isKeyword('rectangle')) {
+        boundaries.add(_parseRectangleBoundary(addNode));
+      } else if (_isKeyword('skinparam')) {
+        _parseSkinparam();
+      } else {
+        _parseUseCaseRelation(relations, addNode);
+      }
+      _skipNewlines();
+    }
+    _expect(TokenType.endUml);
+    return UseCaseDiagram(
+      nodes: List.unmodifiable(nodes),
+      relations: List.unmodifiable(relations),
+      boundaries: List.unmodifiable(boundaries),
+      skin: _skin,
+    );
+  }
+
+  UseCaseNode _parseUseCaseNode(UseCaseNodeKind kind) {
+    _advance();
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        displayName = first;
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected use case name, got ${t.type}', t.line, t.column);
+    }
+    return UseCaseNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: kind,
+    );
+  }
+
+  UseCaseBoundary _parseRectangleBoundary(void Function(UseCaseNode) addNode) {
+    final rectToken = _advance();
+    String? label;
+    if (_check(TokenType.stringLiteral)) {
+      label = _advance().lexeme;
+    } else if (_check(TokenType.identifier) && !_check(TokenType.leftBrace)) {
+      if (_peek().lexeme != 'as') {
+        label = _advance().lexeme;
+      }
+    }
+    if (_isKeyword('as')) {
+      _advance();
+      _expect(TokenType.identifier);
+    }
+    final contained = <String>[];
+    if (_check(TokenType.leftBrace)) {
+      _advance();
+      _skipNewlines();
+      while (!_check(TokenType.rightBrace) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        if (_isKeyword('usecase')) {
+          final node = _parseUseCaseNode(UseCaseNodeKind.useCase);
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('actor')) {
+          final node = _parseUseCaseNode(UseCaseNodeKind.actor);
+          addNode(node);
+          contained.add(node.alias);
+        } else {
+          final t = _peek();
+          throw ParserException(
+              "Only 'usecase' or 'actor' declarations are allowed inside a rectangle, got '${t.lexeme}'",
+              t.line,
+              t.column);
+        }
+        _skipNewlines();
+      }
+      if (!_check(TokenType.rightBrace)) {
+        throw ParserException(
+            "Expected '}' to close rectangle",
+            rectToken.line,
+            rectToken.column);
+      }
+      _advance();
+    }
+    return UseCaseBoundary(
+      label: label,
+      containedAliases: List.unmodifiable(contained),
+    );
+  }
+
+  void _parseUseCaseRelation(
+      List<UseCaseRelation> out, void Function(UseCaseNode) addNode) {
+    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
+      final t = _peek();
+      throw ParserException(
+          'Expected use case or actor name, got ${t.type}', t.line, t.column);
+    }
+    final from = _advance().lexeme;
+    if (!_check(TokenType.arrow) && !_check(TokenType.minusMinus)) {
+      final t = _peek();
+      throw ParserException(
+          "Expected relationship arrow after '$from', got ${t.type}",
+          t.line,
+          t.column);
+    }
+    final arrowToken = _advance();
+    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
+      final t = _peek();
+      throw ParserException(
+          'Expected use case or actor name, got ${t.type}', t.line, t.column);
+    }
+    final to = _advance().lexeme;
+    String? label;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        label = _advance().lexeme;
+      }
+    }
+    final decoded = _decodeUseCaseArrow(arrowToken);
+    final resolvedFrom = decoded.direction == MessageDirection.backward ? to : from;
+    final resolvedTo = decoded.direction == MessageDirection.backward ? from : to;
+    addNode(UseCaseNode(
+      alias: resolvedFrom,
+      label: resolvedFrom,
+      kind: UseCaseNodeKind.useCase,
+    ));
+    addNode(UseCaseNode(
+      alias: resolvedTo,
+      label: resolvedTo,
+      kind: UseCaseNodeKind.useCase,
+    ));
+    out.add(UseCaseRelation(
+      from: resolvedFrom,
+      to: resolvedTo,
+      lineStyle: decoded.lineStyle,
+      head: decoded.head,
+      direction: MessageDirection.forward,
+      label: label,
+    ));
+  }
+
+  _UseCaseArrow _decodeUseCaseArrow(Token token) {
+    final lexeme = token.lexeme;
+    final dashed = lexeme.contains('.');
+    final hasRightArrow = lexeme.endsWith('>');
+    final hasLeftArrow = lexeme.startsWith('<');
+    if (lexeme == '--' || lexeme == '..') {
+      return _UseCaseArrow(
+        dashed ? LineStyle.dashed : LineStyle.solid,
+        null,
+        MessageDirection.forward,
+      );
+    }
+    if (hasLeftArrow) {
+      return _UseCaseArrow(
+        dashed ? LineStyle.dashed : LineStyle.solid,
+        ArrowHead.open,
+        MessageDirection.backward,
+      );
+    }
+    if (hasRightArrow) {
+      return _UseCaseArrow(
+        dashed ? LineStyle.dashed : LineStyle.solid,
+        ArrowHead.open,
+        MessageDirection.forward,
+      );
+    }
+    return _UseCaseArrow(
+      dashed ? LineStyle.dashed : LineStyle.solid,
+      null,
+      MessageDirection.forward,
+    );
+  }
+
+  bool _looksLikeTimingDiagram() {
+    const laneKeywords = {'robust', 'concise', 'clock'};
+    var atLineStart = true;
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.newline) {
+        atLineStart = true;
+        continue;
+      }
+      if (atLineStart && t.type == TokenType.atTime) {
+        return true;
+      }
+      if (atLineStart &&
+          t.type == TokenType.identifier &&
+          laneKeywords.contains(t.lexeme)) {
+        return true;
+      }
+      atLineStart = false;
+    }
+    return false;
+  }
+
+  TimingDiagram _parseTimingDiagram() {
+    final lanes = <TimingLane>[];
+    final events = <TimingEvent>[];
+    var currentTime = 0;
+    while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
+      _skipNewlines();
+      if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+      if (_isKeyword('skinparam')) {
+        _parseSkinparam();
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('robust')) {
+        lanes.add(_parseTimingLane(TimingLaneKind.robust));
+      } else if (_isKeyword('concise')) {
+        lanes.add(_parseTimingLane(TimingLaneKind.concise));
+      } else if (_isKeyword('clock')) {
+        lanes.add(_parseTimingLane(TimingLaneKind.clock));
+      } else if (_check(TokenType.atTime)) {
+        currentTime = int.parse(_advance().lexeme);
+      } else {
+        _parseTimingStatement(events, currentTime);
+      }
+      _skipNewlines();
+    }
+    _expect(TokenType.endUml);
+    return TimingDiagram(
+      lanes: List.unmodifiable(lanes),
+      events: List.unmodifiable(events),
+      skin: _skin,
+    );
+  }
+
+  TimingLane _parseTimingLane(TimingLaneKind kind) {
+    final keywordToken = _advance();
+    String label;
+    String alias;
+    if (_check(TokenType.stringLiteral)) {
+      label = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        if (!_check(TokenType.identifier)) {
+          final t = _peek();
+          throw ParserException(
+              "Expected alias after 'as'", t.line, t.column);
+        }
+        alias = _advance().lexeme;
+      } else {
+        alias = label;
+      }
+    } else if (_check(TokenType.identifier)) {
+      alias = _advance().lexeme;
+      label = alias;
+      if (_isKeyword('as')) {
+        _advance();
+        if (!_check(TokenType.identifier)) {
+          final t = _peek();
+          throw ParserException(
+              "Expected alias after 'as'", t.line, t.column);
+        }
+        alias = _advance().lexeme;
+      }
+    } else {
+      throw ParserException(
+          "Expected lane label after '${keywordToken.lexeme}'",
+          keywordToken.line,
+          keywordToken.column);
+    }
+    int? clockPeriod;
+    if (kind == TimingLaneKind.clock && _isKeyword('with')) {
+      _advance();
+      if (!_isKeyword('period')) {
+        final t = _peek();
+        throw ParserException(
+            "Expected 'period' after 'with'", t.line, t.column);
+      }
+      _advance();
+      if (!_check(TokenType.identifier)) {
+        final t = _peek();
+        throw ParserException(
+            "Expected integer period", t.line, t.column);
+      }
+      final periodToken = _advance();
+      clockPeriod = int.tryParse(periodToken.lexeme);
+      if (clockPeriod == null) {
+        throw ParserException(
+            "Expected integer period, got '${periodToken.lexeme}'",
+            periodToken.line,
+            periodToken.column);
+      }
+    }
+    return TimingLane(
+      alias: alias,
+      label: label,
+      kind: kind,
+      clockPeriod: clockPeriod,
+    );
+  }
+
+  void _parseTimingStatement(List<TimingEvent> out, int currentTime) {
+    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
+      final t = _peek();
+      throw ParserException(
+          "Unexpected token '${t.lexeme}' in timing diagram",
+          t.line,
+          t.column);
+    }
+    final firstToken = _advance();
+    final first = firstToken.lexeme;
+    if (_isKeyword('is')) {
+      _advance();
+      String state;
+      if (_check(TokenType.stringLiteral) || _check(TokenType.identifier)) {
+        state = _advance().lexeme;
+      } else if (_check(TokenType.text)) {
+        state = _advance().lexeme;
+      } else {
+        final t = _peek();
+        throw ParserException(
+            "Expected state name after 'is'", t.line, t.column);
+      }
+      out.add(StateChange(time: currentTime, lane: first, state: state));
+      return;
+    }
+    if (_check(TokenType.arrow)) {
+      _advance();
+      if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
+        final t = _peek();
+        throw ParserException(
+            "Expected target lane after arrow", t.line, t.column);
+      }
+      final to = _advance().lexeme;
+      String? label;
+      if (_check(TokenType.colon)) {
+        _advance();
+        if (_check(TokenType.text)) {
+          label = _advance().lexeme;
+        }
+      }
+      out.add(TimingArrow(
+        time: currentTime,
+        from: first,
+        to: to,
+        label: label,
+      ));
+      return;
+    }
+    throw ParserException(
+        "Expected 'is' or arrow after '${firstToken.lexeme}'",
+        firstToken.line,
+        firstToken.column);
+  }
+
+  MindmapDiagram _parseMindmapDiagram() {
+    final root = _parseIndentedTree(
+      endType: TokenType.endMindmap,
+      diagramName: 'mindmap',
+    );
+    return MindmapDiagram(root: root, skin: _skin);
+  }
+
+  WbsDiagram _parseWbsDiagram() {
+    final root = _parseIndentedTree(
+      endType: TokenType.endWbs,
+      diagramName: 'wbs',
+    );
+    return WbsDiagram(root: root, skin: _skin);
+  }
+
+  MindmapNode? _parseIndentedTree({
+    required TokenType endType,
+    required String diagramName,
+  }) {
+    final lines = <_MindmapLine>[];
+    while (!_check(endType) && !_check(TokenType.eof)) {
+      if (_check(TokenType.newline)) {
+        _advance();
+        continue;
+      }
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected $diagramName line, got ${t.type}', t.line, t.column);
+      }
+      final t = _advance();
+      final parsed = _parseMindmapLine(t.lexeme, t.line, t.column);
+      if (parsed != null) {
+        lines.add(parsed);
+      }
+      _skipNewlines();
+    }
+    if (_check(endType)) {
+      _advance();
+    }
+    return _buildMindmapTree(lines, diagramName: diagramName);
+  }
+
+  _MindmapLine? _parseMindmapLine(String raw, int line, int col) {
+    var s = raw.trim();
+    if (s.isEmpty) return null;
+    MindmapSide side = MindmapSide.auto;
+    if (s.startsWith('+')) {
+      side = MindmapSide.right;
+      s = s.substring(1);
+    } else if (s.startsWith('-')) {
+      side = MindmapSide.left;
+      s = s.substring(1);
+    }
+    var depth = 0;
+    while (depth < s.length && s[depth] == '*') {
+      depth++;
+    }
+    if (depth == 0) {
+      throw ParserException(
+          'Expected node line starting with *', line, col);
+    }
+    s = s.substring(depth);
+    Color? color;
+    s = s.trimLeft();
+    if (s.startsWith('[#')) {
+      final close = s.indexOf(']');
+      if (close > 2) {
+        final colorText = s.substring(2, close).trim();
+        color = text_colors.tryParseColor('#$colorText');
+        s = s.substring(close + 1);
+      }
+    }
+    final text = s.trim();
+    return _MindmapLine(
+      depth: depth,
+      side: side,
+      color: color,
+      text: text,
+      line: line,
+      column: col,
+    );
+  }
+
+  MindmapNode? _buildMindmapTree(
+    List<_MindmapLine> lines, {
+    String diagramName = 'mindmap',
+  }) {
+    if (lines.isEmpty) return null;
+    final label = diagramName[0].toUpperCase() + diagramName.substring(1);
+    final stack = <_MindmapBuilder>[];
+    _MindmapBuilder? rootBuilder;
+    for (final l in lines) {
+      final node = _MindmapBuilder(
+        text: l.text,
+        depth: l.depth,
+        side: l.side,
+        color: l.color,
+      );
+      if (l.depth == 1) {
+        if (rootBuilder != null) {
+          throw ParserException(
+              '$label may have only one root node', l.line, l.column);
+        }
+        rootBuilder = node;
+        stack
+          ..clear()
+          ..add(node);
+        continue;
+      }
+      if (rootBuilder == null) {
+        throw ParserException(
+            '$label child appears before root', l.line, l.column);
+      }
+      while (stack.isNotEmpty && stack.last.depth >= l.depth) {
+        stack.removeLast();
+      }
+      if (stack.isEmpty) {
+        throw ParserException(
+            '$label node depth jumps from 0 to ${l.depth}',
+            l.line,
+            l.column);
+      }
+      stack.last.children.add(node);
+      stack.add(node);
+    }
+    return rootBuilder?.build();
+  }
+
+  DataDiagram _parseJsonDiagram() {
+    final buf = StringBuffer();
+    int? firstLine;
+    int? firstCol;
+    while (!_check(TokenType.endJson) && !_check(TokenType.eof)) {
+      if (_check(TokenType.newline)) {
+        _advance();
+        continue;
+      }
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected JSON body line, got ${t.type}', t.line, t.column);
+      }
+      final t = _advance();
+      firstLine ??= t.line;
+      firstCol ??= t.column;
+      buf.writeln(t.lexeme);
+    }
+    if (_check(TokenType.endJson)) {
+      _advance();
+    }
+    final source = buf.toString().trim();
+    if (source.isEmpty) {
+      throw ParserException(
+          'Empty JSON body', firstLine ?? 1, firstCol ?? 1);
+    }
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(source);
+    } on FormatException catch (e) {
+      throw ParserException(
+          'Invalid JSON: ${e.message}', firstLine ?? 1, firstCol ?? 1);
+    }
+    return DataDiagram(
+      root: _convertJsonValue(decoded, firstLine ?? 1, firstCol ?? 1),
+      format: DataFormat.json,
+      skin: _skin,
+    );
+  }
+
+  DataNode _convertJsonValue(dynamic value, int line, int col) {
+    if (value == null) {
+      return const DataScalar(value: 'null', kind: ScalarKind.null_);
+    }
+    if (value is bool) {
+      return DataScalar(value: value.toString(), kind: ScalarKind.boolean);
+    }
+    if (value is num) {
+      return DataScalar(value: value.toString(), kind: ScalarKind.number);
+    }
+    if (value is String) {
+      return DataScalar(value: value, kind: ScalarKind.string);
+    }
+    if (value is List) {
+      return DataArray(List<DataNode>.unmodifiable(
+        value.map((e) => _convertJsonValue(e, line, col)),
+      ));
+    }
+    if (value is Map) {
+      final entries = <MapEntry<String, DataNode>>[];
+      value.forEach((k, v) {
+        entries.add(MapEntry(
+          k.toString(),
+          _convertJsonValue(v, line, col),
+        ));
+      });
+      return DataObject(List.unmodifiable(entries));
+    }
+    throw ParserException(
+        'Unsupported JSON value type: ${value.runtimeType}', line, col);
+  }
+
+  DataDiagram _parseYamlDiagram() {
+    final lines = <_YamlSourceLine>[];
+    while (!_check(TokenType.endYaml) && !_check(TokenType.eof)) {
+      if (_check(TokenType.newline)) {
+        _advance();
+        continue;
+      }
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected YAML body line, got ${t.type}', t.line, t.column);
+      }
+      final t = _advance();
+      lines.add(_YamlSourceLine(raw: t.lexeme, line: t.line));
+    }
+    if (_check(TokenType.endYaml)) {
+      _advance();
+    }
+    final firstLine = lines.isEmpty ? 1 : lines.first.line;
+    final root = _parseYamlValue(lines, 0, lines.length, -1, firstLine);
+    if (root == null) {
+      throw ParserException('Empty YAML body', firstLine, 1);
+    }
+    return DataDiagram(
+      root: root,
+      format: DataFormat.yaml,
+      skin: _skin,
+    );
+  }
+
+  DataNode? _parseYamlValue(
+    List<_YamlSourceLine> lines,
+    int start,
+    int end,
+    int parentIndent,
+    int errLine,
+  ) {
+    var first = start;
+    while (first < end && lines[first].raw.trim().isEmpty) {
+      first++;
+    }
+    if (first >= end) return null;
+    final firstLine = lines[first];
+    final firstIndent = _yamlIndent(firstLine.raw);
+    if (firstIndent <= parentIndent) {
+      throw ParserException(
+          'YAML indent error', firstLine.line, firstIndent + 1);
+    }
+    final firstContent = firstLine.raw.substring(firstIndent);
+    if (firstContent.startsWith('- ') || firstContent == '-') {
+      return _parseYamlSequence(lines, first, end, firstIndent);
+    }
+    return _parseYamlMapping(lines, first, end, firstIndent);
+  }
+
+  DataArray _parseYamlSequence(
+    List<_YamlSourceLine> lines,
+    int start,
+    int end,
+    int indent,
+  ) {
+    final items = <DataNode>[];
+    var i = start;
+    while (i < end) {
+      final line = lines[i];
+      if (line.raw.trim().isEmpty) {
+        i++;
+        continue;
+      }
+      final lineIndent = _yamlIndent(line.raw);
+      if (lineIndent < indent) break;
+      if (lineIndent > indent) {
+        throw ParserException(
+            'YAML indent error in sequence', line.line, lineIndent + 1);
+      }
+      final content = line.raw.substring(indent);
+      if (!content.startsWith('-')) break;
+      final afterDash = content.length > 1 ? content.substring(1) : '';
+      final trimmed = afterDash.trimLeft();
+      var blockStart = i + 1;
+      var blockEnd = blockStart;
+      while (blockEnd < end) {
+        final bl = lines[blockEnd];
+        if (bl.raw.trim().isEmpty) {
+          blockEnd++;
+          continue;
+        }
+        if (_yamlIndent(bl.raw) <= indent) break;
+        blockEnd++;
+      }
+      if (trimmed.isEmpty) {
+        final nested = _parseYamlValue(
+            lines, blockStart, blockEnd, indent, line.line);
+        items.add(nested ??
+            const DataScalar(value: '', kind: ScalarKind.null_));
+      } else {
+        final colonIdx = _yamlFindMappingColon(trimmed);
+        if (colonIdx >= 0) {
+          final key = trimmed.substring(0, colonIdx).trim();
+          final rest = trimmed.substring(colonIdx + 1).trim();
+          final entries = <MapEntry<String, DataNode>>[];
+          if (rest.isEmpty) {
+            final nested = _parseYamlValue(
+                lines, blockStart, blockEnd, indent, line.line);
+            entries.add(MapEntry(
+              key,
+              nested ??
+                  const DataScalar(value: '', kind: ScalarKind.null_),
+            ));
+          } else {
+            entries.add(MapEntry(key, _yamlScalar(rest)));
+          }
+          _parseYamlMappingInto(
+              entries, lines, blockStart, blockEnd, indent + 2);
+          items.add(DataObject(List.unmodifiable(entries)));
+        } else {
+          items.add(_yamlScalar(trimmed));
+        }
+      }
+      i = blockEnd;
+    }
+    return DataArray(List.unmodifiable(items));
+  }
+
+  DataObject _parseYamlMapping(
+    List<_YamlSourceLine> lines,
+    int start,
+    int end,
+    int indent,
+  ) {
+    final entries = <MapEntry<String, DataNode>>[];
+    _parseYamlMappingInto(entries, lines, start, end, indent);
+    return DataObject(List.unmodifiable(entries));
+  }
+
+  void _parseYamlMappingInto(
+    List<MapEntry<String, DataNode>> entries,
+    List<_YamlSourceLine> lines,
+    int start,
+    int end,
+    int indent,
+  ) {
+    var i = start;
+    while (i < end) {
+      final line = lines[i];
+      if (line.raw.trim().isEmpty) {
+        i++;
+        continue;
+      }
+      final lineIndent = _yamlIndent(line.raw);
+      if (lineIndent < indent) break;
+      if (lineIndent > indent) {
+        throw ParserException(
+            'YAML indent error', line.line, lineIndent + 1);
+      }
+      final content = line.raw.substring(indent);
+      if (content.startsWith('-')) break;
+      final colonIdx = _yamlFindMappingColon(content);
+      if (colonIdx < 0) {
+        throw ParserException(
+            'Expected YAML "key: value"', line.line, indent + 1);
+      }
+      final key = content.substring(0, colonIdx).trim();
+      final rest = content.substring(colonIdx + 1).trim();
+      var blockStart = i + 1;
+      var blockEnd = blockStart;
+      while (blockEnd < end) {
+        final bl = lines[blockEnd];
+        if (bl.raw.trim().isEmpty) {
+          blockEnd++;
+          continue;
+        }
+        if (_yamlIndent(bl.raw) <= indent) break;
+        blockEnd++;
+      }
+      if (rest.isEmpty) {
+        final nested =
+            _parseYamlValue(lines, blockStart, blockEnd, indent, line.line);
+        entries.add(MapEntry(
+          key,
+          nested ?? const DataScalar(value: '', kind: ScalarKind.null_),
+        ));
+      } else {
+        entries.add(MapEntry(key, _yamlScalar(rest)));
+      }
+      i = blockEnd;
+    }
+  }
+
+  int _yamlIndent(String s) {
+    var n = 0;
+    while (n < s.length && s[n] == ' ') {
+      n++;
+    }
+    return n;
+  }
+
+  int _yamlFindMappingColon(String s) {
+    var inSingle = false;
+    var inDouble = false;
+    for (var k = 0; k < s.length; k++) {
+      final ch = s[k];
+      if (ch == '"' && !inSingle) inDouble = !inDouble;
+      if (ch == "'" && !inDouble) inSingle = !inSingle;
+      if (inSingle || inDouble) continue;
+      if (ch == ':') {
+        if (k + 1 == s.length || s[k + 1] == ' ') return k;
+      }
+    }
+    return -1;
+  }
+
+  DataScalar _yamlScalar(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty) {
+      return const DataScalar(value: '', kind: ScalarKind.null_);
+    }
+    if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+      return DataScalar(
+          value: s.substring(1, s.length - 1), kind: ScalarKind.string);
+    }
+    if (s.length >= 2 && s.startsWith("'") && s.endsWith("'")) {
+      return DataScalar(
+          value: s.substring(1, s.length - 1), kind: ScalarKind.string);
+    }
+    final lower = s.toLowerCase();
+    if (lower == 'null' || lower == '~') {
+      return const DataScalar(value: 'null', kind: ScalarKind.null_);
+    }
+    if (lower == 'true' || lower == 'false') {
+      return DataScalar(value: lower, kind: ScalarKind.boolean);
+    }
+    if (num.tryParse(s) != null) {
+      return DataScalar(value: s, kind: ScalarKind.number);
+    }
+    return DataScalar(value: s, kind: ScalarKind.string);
+  }
+
+  SaltDiagram _parseSaltDiagram() {
+    final rawLines = <String>[];
+    while (!_check(TokenType.endSalt) && !_check(TokenType.eof)) {
+      if (_check(TokenType.newline)) {
+        _advance();
+        continue;
+      }
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected salt body line, got ${t.type}', t.line, t.column);
+      }
+      rawLines.add(_advance().lexeme);
+    }
+    if (_check(TokenType.endSalt)) {
+      _advance();
+    }
+    final lines = <String>[];
+    for (final raw in rawLines) {
+      if (raw.trim().isNotEmpty) lines.add(raw);
+    }
+    if (lines.isNotEmpty && lines.first.trim() == '{') {
+      lines.removeAt(0);
+    }
+    if (lines.isNotEmpty && lines.last.trim() == '}') {
+      lines.removeLast();
+    }
+    final rows = <SaltRow>[];
+    for (final raw in lines) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) continue;
+      if (trimmed == '--') {
+        rows.add(const SaltRow(isDivider: true));
+        continue;
+      }
+      final cellTexts = raw.split('|');
+      final cells = <SaltCell>[];
+      for (final ct in cellTexts) {
+        cells.add(_parseSaltCell(ct.trim()));
+      }
+      rows.add(SaltRow(cells: List.unmodifiable(cells)));
+    }
+    return SaltDiagram(rows: List.unmodifiable(rows), skin: _skin);
+  }
+
+  GanttDiagram _parseGanttDiagram() {
+    final rawLines = <_GanttSourceLine>[];
+    while (!_check(TokenType.endGantt) && !_check(TokenType.eof)) {
+      if (_check(TokenType.newline)) {
+        _advance();
+        continue;
+      }
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected gantt body line, got ${t.type}', t.line, t.column);
+      }
+      final t = _advance();
+      rawLines
+          .add(_GanttSourceLine(raw: t.lexeme, line: t.line, column: t.column));
+    }
+    if (_check(TokenType.endGantt)) {
+      _advance();
+    }
+    return _buildGanttDiagram(rawLines);
+  }
+
+  GanttDiagram _buildGanttDiagram(List<_GanttSourceLine> rawLines) {
+    DateTime? projectStart;
+    final builders = <_GanttItemBuilder>[];
+    final tasks = <String, _GanttTaskBuilder>{};
+
+    final projectRe = RegExp(
+        r'^[Pp]roject\s+starts?\s+(\d{4}-\d{2}-\d{2})\s*$');
+    final sectionRe = RegExp(r'^--\s*(.*?)\s*--\s*$');
+    final lastsRe = RegExp(
+        r'^\[(.+?)\]\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s*$');
+    final startsDateRe = RegExp(
+        r'^\[(.+?)\]\s+starts?\s+(?:on\s+|at\s+)?(\d{4}-\d{2}-\d{2})\s*$');
+    final startsAtRe = RegExp(
+        r"^\[(.+?)\]\s+starts?\s+at\s+\[(.+?)\]'s\s+(end|start)\s*$");
+    final happensRe = RegExp(
+        r"^\[(.+?)\]\s+happens?\s+(?:on\s+|at\s+)?(?:\[(.+?)\]'s\s+(end|start)|(\d{4}-\d{2}-\d{2}))\s*$");
+    final coloredRe = RegExp(r'^\[(.+?)\]\s+is\s+colored?\s+in\s+(\S+)\s*$');
+
+    for (final src in rawLines) {
+      final s = src.raw.trim();
+      if (s.isEmpty) continue;
+      final pm = projectRe.firstMatch(s);
+      if (pm != null) {
+        projectStart = DateTime.parse(pm.group(1)!);
+        continue;
+      }
+      final sm = sectionRe.firstMatch(s);
+      if (sm != null) {
+        builders.add(_GanttSectionBuilder(sm.group(1)!.trim()));
+        continue;
+      }
+      final lm = lastsRe.firstMatch(s);
+      if (lm != null) {
+        final name = lm.group(1)!.trim();
+        final n = int.parse(lm.group(2)!);
+        final unit = lm.group(3)!.toLowerCase();
+        final days = unit.startsWith('week')
+            ? n * 7
+            : unit.startsWith('month')
+                ? n * 30
+                : n;
+        final builder = tasks.putIfAbsent(
+            name, () => _GanttTaskBuilder(name: name));
+        builder.duration = Duration(days: days);
+        if (!builders.contains(builder)) builders.add(builder);
+        continue;
+      }
+      final sdm = startsDateRe.firstMatch(s);
+      if (sdm != null) {
+        final name = sdm.group(1)!.trim();
+        final date = DateTime.parse(sdm.group(2)!);
+        final builder = tasks.putIfAbsent(
+            name, () => _GanttTaskBuilder(name: name));
+        builder.explicitStart = date;
+        if (!builders.contains(builder)) builders.add(builder);
+        continue;
+      }
+      final sam = startsAtRe.firstMatch(s);
+      if (sam != null) {
+        final name = sam.group(1)!.trim();
+        final ref = sam.group(2)!.trim();
+        final endpoint = sam.group(3)!.toLowerCase();
+        final builder = tasks.putIfAbsent(
+            name, () => _GanttTaskBuilder(name: name));
+        builder.startsAtRef = ref;
+        builder.startsAtEnd = endpoint == 'end';
+        if (!builders.contains(builder)) builders.add(builder);
+        continue;
+      }
+      final hm = happensRe.firstMatch(s);
+      if (hm != null) {
+        final name = hm.group(1)!.trim();
+        final ref = hm.group(2);
+        final endpoint = hm.group(3);
+        final date = hm.group(4);
+        builders.add(_GanttMilestoneBuilder(
+          name: name,
+          ref: ref?.trim(),
+          atEnd: endpoint?.toLowerCase() == 'end',
+          explicitDate: date != null ? DateTime.parse(date) : null,
+        ));
+        continue;
+      }
+      final cm = coloredRe.firstMatch(s);
+      if (cm != null) {
+        final name = cm.group(1)!.trim();
+        final color = text_colors.tryParseColor(cm.group(2)!);
+        final builder = tasks[name];
+        if (builder != null) builder.color = color;
+        continue;
+      }
+      throw ParserException(
+          'Unrecognized gantt line: "$s"', src.line, src.column);
+    }
+
+    projectStart ??=
+        DateTime.fromMillisecondsSinceEpoch(0, isUtc: true).toLocal();
+
+    for (final b in builders) {
+      if (b is _GanttTaskBuilder) {
+        _resolveTaskStart(b, tasks, projectStart, <String>{});
+      }
+    }
+    for (final b in builders) {
+      if (b is _GanttMilestoneBuilder) {
+        _resolveMilestoneDate(b, tasks, projectStart);
+      }
+    }
+
+    final items = <GanttItem>[];
+    for (final b in builders) {
+      if (b is _GanttSectionBuilder) {
+        items.add(GanttSection(b.title));
+      } else if (b is _GanttTaskBuilder) {
+        items.add(GanttTask(
+          name: b.name,
+          start: b.resolvedStart!,
+          duration: b.duration ?? const Duration(days: 1),
+          color: b.color,
+        ));
+      } else if (b is _GanttMilestoneBuilder) {
+        items.add(GanttMilestone(name: b.name, date: b.resolvedDate!));
+      }
+    }
+    return GanttDiagram(
+      projectStart: projectStart,
+      items: List.unmodifiable(items),
+      skin: _skin,
+    );
+  }
+
+  DateTime _resolveTaskStart(
+    _GanttTaskBuilder task,
+    Map<String, _GanttTaskBuilder> tasks,
+    DateTime projectStart,
+    Set<String> visiting,
+  ) {
+    if (task.resolvedStart != null) return task.resolvedStart!;
+    if (!visiting.add(task.name)) {
+      throw ParserException(
+          'Circular gantt reference involving "${task.name}"', 0, 0);
+    }
+    DateTime start;
+    if (task.explicitStart != null) {
+      start = task.explicitStart!;
+    } else if (task.startsAtRef != null) {
+      final ref = tasks[task.startsAtRef!];
+      if (ref == null) {
+        throw ParserException(
+            'Unknown gantt task reference "${task.startsAtRef}"', 0, 0);
+      }
+      final refStart =
+          _resolveTaskStart(ref, tasks, projectStart, visiting);
+      start = task.startsAtEnd
+          ? refStart.add(ref.duration ?? const Duration(days: 1))
+          : refStart;
+    } else {
+      start = projectStart;
+    }
+    visiting.remove(task.name);
+    task.resolvedStart = start;
+    return start;
+  }
+
+  void _resolveMilestoneDate(
+    _GanttMilestoneBuilder m,
+    Map<String, _GanttTaskBuilder> tasks,
+    DateTime projectStart,
+  ) {
+    if (m.explicitDate != null) {
+      m.resolvedDate = m.explicitDate;
+      return;
+    }
+    if (m.ref != null) {
+      final ref = tasks[m.ref!];
+      if (ref == null) {
+        throw ParserException(
+            'Unknown gantt task reference "${m.ref}"', 0, 0);
+      }
+      final refStart =
+          _resolveTaskStart(ref, tasks, projectStart, <String>{});
+      m.resolvedDate = m.atEnd
+          ? refStart.add(ref.duration ?? const Duration(days: 1))
+          : refStart;
+      return;
+    }
+    m.resolvedDate = projectStart;
+  }
+
+  NetworkDiagram _parseNetworkDiagram() {
+    final rawLines = <_NwdiagSourceLine>[];
+    while (!_check(TokenType.endNwdiag) && !_check(TokenType.eof)) {
+      if (_check(TokenType.newline)) {
+        _advance();
+        continue;
+      }
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected nwdiag body line, got ${t.type}', t.line, t.column);
+      }
+      final t = _advance();
+      rawLines.add(
+          _NwdiagSourceLine(raw: t.lexeme, line: t.line, column: t.column));
+    }
+    if (_check(TokenType.endNwdiag)) {
+      _advance();
+    }
+    return _buildNetworkDiagram(rawLines);
+  }
+
+  NetworkDiagram _buildNetworkDiagram(List<_NwdiagSourceLine> rawLines) {
+    final segments = <NetworkSegment>[];
+    final networkOpenRe =
+        RegExp(r'^network\s+([A-Za-z0-9_]+)\s*\{?\s*$');
+    final segmentAddressRe =
+        RegExp(r'^address\s*=\s*"([^"]*)"\s*;?\s*$');
+    final nodeWithAttrsRe =
+        RegExp(r'^([A-Za-z0-9_]+)\s*\[(.*)\]\s*;?\s*$');
+    final bareNodeRe = RegExp(r'^([A-Za-z0-9_]+)\s*;?\s*$');
+    final addressAttrRe =
+        RegExp(r'address\s*=\s*"([^"]*)"');
+
+    String? currentName;
+    String? currentAddress;
+    List<NetworkNode> currentNodes = [];
+    var inSegment = false;
+
+    void closeSegment() {
+      if (!inSegment) return;
+      segments.add(NetworkSegment(
+        name: currentName!,
+        address: currentAddress,
+        nodes: List.unmodifiable(currentNodes),
+      ));
+      currentName = null;
+      currentAddress = null;
+      currentNodes = [];
+      inSegment = false;
+    }
+
+    for (final src in rawLines) {
+      final s = src.raw.trim();
+      if (s.isEmpty) continue;
+      if (s == '{') continue;
+      if (s == '}') {
+        closeSegment();
+        continue;
+      }
+      final openMatch = networkOpenRe.firstMatch(s);
+      if (openMatch != null) {
+        closeSegment();
+        currentName = openMatch.group(1);
+        currentAddress = null;
+        currentNodes = [];
+        inSegment = true;
+        continue;
+      }
+      if (!inSegment) {
+        throw ParserException(
+            'Unexpected nwdiag line outside network block: "$s"',
+            src.line,
+            src.column);
+      }
+      final segAddr = segmentAddressRe.firstMatch(s);
+      if (segAddr != null) {
+        currentAddress = segAddr.group(1);
+        continue;
+      }
+      final nodeAttrs = nodeWithAttrsRe.firstMatch(s);
+      if (nodeAttrs != null) {
+        final name = nodeAttrs.group(1)!;
+        final attrs = nodeAttrs.group(2)!;
+        String? address;
+        final addrMatch = addressAttrRe.firstMatch(attrs);
+        if (addrMatch != null) {
+          address = addrMatch.group(1);
+        }
+        currentNodes.add(NetworkNode(name: name, address: address));
+        continue;
+      }
+      final bare = bareNodeRe.firstMatch(s);
+      if (bare != null) {
+        currentNodes.add(NetworkNode(name: bare.group(1)!));
+        continue;
+      }
+      throw ParserException(
+          'Unrecognized nwdiag line: "$s"', src.line, src.column);
+    }
+    closeSegment();
+
+    return NetworkDiagram(
+      networks: List.unmodifiable(segments),
+      skin: _skin,
+    );
+  }
+
+  SaltCell _parseSaltCell(String text) {
+    if (text.isEmpty) return const SaltLabel('');
+    if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
+      return SaltTextField(text.substring(1, text.length - 1));
+    }
+    final radio = RegExp(r'^\(\s*([xX ])\s*\)\s*(.*)$').firstMatch(text);
+    if (radio != null) {
+      final mark = radio.group(1)!;
+      final label = radio.group(2)!.trim();
+      return SaltRadio(selected: mark != ' ', label: label);
+    }
+    final checkbox = RegExp(r'^\[\s*([xX ])\s*\]\s*(.+)$').firstMatch(text);
+    if (checkbox != null) {
+      final mark = checkbox.group(1)!;
+      final label = checkbox.group(2)!.trim();
+      return SaltCheckbox(checked: mark.toLowerCase() == 'x', label: label);
+    }
+    if (text.startsWith('[') && text.endsWith(']') && text.length >= 2) {
+      return SaltButton(text.substring(1, text.length - 1).trim());
+    }
+    return SaltLabel(text);
+  }
+}
+
+class _YamlSourceLine {
+  final String raw;
+  final int line;
+  const _YamlSourceLine({required this.raw, required this.line});
+}
+
+class _GanttSourceLine {
+  final String raw;
+  final int line;
+  final int column;
+  const _GanttSourceLine({
+    required this.raw,
+    required this.line,
+    required this.column,
+  });
+}
+
+class _NwdiagSourceLine {
+  final String raw;
+  final int line;
+  final int column;
+  const _NwdiagSourceLine({
+    required this.raw,
+    required this.line,
+    required this.column,
+  });
+}
+
+sealed class _GanttItemBuilder {
+  const _GanttItemBuilder();
+}
+
+class _GanttTaskBuilder extends _GanttItemBuilder {
+  final String name;
+  DateTime? explicitStart;
+  String? startsAtRef;
+  bool startsAtEnd = false;
+  Duration? duration;
+  Color? color;
+  DateTime? resolvedStart;
+
+  _GanttTaskBuilder({required this.name});
+}
+
+class _GanttMilestoneBuilder extends _GanttItemBuilder {
+  final String name;
+  final String? ref;
+  final bool atEnd;
+  final DateTime? explicitDate;
+  DateTime? resolvedDate;
+
+  _GanttMilestoneBuilder({
+    required this.name,
+    this.ref,
+    this.atEnd = true,
+    this.explicitDate,
+  });
+}
+
+class _GanttSectionBuilder extends _GanttItemBuilder {
+  final String title;
+  const _GanttSectionBuilder(this.title);
+}
+
+class _MindmapLine {
+  final int depth;
+  final MindmapSide side;
+  final Color? color;
+  final String text;
+  final int line;
+  final int column;
+
+  const _MindmapLine({
+    required this.depth,
+    required this.side,
+    required this.color,
+    required this.text,
+    required this.line,
+    required this.column,
+  });
+}
+
+class _MindmapBuilder {
+  final String text;
+  final int depth;
+  final MindmapSide side;
+  final Color? color;
+  final List<_MindmapBuilder> children = [];
+
+  _MindmapBuilder({
+    required this.text,
+    required this.depth,
+    required this.side,
+    required this.color,
+  });
+
+  MindmapNode build() {
+    return MindmapNode(
+      text: text,
+      depth: depth,
+      side: side,
+      color: color,
+      children: List.unmodifiable(children.map((c) => c.build())),
+    );
+  }
+}
+
+class _DecodedRelArrow {
+  final RelationshipKind kind;
+  final bool reverse;
+  final CrowFoot? fromCrowFoot;
+  final CrowFoot? toCrowFoot;
+  const _DecodedRelArrow(
+    this.kind, {
+    required this.reverse,
+    this.fromCrowFoot,
+    this.toCrowFoot,
+  });
+}
+
+class _UseCaseArrow {
+  final LineStyle lineStyle;
+  final ArrowHead? head;
+  final MessageDirection direction;
+  const _UseCaseArrow(this.lineStyle, this.head, this.direction);
+}
+
+class _ComponentRelEnd {
+  final String alias;
+  final bool declared;
+  const _ComponentRelEnd(this.alias, {required this.declared});
+}
+
+class _IfHeader {
+  final String condition;
+  final String? thenLabel;
+  const _IfHeader({required this.condition, this.thenLabel});
+}
+
+class _AutonumberState {
+  int current = 1;
+  int increment = 1;
+  String format = '%d';
+  bool stopped = true;
+
+  void reset() {
+    current = 1;
+    increment = 1;
+    format = '%d';
+    stopped = true;
+  }
+}
+
+class _DecodedArrow {
+  final LineStyle lineStyle;
+  final ArrowHead head;
+  final MessageDirection direction;
+  final bool hidden;
+  final Color? color;
+  const _DecodedArrow(
+    this.lineStyle,
+    this.head,
+    this.direction, {
+    this.hidden = false,
+    this.color,
+  });
+}
+

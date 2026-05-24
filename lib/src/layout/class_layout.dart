@@ -1,0 +1,702 @@
+import 'dart:math' as math;
+
+import 'package:flutter/painting.dart';
+
+import '../ast/diagram.dart';
+import 'layout.dart';
+import 'scene.dart';
+import 'text_measurer.dart';
+
+class ClassLayout implements DiagramLayout {
+  static const _padding = 24.0;
+  static const _classPaddingX = 12.0;
+  static const _classHeaderPaddingY = 6.0;
+  static const _memberPaddingY = 4.0;
+  static const _memberLineGap = 2.0;
+  static const _stereotypeGap = 2.0;
+  static const _colGap = 60.0;
+  static const _rowGap = 60.0;
+  static const _minClassWidth = 90.0;
+  static const _headerStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 13,
+    fontWeight: FontWeight.w600,
+  );
+  static const _abstractHeaderStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 13,
+    fontWeight: FontWeight.w600,
+    fontStyle: FontStyle.italic,
+  );
+  static const _instanceHeaderStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 13,
+    fontWeight: FontWeight.w600,
+    decoration: TextDecoration.underline,
+  );
+  static const _stereotypeStyle = TextStyle(
+    color: Color(0xFF555555),
+    fontSize: 10,
+    fontStyle: FontStyle.italic,
+  );
+  static const _memberStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 11,
+  );
+  static const _abstractMemberStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 11,
+    fontStyle: FontStyle.italic,
+  );
+  static const _staticMemberStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 11,
+    decoration: TextDecoration.underline,
+  );
+  static const _enumValueStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 11,
+  );
+  static const _relationshipLabelStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 10,
+  );
+  static const _multiplicityStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 10,
+  );
+
+  static const _classFill = Color(0xFFFFFFCC);
+  static const _classStroke = Color(0xFF000000);
+  static const _headerFill = Color(0xFFFFFFBB);
+
+  static const _publicColor = Color(0xFF1B7F1B);
+  static const _privateColor = Color(0xFFC62828);
+  static const _protectedColor = Color(0xFFEF6C00);
+  static const _packageColor = Color(0xFF6A1B9A);
+
+  const ClassLayout();
+
+  @override
+  Scene layout(Diagram diagram, TextMeasurer measurer) {
+    if (diagram is! ClassDiagram) {
+      throw ArgumentError('ClassLayout expects ClassDiagram');
+    }
+
+    if (diagram.classes.isEmpty) {
+      return Scene(
+        size: Size.zero,
+        shapes: const [],
+        background: diagram.skin.backgroundColor,
+      );
+    }
+
+    final boxes = <String, _ClassBox>{};
+    for (final c in diagram.classes) {
+      boxes[c.name] = _measureClass(c, measurer);
+    }
+
+    final levels = _bfsLevels(diagram);
+    _assignPositions(boxes, levels);
+
+    var width = 0.0;
+    var height = 0.0;
+    for (final b in boxes.values) {
+      if (b.rect.right > width) width = b.rect.right;
+      if (b.rect.bottom > height) height = b.rect.bottom;
+    }
+    width += _padding;
+    height += _padding;
+
+    final shapes = <SceneShape>[];
+
+    for (final box in boxes.values) {
+      _emitClassBox(shapes, box);
+    }
+
+    for (final rel in diagram.relationships) {
+      final a = boxes[rel.from];
+      final b = boxes[rel.to];
+      if (a == null || b == null) continue;
+      _emitRelationship(shapes, rel, a, b, measurer);
+    }
+
+    return Scene(
+      size: Size(width, height),
+      shapes: shapes,
+      background: diagram.skin.backgroundColor,
+    );
+  }
+
+  _ClassBox _measureClass(ClassDecl c, TextMeasurer measurer) {
+    TextStyle headerStyle;
+    if (c.kind == ClassKind.abstractClass) {
+      headerStyle = _abstractHeaderStyle;
+    } else if (c.kind == ClassKind.object_ || c.kind == ClassKind.map_) {
+      headerStyle = _instanceHeaderStyle;
+    } else {
+      headerStyle = _headerStyle;
+    }
+    final headerText =
+        c.instanceOf == null ? c.name : '${c.name} : ${c.instanceOf}';
+    final nameSize = measurer.measure(headerText, headerStyle);
+    final stereotype = _stereotype(c.kind);
+    final stereotypeSize = stereotype == null
+        ? Size.zero
+        : measurer.measure(stereotype, _stereotypeStyle);
+    var maxMemberWidth = 0.0;
+    var memberHeightSum = 0.0;
+    final memberLines = <_MemberLine>[];
+    for (final m in c.members) {
+      final line = _renderMember(m, measurer);
+      memberLines.add(line);
+      if (line.width > maxMemberWidth) maxMemberWidth = line.width;
+      memberHeightSum += line.height + _memberLineGap;
+    }
+    final headerHeight = _classHeaderPaddingY +
+        (stereotype != null ? stereotypeSize.height + _stereotypeGap : 0) +
+        nameSize.height +
+        _classHeaderPaddingY;
+    final memberAreaHeight = memberLines.isEmpty
+        ? 0.0
+        : memberHeightSum + _memberPaddingY * 2;
+    final width = math.max(
+      _minClassWidth,
+      math.max(
+            math.max(nameSize.width, stereotypeSize.width),
+            maxMemberWidth,
+          ) +
+          _classPaddingX * 2,
+    );
+    final totalHeight = headerHeight + memberAreaHeight;
+    return _ClassBox(
+      decl: c,
+      headerStyle: headerStyle,
+      headerText: headerText,
+      stereotype: stereotype,
+      stereotypeSize: stereotypeSize,
+      nameSize: nameSize,
+      memberLines: memberLines,
+      headerHeight: headerHeight,
+      width: width,
+      height: totalHeight,
+    );
+  }
+
+  _MemberLine _renderMember(ClassMember m, TextMeasurer measurer) {
+    switch (m) {
+      case Field():
+        final visChar = _visibilityChar(m.visibility);
+        final visColor = _visibilityColor(m.visibility);
+        final requiredPrefix = m.required ? '* ' : '';
+        final stereotypeSuffix =
+            m.stereotype == null ? '' : ' <<${m.stereotype}>>';
+        final core = m.type == null ? m.name : '${m.name}: ${m.type}';
+        final body = '$requiredPrefix$core$stereotypeSuffix';
+        final style = m.isStatic ? _staticMemberStyle : _memberStyle;
+        final visSize = measurer.measure(visChar, style.copyWith(color: visColor));
+        final bodySize = measurer.measure(' $body', style);
+        return _MemberLine(
+          visibilityChar: visChar,
+          visibilityColor: visColor,
+          body: ' $body',
+          bodyStyle: style,
+          width: visSize.width + bodySize.width,
+          height: math.max(visSize.height, bodySize.height),
+          visWidth: visSize.width,
+        );
+      case Method():
+        final visChar = _visibilityChar(m.visibility);
+        final visColor = _visibilityColor(m.visibility);
+        final body = m.signature ?? '${m.name}()';
+        final suffix = m.returnType == null ? '' : ': ${m.returnType}';
+        final fullBody = ' $body$suffix';
+        TextStyle style;
+        if (m.isAbstract) {
+          style = _abstractMemberStyle;
+        } else if (m.isStatic) {
+          style = _staticMemberStyle;
+        } else {
+          style = _memberStyle;
+        }
+        final visSize = measurer.measure(visChar, style.copyWith(color: visColor));
+        final bodySize = measurer.measure(fullBody, style);
+        return _MemberLine(
+          visibilityChar: visChar,
+          visibilityColor: visColor,
+          body: fullBody,
+          bodyStyle: style,
+          width: visSize.width + bodySize.width,
+          height: math.max(visSize.height, bodySize.height),
+          visWidth: visSize.width,
+        );
+      case EnumValue():
+        final size = measurer.measure(m.name, _enumValueStyle);
+        return _MemberLine(
+          visibilityChar: '',
+          visibilityColor: const Color(0xFF000000),
+          body: m.name,
+          bodyStyle: _enumValueStyle,
+          width: size.width,
+          height: size.height,
+          visWidth: 0.0,
+        );
+      case MemberDivider():
+        return _MemberLine(
+          visibilityChar: '',
+          visibilityColor: const Color(0xFF000000),
+          body: '',
+          bodyStyle: _memberStyle,
+          width: 0.0,
+          height: 6.0,
+          visWidth: 0.0,
+          divider: m.kind,
+        );
+      case Attribute():
+        final sep = m.isMap ? ' => ' : ' = ';
+        final body = '${m.name}$sep${m.value}';
+        final size = measurer.measure(body, _memberStyle);
+        return _MemberLine(
+          visibilityChar: '',
+          visibilityColor: const Color(0xFF000000),
+          body: body,
+          bodyStyle: _memberStyle,
+          width: size.width,
+          height: size.height,
+          visWidth: 0.0,
+        );
+    }
+  }
+
+  Map<String, int> _bfsLevels(ClassDiagram diagram) {
+    final names = diagram.classes.map((c) => c.name).toList();
+    final indexOf = <String, int>{
+      for (var i = 0; i < names.length; i++) names[i]: i,
+    };
+    final children = <String, List<String>>{
+      for (final n in names) n: <String>[],
+    };
+    final inheritParents = <String, List<String>>{
+      for (final n in names) n: <String>[],
+    };
+    for (final r in diagram.relationships) {
+      if (!indexOf.containsKey(r.from) || !indexOf.containsKey(r.to)) continue;
+      children[r.from]!.add(r.to);
+      children[r.to]!.add(r.from);
+      if (r.kind == RelationshipKind.inheritance ||
+          r.kind == RelationshipKind.realization) {
+        inheritParents[r.to]!.add(r.from);
+      }
+    }
+
+    final level = <String, int>{};
+    final roots = <String>[];
+    for (final n in names) {
+      if (inheritParents[n]!.isEmpty) roots.add(n);
+    }
+    if (roots.isEmpty && names.isNotEmpty) roots.add(names.first);
+
+    final queue = <String>[...roots];
+    for (final r in roots) {
+      level[r] = 0;
+    }
+    while (queue.isNotEmpty) {
+      final cur = queue.removeAt(0);
+      final lv = level[cur]!;
+      for (final n in children[cur]!) {
+        if (!level.containsKey(n)) {
+          level[n] = lv + 1;
+          queue.add(n);
+        }
+      }
+    }
+    for (final n in names) {
+      level.putIfAbsent(n, () => 0);
+    }
+    return level;
+  }
+
+  void _assignPositions(Map<String, _ClassBox> boxes, Map<String, int> levels) {
+    final byLevel = <int, List<String>>{};
+    for (final entry in levels.entries) {
+      byLevel.putIfAbsent(entry.value, () => <String>[]).add(entry.key);
+    }
+    final sortedLevels = byLevel.keys.toList()..sort();
+    var y = _padding;
+    for (final lv in sortedLevels) {
+      final names = byLevel[lv]!;
+      var rowHeight = 0.0;
+      for (final n in names) {
+        if (boxes[n]!.height > rowHeight) rowHeight = boxes[n]!.height;
+      }
+      var x = _padding;
+      // Center the row horizontally relative to the widest row
+      // (we just left-align for simplicity; final width is computed afterwards)
+      for (final n in names) {
+        final b = boxes[n]!;
+        b.rect = Rect.fromLTWH(x, y, b.width, b.height);
+        x += b.width + _colGap;
+      }
+      y += rowHeight + _rowGap;
+    }
+    // Center rows horizontally relative to the widest row.
+    var maxRowRight = 0.0;
+    for (final lv in sortedLevels) {
+      final names = byLevel[lv]!;
+      var rowRight = 0.0;
+      for (final n in names) {
+        if (boxes[n]!.rect.right > rowRight) rowRight = boxes[n]!.rect.right;
+      }
+      if (rowRight > maxRowRight) maxRowRight = rowRight;
+    }
+    for (final lv in sortedLevels) {
+      final names = byLevel[lv]!;
+      if (names.isEmpty) continue;
+      var rowRight = 0.0;
+      for (final n in names) {
+        if (boxes[n]!.rect.right > rowRight) rowRight = boxes[n]!.rect.right;
+      }
+      final dx = (maxRowRight - rowRight) / 2;
+      if (dx > 0) {
+        for (final n in names) {
+          final b = boxes[n]!;
+          b.rect = b.rect.translate(dx, 0);
+        }
+      }
+    }
+  }
+
+  void _emitClassBox(List<SceneShape> shapes, _ClassBox box) {
+    final rect = box.rect;
+    shapes.add(SceneBox(
+      rect: rect,
+      fill: _classFill,
+      stroke: _classStroke,
+      textStyle: box.headerStyle,
+    ));
+    final headerRect = Rect.fromLTWH(
+      rect.left,
+      rect.top,
+      rect.width,
+      box.headerHeight,
+    );
+    shapes.add(SceneBox(
+      rect: headerRect,
+      fill: _headerFill,
+      stroke: _classStroke,
+      textStyle: box.headerStyle,
+    ));
+    var ty = rect.top + _classHeaderPaddingY;
+    if (box.stereotype != null) {
+      shapes.add(SceneText(
+        offset: Offset(
+          rect.center.dx - box.stereotypeSize.width / 2,
+          ty,
+        ),
+        text: box.stereotype!,
+        textStyle: _stereotypeStyle,
+      ));
+      ty += box.stereotypeSize.height + _stereotypeGap;
+    }
+    shapes.add(SceneText(
+      offset: Offset(
+        rect.center.dx - box.nameSize.width / 2,
+        ty,
+      ),
+      text: box.headerText,
+      textStyle: box.headerStyle,
+    ));
+
+    if (box.memberLines.isEmpty) return;
+    var my = rect.top + box.headerHeight + _memberPaddingY;
+    for (final line in box.memberLines) {
+      if (line.divider != null) {
+        final lineY = my + line.height / 2;
+        shapes.add(SceneLine(
+          from: Offset(rect.left + 4, lineY),
+          to: Offset(rect.right - 4, lineY),
+          dashed: line.divider == DividerKind.dashed,
+          head: null,
+          stroke: _classStroke,
+          strokeWidth: line.divider == DividerKind.doubleLine ? 1.5 : 1.0,
+        ));
+        my += line.height + _memberLineGap;
+        continue;
+      }
+      final x = rect.left + _classPaddingX;
+      if (line.visibilityChar.isNotEmpty) {
+        shapes.add(SceneText(
+          offset: Offset(x, my),
+          text: line.visibilityChar,
+          textStyle: line.bodyStyle.copyWith(color: line.visibilityColor),
+        ));
+      }
+      shapes.add(SceneText(
+        offset: Offset(x + line.visWidth, my),
+        text: line.body,
+        textStyle: line.bodyStyle,
+      ));
+      my += line.height + _memberLineGap;
+    }
+  }
+
+  void _emitRelationship(
+    List<SceneShape> shapes,
+    Relationship rel,
+    _ClassBox a,
+    _ClassBox b,
+    TextMeasurer measurer,
+  ) {
+    final fromCenter = a.rect.center;
+    final toCenter = b.rect.center;
+    final fromEdge = _edgePoint(a.rect, toCenter);
+    final toEdge = _edgePoint(b.rect, fromCenter);
+    final hasCrow = rel.fromCrowFoot != null || rel.toCrowFoot != null;
+    final style = _styleFor(rel.kind);
+    shapes.add(SceneLine(
+      from: fromEdge,
+      to: toEdge,
+      dashed: style.dashed,
+      head: hasCrow ? null : style.head,
+      headAtFrom: style.headAtFrom,
+      stroke: const Color(0xFF000000),
+      strokeWidth: 1.0,
+    ));
+    if (rel.fromCrowFoot != null) {
+      final angle = math.atan2(
+        toEdge.dy - fromEdge.dy,
+        toEdge.dx - fromEdge.dx,
+      );
+      shapes.add(SceneCrowFoot(
+        position: fromEdge,
+        angle: angle,
+        kind: rel.fromCrowFoot!,
+      ));
+    }
+    if (rel.toCrowFoot != null) {
+      final angle = math.atan2(
+        fromEdge.dy - toEdge.dy,
+        fromEdge.dx - toEdge.dx,
+      );
+      shapes.add(SceneCrowFoot(
+        position: toEdge,
+        angle: angle,
+        kind: rel.toCrowFoot!,
+      ));
+    }
+    if (rel.label != null && rel.label!.isNotEmpty) {
+      final mid = Offset(
+        (fromEdge.dx + toEdge.dx) / 2,
+        (fromEdge.dy + toEdge.dy) / 2,
+      );
+      final size = measurer.measure(rel.label!, _relationshipLabelStyle);
+      shapes.add(SceneText(
+        offset: Offset(mid.dx - size.width / 2, mid.dy - size.height - 2),
+        text: rel.label!,
+        textStyle: _relationshipLabelStyle,
+      ));
+    }
+    if (rel.fromMultiplicity != null) {
+      final size =
+          measurer.measure(rel.fromMultiplicity!, _multiplicityStyle);
+      shapes.add(SceneText(
+        offset: _multiplicityOffset(fromEdge, toEdge, size, atFrom: true),
+        text: rel.fromMultiplicity!,
+        textStyle: _multiplicityStyle,
+      ));
+    }
+    if (rel.toMultiplicity != null) {
+      final size = measurer.measure(rel.toMultiplicity!, _multiplicityStyle);
+      shapes.add(SceneText(
+        offset: _multiplicityOffset(fromEdge, toEdge, size, atFrom: false),
+        text: rel.toMultiplicity!,
+        textStyle: _multiplicityStyle,
+      ));
+    }
+  }
+
+  Offset _multiplicityOffset(
+    Offset fromEdge,
+    Offset toEdge,
+    Size size, {
+    required bool atFrom,
+  }) {
+    final anchor = atFrom ? fromEdge : toEdge;
+    final other = atFrom ? toEdge : fromEdge;
+    final dx = other.dx - anchor.dx;
+    final dy = other.dy - anchor.dy;
+    final len = math.sqrt(dx * dx + dy * dy);
+    if (len == 0) return Offset(anchor.dx, anchor.dy - size.height);
+    final ux = dx / len;
+    final uy = dy / len;
+    final tx = anchor.dx + ux * 16;
+    final ty = anchor.dy + uy * 16;
+    return Offset(tx - size.width / 2, ty - size.height / 2);
+  }
+
+  Offset _edgePoint(Rect rect, Offset toward) {
+    final cx = rect.center.dx;
+    final cy = rect.center.dy;
+    final dx = toward.dx - cx;
+    final dy = toward.dy - cy;
+    if (dx == 0 && dy == 0) return rect.center;
+    final halfW = rect.width / 2;
+    final halfH = rect.height / 2;
+    final tx = dx == 0 ? double.infinity : halfW / dx.abs();
+    final ty = dy == 0 ? double.infinity : halfH / dy.abs();
+    final t = math.min(tx, ty);
+    return Offset(cx + dx * t, cy + dy * t);
+  }
+
+  _RelStyle _styleFor(RelationshipKind kind) {
+    switch (kind) {
+      case RelationshipKind.inheritance:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.triangle,
+          headAtFrom: true,
+        );
+      case RelationshipKind.realization:
+        return const _RelStyle(
+          dashed: true,
+          head: ArrowHead.triangle,
+          headAtFrom: true,
+        );
+      case RelationshipKind.composition:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.filledDiamond,
+          headAtFrom: true,
+        );
+      case RelationshipKind.aggregation:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.hollowDiamond,
+          headAtFrom: true,
+        );
+      case RelationshipKind.association:
+        return const _RelStyle(dashed: false, head: null, headAtFrom: false);
+      case RelationshipKind.directedAssociation:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.open,
+          headAtFrom: false,
+        );
+      case RelationshipKind.dependency:
+        return const _RelStyle(
+          dashed: true,
+          head: ArrowHead.open,
+          headAtFrom: false,
+        );
+      case RelationshipKind.link:
+        return const _RelStyle(dashed: true, head: null, headAtFrom: false);
+    }
+  }
+
+  String? _stereotype(ClassKind kind) {
+    switch (kind) {
+      case ClassKind.class_:
+      case ClassKind.abstractClass:
+      case ClassKind.object_:
+        return null;
+      case ClassKind.interface:
+        return '<<interface>>';
+      case ClassKind.enum_:
+        return '<<enum>>';
+      case ClassKind.annotation:
+        return '<<annotation>>';
+      case ClassKind.exception:
+        return '<<exception>>';
+      case ClassKind.map_:
+        return '<<map>>';
+      case ClassKind.entity_:
+        return '<<entity>>';
+    }
+  }
+
+  static String _visibilityChar(Visibility v) {
+    switch (v) {
+      case Visibility.public:
+        return '+';
+      case Visibility.private:
+        return '-';
+      case Visibility.protected:
+        return '#';
+      case Visibility.packagePrivate:
+        return '~';
+    }
+  }
+
+  static Color _visibilityColor(Visibility v) {
+    switch (v) {
+      case Visibility.public:
+        return _publicColor;
+      case Visibility.private:
+        return _privateColor;
+      case Visibility.protected:
+        return _protectedColor;
+      case Visibility.packagePrivate:
+        return _packageColor;
+    }
+  }
+}
+
+class _ClassBox {
+  final ClassDecl decl;
+  final TextStyle headerStyle;
+  final String headerText;
+  final String? stereotype;
+  final Size stereotypeSize;
+  final Size nameSize;
+  final List<_MemberLine> memberLines;
+  final double headerHeight;
+  final double width;
+  final double height;
+  Rect rect = Rect.zero;
+
+  _ClassBox({
+    required this.decl,
+    required this.headerStyle,
+    required this.headerText,
+    required this.stereotype,
+    required this.stereotypeSize,
+    required this.nameSize,
+    required this.memberLines,
+    required this.headerHeight,
+    required this.width,
+    required this.height,
+  });
+}
+
+class _MemberLine {
+  final String visibilityChar;
+  final Color visibilityColor;
+  final String body;
+  final TextStyle bodyStyle;
+  final double width;
+  final double height;
+  final double visWidth;
+  final DividerKind? divider;
+
+  const _MemberLine({
+    required this.visibilityChar,
+    required this.visibilityColor,
+    required this.body,
+    required this.bodyStyle,
+    required this.width,
+    required this.height,
+    required this.visWidth,
+    this.divider,
+  });
+}
+
+class _RelStyle {
+  final bool dashed;
+  final ArrowHead? head;
+  final bool headAtFrom;
+  const _RelStyle({
+    required this.dashed,
+    required this.head,
+    required this.headAtFrom,
+  });
+}
