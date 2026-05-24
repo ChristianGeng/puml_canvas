@@ -17,6 +17,13 @@ class _Macro {
   _Macro(this.name, this.params, this.body);
 }
 
+class _Procedure {
+  final String name;
+  final List<String> params;
+  final List<String> bodyLines;
+  _Procedure(this.name, this.params, this.bodyLines);
+}
+
 class _CondFrame {
   bool active;
   bool anyTaken;
@@ -31,6 +38,7 @@ class _Subs {
 class Preprocessor {
   final FileLoader? fileLoader;
   final Map<String, _Macro> _macros = {};
+  final Map<String, _Procedure> _procedures = {};
   final _Subs _subs = _Subs();
   final Set<String> _includeStack = {};
 
@@ -54,6 +62,8 @@ class Preprocessor {
     final cond = <_CondFrame>[];
     String? capturingSub;
     final captureBuf = StringBuffer();
+    _Procedure? capturingProc;
+    final procBuf = <String>[];
 
     bool active() => cond.every((f) => f.active);
 
@@ -61,6 +71,13 @@ class Preprocessor {
       final raw = lines[i];
       final trimmed = raw.trimLeft();
       final lineNo = i + 1;
+
+      if (capturingProc != null && !_isProcEnd(trimmed)) {
+        if (active()) {
+          procBuf.add(raw);
+        }
+        continue;
+      }
 
       if (capturingSub != null && !_isSubEnd(trimmed)) {
         if (active()) {
@@ -158,20 +175,47 @@ class Preprocessor {
             break;
           case 'pragma':
             break;
-          case 'function':
+          case 'theme':
+            break;
           case 'procedure':
+            if (active()) {
+              final proc = _parseProcedureHeader(directive.rest, lineNo);
+              capturingProc = proc;
+              procBuf.clear();
+            }
+            break;
+          case 'endprocedure':
+            if (capturingProc == null) {
+              throw PreprocessorException(
+                  '!endprocedure without matching !procedure', lineNo);
+            }
+            _procedures[capturingProc.name] = _Procedure(
+                capturingProc.name, capturingProc.params, List.of(procBuf));
+            capturingProc = null;
+            procBuf.clear();
+            break;
+          case 'function':
           case 'return':
           case 'endfunction':
-          case 'endprocedure':
           case 'include_many':
             break;
           default:
+            if (active() &&
+                directive.name.startsWith(r'$') &&
+                directive.rest.startsWith('=')) {
+              _handleVarAssign(
+                  directive.name, directive.rest.substring(1).trim(), lineNo);
+            }
             break;
         }
         continue;
       }
 
       if (!active()) continue;
+
+      if (_tryExpandProcedureCall(raw, trimmed, out)) {
+        continue;
+      }
 
       final expanded = _expand(raw);
       out.writeln(expanded);
@@ -185,6 +229,10 @@ class Preprocessor {
       throw PreprocessorException(
           'unterminated !startsub in $sourceLabel', lines.length);
     }
+    if (capturingProc != null) {
+      throw PreprocessorException(
+          'unterminated !procedure in $sourceLabel', lines.length);
+    }
   }
 
   bool _isSubEnd(String trimmed) {
@@ -193,8 +241,119 @@ class Preprocessor {
     return d.name == 'endsub';
   }
 
+  bool _isProcEnd(String trimmed) {
+    if (!trimmed.startsWith('!')) return false;
+    final d = _parseDirective(trimmed);
+    return d.name == 'endprocedure';
+  }
+
+  _Procedure _parseProcedureHeader(String rest, int lineNo) {
+    final src = rest.trim();
+    if (src.isEmpty || src.codeUnitAt(0) != 0x24) {
+      throw PreprocessorException(
+          '!procedure requires a \$name', lineNo);
+    }
+    var i = 1;
+    while (i < src.length && _isNameChar(src.codeUnitAt(i))) {
+      i++;
+    }
+    final name = src.substring(0, i);
+    final params = <String>[];
+    if (i < src.length && src[i] == '(') {
+      final close = src.indexOf(')', i);
+      if (close < 0) {
+        throw PreprocessorException(
+            'unterminated !procedure parameter list', lineNo);
+      }
+      final inside = src.substring(i + 1, close);
+      for (final p in inside.split(',')) {
+        final t = p.trim();
+        if (t.isEmpty) continue;
+        params.add(t);
+      }
+    }
+    return _Procedure(name, params, const []);
+  }
+
+  void _handleVarAssign(String name, String value, int lineNo) {
+    if (name.length < 2) {
+      throw PreprocessorException(
+          '!\$ assignment requires a name', lineNo);
+    }
+    var v = value;
+    if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+      v = v.substring(1, v.length - 1);
+    }
+    _macros[name] = _Macro(name, null, v);
+  }
+
+  bool _tryExpandProcedureCall(
+      String raw, String trimmed, StringBuffer out) {
+    if (trimmed.isEmpty || trimmed.codeUnitAt(0) != 0x24) return false;
+    var i = 1;
+    while (i < trimmed.length && _isNameChar(trimmed.codeUnitAt(i))) {
+      i++;
+    }
+    if (i == 1) return false;
+    final name = trimmed.substring(0, i);
+    final proc = _procedures[name];
+    if (proc == null) return false;
+    if (i >= trimmed.length || trimmed[i] != '(') return false;
+    final args = _parseArgs(trimmed, i);
+    if (args == null) return false;
+    final indent = raw.substring(0, raw.length - trimmed.length);
+    for (final bodyLine in proc.bodyLines) {
+      var line = bodyLine;
+      for (var k = 0; k < proc.params.length && k < args.values.length; k++) {
+        line = _replaceLiteral(
+            line, proc.params[k], _unquoteArg(args.values[k]));
+      }
+      final expanded = _expand(indent + line);
+      out.writeln(expanded);
+    }
+    return true;
+  }
+
+  String _unquoteArg(String v) {
+    if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+      return v.substring(1, v.length - 1);
+    }
+    return v;
+  }
+
+  String _replaceLiteral(String body, String name, String value) {
+    if (name.isEmpty) return body;
+    final out = StringBuffer();
+    var i = 0;
+    while (i < body.length) {
+      if (i + name.length <= body.length &&
+          body.substring(i, i + name.length) == name) {
+        final after = i + name.length;
+        final okAfter =
+            after >= body.length || !_isNameChar(body.codeUnitAt(after));
+        if (okAfter) {
+          out.write(value);
+          i = after;
+          continue;
+        }
+      }
+      out.write(body[i]);
+      i++;
+    }
+    return out.toString();
+  }
+
   _Directive _parseDirective(String trimmed) {
     final body = trimmed.substring(1);
+    if (body.isNotEmpty && body.codeUnitAt(0) == 0x24) {
+      var i = 1;
+      while (i < body.length && _isNameChar(body.codeUnitAt(i))) {
+        i++;
+      }
+      final name = body.substring(0, i);
+      final rest = body.substring(i).trimLeft();
+      return _Directive(name, rest);
+    }
     var i = 0;
     while (i < body.length && _isNameChar(body.codeUnitAt(i))) {
       i++;
@@ -356,6 +515,24 @@ class Preprocessor {
           }
           i++;
         }
+        continue;
+      }
+      if (c == r'$' &&
+          i + 1 < line.length &&
+          _isIdStart(line.codeUnitAt(i + 1))) {
+        var j = i + 1;
+        while (j < line.length && _isNameChar(line.codeUnitAt(j))) {
+          j++;
+        }
+        final name = line.substring(i, j);
+        final macro = _macros[name];
+        if (macro != null && macro.params == null) {
+          out.write(macro.body);
+          i = j;
+          continue;
+        }
+        out.write(name);
+        i = j;
         continue;
       }
       if (_isIdStart(line.codeUnitAt(i))) {
@@ -677,8 +854,9 @@ class _ExprParser {
       pos = j;
       return _IntValue(n);
     }
-    if (_isIdent(c)) {
+    if (_isIdent(c) || c == r'$') {
       var j = pos;
+      if (src[j] == r'$') j++;
       while (j < src.length && _isIdentChar(src[j])) {
         j++;
       }
@@ -693,6 +871,7 @@ class _ExprParser {
         pos++;
         _skip();
         var k = pos;
+        if (k < src.length && src[k] == r'$') k++;
         while (k < src.length && _isIdentChar(src[k])) {
           k++;
         }

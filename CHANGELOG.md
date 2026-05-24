@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.9
+
+### Fixed
+
+- Preprocessor: `!theme NAME` is silently consumed (no actual theme
+  loading) so sources that start with `!theme spacelab` no longer fall
+  through as an unrecognized line.
+- Preprocessor: `!$var = value` assignment-style syntax stores the
+  value in the macro table under the `$`-prefixed key, so later
+  references like `$var` (in content lines and `!if` expressions) and
+  `defined($var)` resolve correctly. The trailing value's surrounding
+  double quotes, if present, are stripped.
+- Preprocessor: `!procedure $NAME($a, $b, ...)` … `!endprocedure`
+  captures the body as a multi-line template with positional
+  parameters and stores it in a separate procedure table. A content
+  line that starts with `$NAME(args)` invocation is expanded in place:
+  arguments substitute `$a`, `$b`, … throughout the body (quoted-string
+  args are unquoted before substitution) and the resulting body lines
+  are themselves macro-expanded.
+- Preprocessor: unknown `!directive` lines (anything not in the
+  recognized set) are silently consumed instead of leaking through to
+  the lexer.
+- Parser (component): `component "Name" as Alias #Color` now accepts
+  and skips the trailing `#color` token, so procedure expansions like
+  `component "Gateway" as Gateway #LightBlue` parse cleanly.
+
 ## 0.7.8
 
 ### Changed

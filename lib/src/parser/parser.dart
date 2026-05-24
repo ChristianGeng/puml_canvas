@@ -2706,6 +2706,9 @@ class Parser {
       throw ParserException(
           'Expected component name, got ${t.type}', t.line, t.column);
     }
+    if (_check(TokenType.hashColor)) {
+      _advance();
+    }
     return ComponentNode(
       alias: alias,
       label: displayName ?? alias,
