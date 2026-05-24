@@ -497,5 +497,68 @@ void main() {
         expect(arrows, ['<<--']);
       });
     });
+
+    group('hyphen in identifier', () {
+      test('lexes Multi-region as a single identifier', () {
+        final tokens = Lexer()
+            .tokenize('@startuml\ntitle Multi-region deployment\n@enduml\n');
+        final identifiers = tokens
+            .where((t) => t.type == TokenType.identifier)
+            .map((t) => t.lexeme)
+            .toList();
+        expect(identifiers, contains('Multi-region'));
+      });
+
+      test('hyphen between identifier characters does not break arrows', () {
+        final tokens = Lexer().tokenize('@startuml\nfoo-bar -> baz\n@enduml\n');
+        final identifiers = tokens
+            .where((t) => t.type == TokenType.identifier)
+            .map((t) => t.lexeme)
+            .toList();
+        final arrows = tokens
+            .where((t) => t.type == TokenType.arrow)
+            .map((t) => t.lexeme)
+            .toList();
+        expect(identifiers, ['foo-bar', 'baz']);
+        expect(arrows, ['->']);
+      });
+
+      test('trailing hyphen before whitespace is not consumed', () {
+        final tokens = Lexer().tokenize('@startuml\nA --> B\n@enduml\n');
+        final arrows = tokens
+            .where((t) => t.type == TokenType.arrow)
+            .map((t) => t.lexeme)
+            .toList();
+        expect(arrows, ['-->']);
+      });
+    });
+
+    group('string literal escapes', () {
+      test('\\n inside a string becomes a real newline', () {
+        final tokens =
+            Lexer().tokenize('@startuml\n"first\\nsecond"\n@enduml\n');
+        final str = tokens
+            .firstWhere((t) => t.type == TokenType.stringLiteral)
+            .lexeme;
+        expect(str, 'first\nsecond');
+      });
+
+      test('\\" inside a string becomes a literal double quote', () {
+        final tokens =
+            Lexer().tokenize('@startuml\n"say \\"hi\\""\n@enduml\n');
+        final str = tokens
+            .firstWhere((t) => t.type == TokenType.stringLiteral)
+            .lexeme;
+        expect(str, 'say "hi"');
+      });
+
+      test('\\\\ inside a string becomes a single backslash', () {
+        final tokens = Lexer().tokenize('@startuml\n"a\\\\b"\n@enduml\n');
+        final str = tokens
+            .firstWhere((t) => t.type == TokenType.stringLiteral)
+            .lexeme;
+        expect(str, 'a\\b');
+      });
+    });
   });
 }

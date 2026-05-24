@@ -2513,6 +2513,63 @@ void main() {
       expect(n.kind, ComponentNodeKind.queue);
     });
 
+    test('storage keyword parses as storage node when not a container', () {
+      final d = parseComponent('@startuml\n'
+          'package "P" {\n'
+          '  [A]\n'
+          '}\n'
+          'storage "Object Store" as S3\n'
+          '@enduml\n');
+      final n = d.nodes.firstWhere((n) => n.alias == 'S3');
+      expect(n.label, 'Object Store');
+      expect(n.kind, ComponentNodeKind.storage);
+    });
+
+    test('storage keyword nested inside a node container', () {
+      final d = parseComponent('@startuml\n'
+          'node "Server" {\n'
+          '  storage "Object Store" as S3\n'
+          '}\n'
+          '@enduml\n');
+      expect(d.containers, hasLength(1));
+      expect(d.containers.single.nodeAliases, ['S3']);
+      final n = d.nodes.firstWhere((n) => n.alias == 'S3');
+      expect(n.kind, ComponentNodeKind.storage);
+    });
+
+    test('storage with a body parses as a container', () {
+      final d = parseComponent('@startuml\n'
+          'storage "Bucket" {\n'
+          '  [Object1]\n'
+          '}\n'
+          '@enduml\n');
+      expect(d.containers.single.kind, ContainerKind.storage);
+      expect(d.containers.single.label, 'Bucket');
+    });
+
+    test('deeply nested containers (4 levels) parse', () {
+      final d = parseComponent('@startuml\n'
+          'frame "AWS" {\n'
+          '  node "VPC" {\n'
+          '    node "Subnet" {\n'
+          '      node "Pod" {\n'
+          '        component "Web" as W\n'
+          '      }\n'
+          '    }\n'
+          '  }\n'
+          '}\n'
+          '@enduml\n');
+      expect(d.containers, hasLength(1));
+      final frame = d.containers.single;
+      expect(frame.nestedContainers, hasLength(1));
+      final vpc = frame.nestedContainers.single;
+      expect(vpc.nestedContainers, hasLength(1));
+      final subnet = vpc.nestedContainers.single;
+      expect(subnet.nestedContainers, hasLength(1));
+      final pod = subnet.nestedContainers.single;
+      expect(pod.nodeAliases, ['W']);
+    });
+
     test('cloud container as alias is captured on the container', () {
       final d = parseComponent('@startuml\n'
           'cloud "Payment Gateway" as PG\n'
@@ -3319,6 +3376,55 @@ database "Orders DB" as ODB
 [Order Service] --> [Payment Adapter]
 [Payment Adapter] --> PG
 [Order Service] --> ODB
+@enduml
+''');
+
+    smoke('deployment_cloud_edges', '''@startuml
+title Multi-region deployment with artifacts and network boundaries
+
+skinparam componentStyle rectangle
+
+node "User Device" as device {
+  artifact "omni-viewer.app" as app
+}
+
+cloud "Public Internet" {
+  node "CDN Edge\\n{global}" as cdn
+}
+
+frame "AWS us-east-1" {
+  node "VPC" {
+    node "Public Subnet" {
+      node "ALB" as alb
+    }
+    node "Private Subnet A" {
+      component "Viewer API" as api1
+      database "Metadata\\nPostgreSQL" as db
+    }
+    node "Private Subnet B" {
+      component "Conversion Worker" as worker
+      queue "Job Queue" as queue
+      storage "Object Store\\nS3" as s3
+    }
+  }
+}
+
+frame "AWS eu-west-1" {
+  node "Read Replica Region" {
+    database "Metadata Replica" as replica
+    storage "S3 Replica" as s3replica
+  }
+}
+
+app --> cdn : HTTPS
+cdn --> alb : origin request
+alb --> api1 : mTLS
+api1 --> db : SQL
+api1 --> queue : enqueue conversion
+worker --> queue : poll
+worker --> s3 : read/write files
+db ..> replica : logical replication
+s3 ..> s3replica : CRR
 @enduml
 ''');
 

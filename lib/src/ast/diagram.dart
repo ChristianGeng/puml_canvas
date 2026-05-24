@@ -715,7 +715,14 @@ class StateTransition {
   });
 }
 
-enum ComponentNodeKind { component, interface, artifact, database, queue }
+enum ComponentNodeKind {
+  component,
+  interface,
+  artifact,
+  database,
+  queue,
+  storage,
+}
 
 class ComponentNode {
   final String alias;
@@ -729,7 +736,7 @@ class ComponentNode {
   });
 }
 
-enum ContainerKind { package, node, cloud, frame }
+enum ContainerKind { package, node, cloud, frame, database, queue, storage }
 
 class ComponentContainer {
   final String? label;

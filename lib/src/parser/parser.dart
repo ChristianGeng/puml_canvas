@@ -1683,13 +1683,20 @@ class Parser {
   }
 
   bool _looksLikeUseCaseDiagram() {
+    var atLineStart = true;
     for (var k = _pos; k < _tokens.length; k++) {
       final t = _tokens[k];
       if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
-      if (t.type == TokenType.identifier &&
+      if (t.type == TokenType.newline) {
+        atLineStart = true;
+        continue;
+      }
+      if (atLineStart &&
+          t.type == TokenType.identifier &&
           (t.lexeme == 'usecase' || t.lexeme == 'rectangle')) {
         return true;
       }
+      atLineStart = false;
     }
     return false;
   }
@@ -2387,6 +2394,7 @@ class Parser {
 
   bool _looksLikeComponentDiagram() {
     const containerKeywords = {'package', 'node', 'cloud', 'frame'};
+    const ambiguousContainerKeywords = {'database', 'queue', 'storage'};
     var atLineStart = true;
     for (var k = _pos; k < _tokens.length; k++) {
       final t = _tokens[k];
@@ -2399,6 +2407,17 @@ class Parser {
         if (t.lexeme == 'component') return true;
         if (t.lexeme == 'artifact') return true;
         if (containerKeywords.contains(t.lexeme)) return true;
+        if (ambiguousContainerKeywords.contains(t.lexeme)) {
+          for (var j = k + 1; j < _tokens.length; j++) {
+            final tt = _tokens[j];
+            if (tt.type == TokenType.leftBrace) return true;
+            if (tt.type == TokenType.newline ||
+                tt.type == TokenType.eof ||
+                tt.type == TokenType.endUml) {
+              break;
+            }
+          }
+        }
       }
       if (atLineStart && t.type == TokenType.leftBracket) {
         if (k + 2 < _tokens.length &&
@@ -2470,6 +2489,12 @@ class Parser {
           containers.add(_parseComponentContainer(addNode));
         } else {
           addNode(_parseTypedNodeDecl(ComponentNodeKind.queue));
+        }
+      } else if (_isKeyword('storage')) {
+        if (_typedNodeKeywordIsContainer()) {
+          containers.add(_parseComponentContainer(addNode));
+        } else {
+          addNode(_parseTypedNodeDecl(ComponentNodeKind.storage));
         }
       } else if (_isComponentContainerKeyword()) {
         containers.add(_parseComponentContainer(addNode));
@@ -2561,6 +2586,12 @@ class Parser {
         return ContainerKind.cloud;
       case 'frame':
         return ContainerKind.frame;
+      case 'database':
+        return ContainerKind.database;
+      case 'queue':
+        return ContainerKind.queue;
+      case 'storage':
+        return ContainerKind.storage;
     }
     return ContainerKind.package;
   }
@@ -2832,6 +2863,19 @@ class Parser {
           final node = _parseTypedNodeDecl(ComponentNodeKind.queue);
           addNode(node);
           contained.add(node.alias);
+        } else if (_isKeyword('storage') &&
+            !_typedNodeKeywordIsContainer()) {
+          final node = _parseTypedNodeDecl(ComponentNodeKind.storage);
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('database') &&
+            _typedNodeKeywordIsContainer()) {
+          nested.add(_parseComponentContainer(addNode));
+        } else if (_isKeyword('queue') && _typedNodeKeywordIsContainer()) {
+          nested.add(_parseComponentContainer(addNode));
+        } else if (_isKeyword('storage') &&
+            _typedNodeKeywordIsContainer()) {
+          nested.add(_parseComponentContainer(addNode));
         } else if (_check(TokenType.leftBracket)) {
           final node = _parseBracketComponent();
           addNode(node);

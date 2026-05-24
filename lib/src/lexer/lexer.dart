@@ -448,6 +448,22 @@ class Lexer {
             throw LexerException(
                 'Unterminated string literal', startLine, startCol);
           }
+          if (source[i] == '\\' && i + 1 < source.length) {
+            final next = source[i + 1];
+            if (next == 'n') {
+              buf.write('\n');
+            } else if (next == '"') {
+              buf.write('"');
+            } else if (next == '\\') {
+              buf.write('\\');
+            } else {
+              buf.write('\\');
+              buf.write(next);
+            }
+            i += 2;
+            col += 2;
+            continue;
+          }
           buf.write(source[i]);
           i++;
           col++;
@@ -745,9 +761,21 @@ class Lexer {
       if (_isIdentStart(c)) {
         final startCol = col;
         final start = i;
-        while (i < source.length && _isIdentChar(source[i])) {
-          i++;
-          col++;
+        while (i < source.length) {
+          final ch = source[i];
+          if (_isIdentChar(ch)) {
+            i++;
+            col++;
+            continue;
+          }
+          if (ch == '-' &&
+              i + 1 < source.length &&
+              _isIdentStart(source[i + 1])) {
+            i++;
+            col++;
+            continue;
+          }
+          break;
         }
         emit(TokenType.identifier, source.substring(start, i), startCol);
         continue;

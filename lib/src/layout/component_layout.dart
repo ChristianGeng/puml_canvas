@@ -69,6 +69,7 @@ class ComponentLayout implements DiagramLayout {
   static const _artifactStroke = Color(0xFF000000);
 
   static const _componentStereotype = '<<component>>';
+  static const _storageStereotype = '<<storage>>';
 
   const ComponentLayout();
 
@@ -234,6 +235,24 @@ class ComponentLayout implements DiagramLayout {
       );
       return Size(width, height);
     }
+    if (node.kind == ComponentNodeKind.storage) {
+      final labelSize = measurer.measure(node.label, _componentStyle);
+      final stereotypeSize =
+          measurer.measure(_storageStereotype, _stereotypeStyle);
+      final width = math.max(
+        _componentMinWidth,
+        math.max(labelSize.width, stereotypeSize.width) +
+            _componentPaddingX * 2,
+      );
+      final height = math.max(
+        _componentMinHeight,
+        _componentPaddingY * 2 +
+            stereotypeSize.height +
+            _componentStereotypeGap +
+            labelSize.height,
+      );
+      return Size(width, height);
+    }
     final labelSize = measurer.measure(node.label, _componentStyle);
     final stereotypeSize = measurer.measure(_componentStereotype, _stereotypeStyle);
     final width = math.max(
@@ -311,13 +330,16 @@ class ComponentLayout implements DiagramLayout {
       ));
       return;
     }
+    final stereotypeText = node.kind == ComponentNodeKind.storage
+        ? _storageStereotype
+        : _componentStereotype;
     shapes.add(SceneBox(
       rect: rect,
       fill: _componentFill,
       stroke: _componentStroke,
       textStyle: _componentStyle,
     ));
-    final stereotypeSize = measurer.measure(_componentStereotype, _stereotypeStyle);
+    final stereotypeSize = measurer.measure(stereotypeText, _stereotypeStyle);
     final labelSize = measurer.measure(node.label, _componentStyle);
     final totalTextHeight = stereotypeSize.height +
         _componentStereotypeGap +
@@ -328,7 +350,7 @@ class ComponentLayout implements DiagramLayout {
         rect.center.dx - stereotypeSize.width / 2,
         ty,
       ),
-      text: _componentStereotype,
+      text: stereotypeText,
       textStyle: _stereotypeStyle,
     ));
     shapes.add(SceneText(
@@ -679,6 +701,25 @@ class ComponentLayout implements DiagramLayout {
             offset: Offset(
               notchRect.left + _containerPaddingX,
               notchRect.top + 1,
+            ),
+            text: label,
+            textStyle: _containerStyle,
+          ));
+        }
+      case ContainerKind.database:
+      case ContainerKind.queue:
+      case ContainerKind.storage:
+        shapes.add(SceneBox(
+          rect: rect,
+          fill: _containerFill,
+          stroke: _containerStroke,
+          textStyle: _containerStyle,
+        ));
+        if (label != null) {
+          shapes.add(SceneText(
+            offset: Offset(
+              rect.left + _containerPaddingX,
+              rect.top + _containerHeaderGap / 2,
             ),
             text: label,
             textStyle: _containerStyle,

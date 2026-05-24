@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.7.5
+
+### Fixed
+
+- Lexer: a `-` inside identifier-like words (e.g. `Multi-region`,
+  `omni-viewer.app`, `us-east-1`) no longer raises
+  `LexerException("Unexpected '-'")`. Identifier scanning now
+  greedily consumes `-` when it sits between two
+  letter/digit/underscore characters, so identifiers may contain
+  internal hyphens. Arrow scanning (`->`, `-->`, `-[#color]->`,
+  `<-`, etc.) is unaffected because arrows always start at a
+  position that is not inside an identifier.
+- Lexer: backslash escape sequences inside `"..."` string literals
+  are now interpreted. `\n` becomes an actual newline, `\"`
+  becomes a literal double quote, and `\\` becomes a single
+  backslash. This matches PlantUML's behaviour and makes labels
+  like `"CDN Edge\n{global}"` render as two lines.
+- Parser: use-case diagram dispatch (`usecase` / `rectangle`)
+  now requires the keyword to appear at the start of a line, so
+  `skinparam componentStyle rectangle` no longer accidentally
+  routes the diagram to the use-case parser.
+- Component / deployment diagrams: added a new `storage` node
+  keyword. `storage "Object Store" as S3` parses as a
+  `ComponentNode` with `ComponentNodeKind.storage` and renders
+  as a `<<storage>>`-stereotyped box; `storage "Bucket" { ... }`
+  parses as a `ComponentContainer` with `ContainerKind.storage`
+  (and nests inside other containers like `node`).
+- Component / deployment diagrams: nested-container parsing now
+  also accepts `database`/`queue`/`storage` container forms
+  inside another container body, so deeply nested deployment
+  topologies like `frame { node { node { node { ... } } } }`
+  parse without throwing.
+
 ## 0.7.4
 
 ### Fixed
