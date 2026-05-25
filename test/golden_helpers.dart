@@ -28,6 +28,8 @@ Future<void> expectPumlGolden(
   String goldenName, {
   Size size = const Size(640, 480),
 }) async {
+  await tester.binding.setSurfaceSize(size);
+  addTearDown(() => tester.binding.setSurfaceSize(null));
   await tester.pumpWidget(pumlGoldenHarness(source, size: size));
   await tester.pumpAndSettle();
   await expectLater(

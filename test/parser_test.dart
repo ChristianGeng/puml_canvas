@@ -480,6 +480,45 @@ void main() {
       });
     });
 
+    group('participant rich label', () {
+      test('=Title / ---- / ""SubTitle"" produces 2 labelSections', () {
+        final d = parseSequence('@startuml\n'
+            'participant Participant [\n'
+            '    =Title\n'
+            '    ----\n'
+            '    ""SubTitle""\n'
+            ']\n'
+            'participant Bob\n'
+            'Participant -> Bob\n'
+            '@enduml\n');
+        final p = d.participants.firstWhere((p) => p.alias == 'Participant');
+        expect(p.labelSections, isNotNull);
+        expect(p.labelSections!, hasLength(2));
+        expect(p.labelSections![0].lines, hasLength(1));
+        expect(p.labelSections![0].lines[0].text, 'Title');
+        expect(p.labelSections![0].lines[0].style,
+            ParticipantLabelStyle.title);
+        expect(p.labelSections![1].lines, hasLength(1));
+        expect(p.labelSections![1].lines[0].text, 'SubTitle');
+        expect(p.labelSections![1].lines[0].style,
+            ParticipantLabelStyle.code);
+        final bob = d.participants.firstWhere((p) => p.alias == 'Bob');
+        expect(bob.labelSections, isNull);
+      });
+
+      test('plain `[ ... ]` content without markers leaves labelSections null',
+          () {
+        final d = parseSequence('@startuml\n'
+            'participant Foo [\n'
+            '    hello world\n'
+            ']\n'
+            '@enduml\n');
+        final foo = d.participants.single;
+        expect(foo.labelSections, isNull);
+        expect(foo.displayName, 'hello world');
+      });
+    });
+
     group('create/destroy keywords', () {
       test('"create A" emits Create event without adding participant', () {
         final d = parseSequence('@startuml\ncreate A\n@enduml\n');
@@ -819,15 +858,20 @@ void main() {
         expect(ms.map((m) => m.label).toList(), ['1', null, '2']);
       });
 
-      test('autonumber resume with explicit value overrides current', () {
+      test('autonumber resume with explicit value sets the increment', () {
+        // PlantUML semantics: `resume N` is the new step, counter keeps its
+        // pre-resume value.
         final d = parseSequence('@startuml\n'
             'autonumber 5\n'
             'A -> B\n'
+            'autonumber stop\n'
+            'A -> B\n'
             'autonumber resume 100\n'
+            'A -> B\n'
             'A -> B\n'
             '@enduml\n');
         final ms = d.events.whereType<Message>().toList();
-        expect(ms.map((m) => m.label).toList(), ['5', '100']);
+        expect(ms.map((m) => m.label).toList(), ['5', null, '6', '106']);
       });
 
       test('format string without %d marker is used as a plain prefix', () {

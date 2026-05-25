@@ -129,8 +129,6 @@ class ClassLayout implements DiagramLayout {
             LayoutEdge(
               from: rel.from,
               to: rel.to,
-              directed: rel.kind != RelationshipKind.association &&
-                  rel.kind != RelationshipKind.link,
             ),
       ],
     ));
@@ -700,6 +698,36 @@ class ClassLayout implements DiagramLayout {
         );
       case RelationshipKind.link:
         return const _RelStyle(dashed: true, head: null, headAtFrom: false);
+      case RelationshipKind.squareLink:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.square,
+          headAtFrom: true,
+        );
+      case RelationshipKind.crossLink:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.cross,
+          headAtFrom: true,
+        );
+      case RelationshipKind.bracketLink:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.bracket,
+          headAtFrom: true,
+        );
+      case RelationshipKind.plusLink:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.plus,
+          headAtFrom: true,
+        );
+      case RelationshipKind.caretLink:
+        return const _RelStyle(
+          dashed: false,
+          head: ArrowHead.caret,
+          headAtFrom: true,
+        );
     }
   }
 
@@ -723,6 +751,20 @@ class ClassLayout implements DiagramLayout {
         return '<<entity>>';
       case ClassKind.record_:
         return '<<record>>';
+      case ClassKind.circle:
+        return '<<circle>>';
+      case ClassKind.diamond:
+        return '<<diamond>>';
+      case ClassKind.dataclass:
+        return '<<dataclass>>';
+      case ClassKind.metaclass:
+        return '<<metaclass>>';
+      case ClassKind.protocol:
+        return '<<protocol>>';
+      case ClassKind.stereotype_:
+        return '<<stereotype>>';
+      case ClassKind.struct:
+        return '<<struct>>';
     }
   }
 

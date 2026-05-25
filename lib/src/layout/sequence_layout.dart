@@ -29,9 +29,9 @@ class SequenceLayout implements DiagramLayout {
   static const _groupHorizontalPadding = 16.0;
   static const _groupLabelTabHeight = 18.0;
   static const _groupLabelTabPaddingX = 6.0;
-  static const _groupBranchTopPadding = 6.0;
+  static const _groupBranchTopPadding = 22.0;
   static const _groupGapAfter = 8.0;
-  static const _groupElseDividerGap = 10.0;
+  static const _groupElseDividerGap = 16.0;
   static const _labelStyle = TextStyle(color: Color(0xFF000000), fontSize: 12);
   static const _noteStyle = TextStyle(color: Color(0xFF000000), fontSize: 11);
   static const _groupKindStyle =
@@ -80,6 +80,14 @@ class SequenceLayout implements DiagramLayout {
   static const _participantBoxDefaultStroke = Color(0xFF808080);
   static const _participantBoxLabelStyle =
       TextStyle(color: Color(0xFF000000), fontSize: 11, fontWeight: FontWeight.w600);
+  static const _richLabelNormalStyle =
+      TextStyle(color: Color(0xFF000000), fontSize: 12);
+  static const _richLabelTitleStyle = TextStyle(
+      color: Color(0xFF000000), fontSize: 13, fontWeight: FontWeight.w700);
+  static const _richLabelCodeStyle = TextStyle(
+      color: Color(0xFF000000), fontSize: 11, fontFamily: 'monospace');
+  static const _richLabelLineGap = 2.0;
+  static const _richLabelSectionGap = 4.0;
   static const _actorIconHeight = 36.0;
   static const _smallIconHeight = 22.0;
   static const _databaseCapHeight = 6.0;
@@ -124,9 +132,18 @@ class SequenceLayout implements DiagramLayout {
 
     final actorWidths = <String, double>{};
     final actorHeights = <String, double>{};
+    final richSectionSizes = <String, List<Size>>{};
     var actorBoxHeight = 0.0;
     for (final p in participants) {
-      final size = measurer.measure(p.label, labelStyle);
+      final Size size;
+      if (p.labelSections != null &&
+          p.kind == ParticipantKind.participant) {
+        final sizes = _richSectionSizes(p.labelSections!, measurer);
+        richSectionSizes[p.alias] = sizes;
+        size = _richLabelTotalSize(sizes);
+      } else {
+        size = measurer.measure(p.label, labelStyle);
+      }
       final (w, h) = _symbolSize(p.kind, size);
       actorWidths[p.alias] = w;
       actorHeights[p.alias] = h;
@@ -142,12 +159,25 @@ class SequenceLayout implements DiagramLayout {
     }
     var totalWidth = x - _actorGap + _padding;
 
-    final diagramLeftX = participants.isEmpty
-        ? _padding
-        : actorCenters[participants.first.alias]! - _groupHorizontalPadding;
-    final diagramRightX = participants.isEmpty
-        ? totalWidth - _padding
-        : actorCenters[participants.last.alias]! + _groupHorizontalPadding;
+    // Use min/max of actual assigned centers (not declaration order) so groups
+    // span the rendered leftmost..rightmost lifeline regardless of ordering.
+    final double diagramLeftX;
+    final double diagramRightX;
+    if (actorCenters.isEmpty) {
+      diagramLeftX = _padding;
+      diagramRightX = totalWidth - _padding;
+    } else {
+      var minCx = double.infinity;
+      var maxCx = double.negativeInfinity;
+      for (final p in participants) {
+        final cx = actorCenters[p.alias];
+        if (cx == null) continue;
+        if (cx < minCx) minCx = cx;
+        if (cx > maxCx) maxCx = cx;
+      }
+      diagramLeftX = minCx - _groupHorizontalPadding;
+      diagramRightX = maxCx + _groupHorizontalPadding;
+    }
 
     final totalEventsHeight =
         _planHeight(diagram.events, measurer, noteStyle);
@@ -238,22 +268,40 @@ class SequenceLayout implements DiagramLayout {
       final destroyY = ctx.destroyY[p.alias];
       final topY = createY ?? topActorY;
       final topRect = Rect.fromLTWH(cx - w / 2, topY, w, h);
+      final pFill = p.color ?? actorFill;
       if (p.kind == ParticipantKind.participant) {
-        shapes.add(SceneBox(
-          rect: topRect,
-          label: p.label,
-          textStyle: labelStyle,
-          fill: actorFill,
-          stroke: actorStroke,
-        ));
-        if (destroyY == null) {
+        final sectionSizes = richSectionSizes[p.alias];
+        if (sectionSizes != null && p.labelSections != null) {
+          _emitRichParticipant(shapes, topRect, p.labelSections!,
+              sectionSizes, pFill, actorStroke, labelStyle, measurer);
+          if (destroyY == null) {
+            _emitRichParticipant(
+                shapes,
+                Rect.fromLTWH(cx - w / 2, bottomActorY, w, h),
+                p.labelSections!,
+                sectionSizes,
+                pFill,
+                actorStroke,
+                labelStyle,
+                measurer);
+          }
+        } else {
           shapes.add(SceneBox(
-            rect: Rect.fromLTWH(cx - w / 2, bottomActorY, w, h),
+            rect: topRect,
             label: p.label,
             textStyle: labelStyle,
-            fill: actorFill,
+            fill: pFill,
             stroke: actorStroke,
           ));
+          if (destroyY == null) {
+            shapes.add(SceneBox(
+              rect: Rect.fromLTWH(cx - w / 2, bottomActorY, w, h),
+              label: p.label,
+              textStyle: labelStyle,
+              fill: pFill,
+              stroke: actorStroke,
+            ));
+          }
         }
       } else {
         shapes.add(SceneSymbol(
@@ -261,7 +309,7 @@ class SequenceLayout implements DiagramLayout {
           label: p.label,
           labelStyle: labelStyle,
           kind: p.kind,
-          fill: actorFill,
+          fill: pFill,
           stroke: actorStroke,
         ));
         if (destroyY == null) {
@@ -270,7 +318,7 @@ class SequenceLayout implements DiagramLayout {
             label: p.label,
             labelStyle: labelStyle,
             kind: p.kind,
-            fill: actorFill,
+            fill: pFill,
             stroke: actorStroke,
           ));
         }
@@ -327,6 +375,54 @@ class SequenceLayout implements DiagramLayout {
     ));
   }
 
+  void _emitRichParticipant(
+      List<SceneShape> shapes,
+      Rect rect,
+      List<ParticipantLabelSection> sections,
+      List<Size> sectionSizes,
+      Color fill,
+      Color stroke,
+      TextStyle fallbackStyle,
+      TextMeasurer measurer) {
+    shapes.add(SceneBox(
+      rect: rect,
+      textStyle: fallbackStyle,
+      fill: fill,
+      stroke: stroke,
+    ));
+    // Section block is centered vertically inside the rect.
+    final total = _richLabelTotalSize(sectionSizes);
+    var y = rect.top + (rect.height - total.height) / 2;
+    for (var i = 0; i < sections.length; i++) {
+      final section = sections[i];
+      var lineY = y;
+      for (var j = 0; j < section.lines.length; j++) {
+        final line = section.lines[j];
+        final style = _richLabelStyle(line.style);
+        final text = line.text.isEmpty ? ' ' : line.text;
+        final size = measurer.measure(text, style);
+        shapes.add(SceneText(
+          offset: Offset(rect.center.dx - size.width / 2, lineY),
+          text: text,
+          textStyle: style,
+        ));
+        lineY += size.height;
+        if (j < section.lines.length - 1) lineY += _richLabelLineGap;
+      }
+      y += sectionSizes[i].height;
+      if (i < sections.length - 1) {
+        final dividerY = y + _richLabelSectionGap;
+        shapes.add(SceneLine(
+          from: Offset(rect.left, dividerY),
+          to: Offset(rect.right, dividerY),
+          head: null,
+          stroke: stroke,
+        ));
+        y += _richLabelSectionGap * 2;
+      }
+    }
+  }
+
   double _planHeight(List<SequenceEvent> events, TextMeasurer measurer,
       TextStyle noteStyle) {
     var total = 0.0;
@@ -340,9 +436,14 @@ class SequenceLayout implements DiagramLayout {
       SequenceEvent event, TextMeasurer measurer, TextStyle noteStyle) {
     switch (event) {
       case Message():
-        return event.from == event.to
-            ? _messageGap + _selfMessageHeight
-            : _messageGap;
+        if (event.from == event.to) {
+          final labelH = event.label == null || event.label!.isEmpty
+              ? 0.0
+              : _measureMultilineText(event.label!, measurer, _labelStyle)
+                  .height;
+          return _messageGap + _selfMessageHeight + labelH;
+        }
+        return _messageGap;
       case Note():
         final size = _measureNoteText(event.text, measurer, noteStyle);
         return size.height + _notePaddingY * 2 + _noteVerticalGap * 2;
@@ -405,12 +506,18 @@ class SequenceLayout implements DiagramLayout {
       switch (event) {
         case Message():
           if (event.from == event.to) {
+            final labelH = event.label == null || event.label!.isEmpty
+                ? 0.0
+                : _measureMultilineText(event.label!, ctx.measurer,
+                        ctx.labelStyle)
+                    .height;
             if (!event.hidden) {
               _emitSelfMessage(event, ctx.centers[event.from]!, y, ctx);
-              final loopRight = ctx.centers[event.from]! + _selfMessageWidth;
+              final cx = ctx.centers[event.from]!;
+              final loopRight = cx + _selfMessageWidth;
               if (loopRight > ctx.rightmost) ctx.rightmost = loopRight;
             }
-            y += _messageGap + _selfMessageHeight;
+            y += _messageGap + _selfMessageHeight + labelH;
           } else {
             if (!event.hidden) {
               _emitStraightMessage(event, ctx.centers[event.from]!,
@@ -694,6 +801,50 @@ class SequenceLayout implements DiagramLayout {
     return top + height + _refBoxVerticalGap;
   }
 
+  TextStyle _richLabelStyle(ParticipantLabelStyle style) {
+    switch (style) {
+      case ParticipantLabelStyle.title:
+        return _richLabelTitleStyle;
+      case ParticipantLabelStyle.code:
+        return _richLabelCodeStyle;
+      case ParticipantLabelStyle.normal:
+        return _richLabelNormalStyle;
+    }
+  }
+
+  // Per-section dimensions (max line width, sum of line heights with gaps).
+  List<Size> _richSectionSizes(
+      List<ParticipantLabelSection> sections, TextMeasurer measurer) {
+    return [
+      for (final section in sections)
+        () {
+          var maxW = 0.0;
+          var totalH = 0.0;
+          for (var i = 0; i < section.lines.length; i++) {
+            final line = section.lines[i];
+            final text = line.text.isEmpty ? ' ' : line.text;
+            final s = measurer.measure(text, _richLabelStyle(line.style));
+            if (s.width > maxW) maxW = s.width;
+            totalH += s.height;
+            if (i < section.lines.length - 1) totalH += _richLabelLineGap;
+          }
+          return Size(maxW, totalH);
+        }(),
+    ];
+  }
+
+  Size _richLabelTotalSize(List<Size> sectionSizes) {
+    var w = 0.0;
+    var h = 0.0;
+    for (var i = 0; i < sectionSizes.length; i++) {
+      final s = sectionSizes[i];
+      if (s.width > w) w = s.width;
+      h += s.height;
+      if (i < sectionSizes.length - 1) h += _richLabelSectionGap * 2;
+    }
+    return Size(w, h);
+  }
+
   (double, double) _symbolSize(ParticipantKind kind, Size labelSize) {
     switch (kind) {
       case ParticipantKind.participant:
@@ -743,6 +894,8 @@ class SequenceLayout implements DiagramLayout {
         return 'loop';
       case GroupKind.par:
         return 'par';
+      case GroupKind.group:
+        return 'group';
     }
   }
 
@@ -764,7 +917,29 @@ class SequenceLayout implements DiagramLayout {
 
   Rect _resolveNoteRect(
       Note note, Size size, double y, Map<String, double> centers) {
-    final firstCx = centers[note.participants.first]!;
+    // `note right` / `note left` without `of X` defaults to the leftmost
+    // (or rightmost) participant so the note has somewhere to anchor.
+    final String anchor;
+    if (note.participants.isEmpty) {
+      if (centers.isEmpty) {
+        return Rect.fromLTWH(_padding, y, size.width, size.height);
+      }
+      switch (note.position) {
+        case NotePosition.leftOf:
+          anchor = centers.entries
+              .reduce((a, b) => a.value <= b.value ? a : b)
+              .key;
+        case NotePosition.rightOf:
+          anchor = centers.entries
+              .reduce((a, b) => a.value >= b.value ? a : b)
+              .key;
+        case NotePosition.over:
+          anchor = centers.entries.first.key;
+      }
+    } else {
+      anchor = note.participants.first;
+    }
+    final firstCx = centers[anchor]!;
     switch (note.position) {
       case NotePosition.leftOf:
         return Rect.fromLTWH(firstCx - _noteHorizontalGap - size.width, y,
@@ -773,7 +948,7 @@ class SequenceLayout implements DiagramLayout {
         return Rect.fromLTWH(
             firstCx + _noteHorizontalGap, y, size.width, size.height);
       case NotePosition.over:
-        if (note.participants.length == 1) {
+        if (note.participants.length <= 1) {
           return Rect.fromLTWH(
               firstCx - size.width / 2, y, size.width, size.height);
         }
@@ -791,6 +966,7 @@ class SequenceLayout implements DiagramLayout {
   void _emitStraightMessage(
       Message m, double fx, double tx, double y, _Ctx ctx) {
     final stroke = m.color ?? ctx.defaultArrowColor;
+    final bidirectional = m.direction == MessageDirection.bidirectional;
     ctx.shapes.add(SceneLine(
       from: Offset(fx, y),
       to: Offset(tx, y),
@@ -801,37 +977,76 @@ class SequenceLayout implements DiagramLayout {
       labelStyle: ctx.labelStyle,
       stroke: stroke,
     ));
+    if (bidirectional) {
+      // Tail-only stub so the renderer draws an arrowhead at the FROM side
+      // without duplicating the body stroke.
+      final dx = (tx - fx).abs();
+      final delta = dx > 0.01 ? (tx > fx ? 0.5 : -0.5) : 0.0;
+      ctx.shapes.add(SceneLine(
+        from: Offset(fx + delta, y),
+        to: Offset(fx, y),
+        dashed: false,
+        head: ArrowHead.filled,
+        headAtFrom: false,
+        stroke: stroke,
+      ));
+    }
   }
 
   void _emitSelfMessage(Message m, double cx, double y, _Ctx ctx) {
     final dashed = m.lineStyle == LineStyle.dashed;
-    final loopRight = cx + _selfMessageWidth;
-    final loopBottomY = y + _selfMessageHeight;
+    final label = m.label;
+    final labelSize = label == null || label.isEmpty
+        ? Size.zero
+        : _measureMultilineText(label, ctx.measurer, ctx.labelStyle);
+    final loopTop = y + labelSize.height;
+    final mirrored = m.direction == MessageDirection.backward;
+    final loopFar = mirrored ? cx - _selfMessageWidth : cx + _selfMessageWidth;
+    final loopBottomY = loopTop + _selfMessageHeight;
     final stroke = m.color ?? ctx.defaultArrowColor;
 
+    if (label != null && label.isNotEmpty) {
+      final lx = mirrored
+          ? loopFar - 6 - labelSize.width
+          : loopFar + 6;
+      ctx.shapes.add(SceneText(
+        offset: Offset(lx, y),
+        text: label,
+        textStyle: ctx.labelStyle,
+      ));
+    }
     ctx.shapes.add(SceneLine(
-      from: Offset(cx, y),
-      to: Offset(loopRight, y),
+      from: Offset(cx, loopTop),
+      to: Offset(loopFar, loopTop),
       dashed: dashed,
       head: null,
-      label: m.label,
-      labelStyle: ctx.labelStyle,
       stroke: stroke,
     ));
     ctx.shapes.add(SceneLine(
-      from: Offset(loopRight, y),
-      to: Offset(loopRight, loopBottomY),
+      from: Offset(loopFar, loopTop),
+      to: Offset(loopFar, loopBottomY),
       dashed: dashed,
       head: null,
       stroke: stroke,
     ));
     ctx.shapes.add(SceneLine(
-      from: Offset(loopRight, loopBottomY),
+      from: Offset(loopFar, loopBottomY),
       to: Offset(cx, loopBottomY),
       dashed: dashed,
       head: m.head,
       stroke: stroke,
     ));
+  }
+
+  Size _measureMultilineText(String text, TextMeasurer measurer, TextStyle s) {
+    var width = 0.0;
+    var height = 0.0;
+    for (final line in text.split('\n')) {
+      final size = measurer.measure(line.isEmpty ? ' ' : line, s);
+      if (size.width > width) width = size.width;
+      height += size.height;
+    }
+    return Size(width, height);
   }
 
   void _emitActivationBar(List<SceneShape> shapes, double cx, double startY,

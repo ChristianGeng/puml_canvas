@@ -21,6 +21,8 @@ const _groupKinds = <String, GroupKind>{
   'opt': GroupKind.opt,
   'loop': GroupKind.loop,
   'par': GroupKind.par,
+  'group': GroupKind.group,
+  'partition': GroupKind.group,
 };
 
 const _participantKinds = <String, ParticipantKind>{
@@ -39,12 +41,14 @@ class Parser {
   var _pos = 0;
   final _autonumber = _AutonumberState();
   var _decorations = _DiagramDecorationBuilder();
+  final _pendingMessageAliases = <String, String>{};
 
   Diagram parse(List<Token> tokens) {
     _tokens = tokens;
     _pos = 0;
     _autonumber.reset();
     _decorations = _DiagramDecorationBuilder();
+    _pendingMessageAliases.clear();
 
     _skipNewlines();
     if (_check(TokenType.startMindmap)) {
@@ -93,7 +97,12 @@ class Parser {
     if (_looksLikeTimingDiagram()) {
       return _parseTimingDiagram();
     }
-    if (_looksLikeActivityDiagram()) {
+    // Sequence indicators (`participant`/`actor`/etc. at a line start) win
+    // over activity's `partition` so a sequence diagram that uses partition
+    // as a group block doesn't get misrouted.
+    if (_hasSequenceParticipantMarker() && _looksLikeActivityDiagram()) {
+      // Fall through to sequence below.
+    } else if (_looksLikeActivityDiagram()) {
       return _parseActivityDiagram();
     }
     if (_looksLikeUseCaseDiagram()) {
@@ -133,6 +142,8 @@ class Parser {
         boxes.add(_parseBox(participants));
       } else if (_isKeyword('autonumber')) {
         _parseAutonumber();
+      } else if (_isKeyword('hide') || _isKeyword('show')) {
+        _consumeRestOfLine();
       } else {
         _parseEvent(events);
       }
@@ -144,6 +155,7 @@ class Parser {
       participants: List.unmodifiable(participants),
       events: List.unmodifiable(events),
       boxes: List.unmodifiable(boxes),
+      aliasDisplayNames: Map.unmodifiable(_pendingMessageAliases),
       decorations: _decorations.build(),
     );
   }
@@ -639,73 +651,131 @@ class Parser {
   void _parseAutonumber() {
     _advance();
 
-    if (_isKeyword('stop')) {
-      _advance();
+    // The lexer captures the remainder of the autonumber line as a single
+    // text token so multi-level versions (1.1.1), `inc <level>`, and quoted
+    // formats can be parsed without lexer interference.
+    String? raw;
+    if (_check(TokenType.text)) {
+      raw = _advance().lexeme.trim();
+    }
+
+    if (raw == null || raw.isEmpty) {
+      _autonumber.current = 1;
+      _autonumber.increment = 1;
+      _autonumber.format = '%d';
+      _autonumber.stopped = false;
+      _autonumber.levels = null;
+      return;
+    }
+
+    final lower = raw.toLowerCase();
+    if (lower == 'stop') {
       _autonumber.stopped = true;
       return;
     }
-    if (_isKeyword('resume')) {
-      _advance();
+    if (lower.startsWith('resume')) {
       _autonumber.stopped = false;
-      if (_check(TokenType.identifier)) {
-        final t = _peek();
-        final start = int.tryParse(t.lexeme);
-        if (start != null) {
-          _advance();
-          _autonumber.current = start;
+      final rest = raw.substring(6).trim();
+      if (rest.isNotEmpty) {
+        // `resume [increment] ["format"]` — keeps the counter; replaces
+        // increment and/or format when present.
+        final quoteIdx = rest.indexOf('"');
+        final argsRaw =
+            quoteIdx >= 0 ? rest.substring(0, quoteIdx).trim() : rest;
+        if (quoteIdx >= 0) {
+          final endQuote = rest.lastIndexOf('"');
+          if (endQuote > quoteIdx) {
+            _autonumber.format = rest.substring(quoteIdx + 1, endQuote);
+          }
+        }
+        if (argsRaw.isNotEmpty) {
+          final n = int.tryParse(argsRaw.split(RegExp(r'\s+')).first);
+          if (n != null) _autonumber.increment = n;
         }
       }
       return;
     }
-
-    var start = 1;
-    var increment = 1;
-    var format = '%d';
-    var hasNumber = false;
-
-    if (_check(TokenType.identifier)) {
-      final t = _peek();
-      final n = int.tryParse(t.lexeme);
-      if (n != null) {
-        _advance();
-        start = n;
-        hasNumber = true;
-        if (_check(TokenType.identifier)) {
-          final t2 = _peek();
-          final m = int.tryParse(t2.lexeme);
-          if (m != null) {
-            _advance();
-            increment = m;
-          }
+    if (lower.startsWith('inc ')) {
+      final levelName = raw.substring(4).trim();
+      final levels = _autonumber.levels ?? [_autonumber.current];
+      final idx = levelName.isEmpty
+          ? 0
+          : levelName.codeUnitAt(0) - 'A'.codeUnitAt(0);
+      if (idx >= 0 && idx < 26) {
+        while (levels.length <= idx) {
+          levels.add(0);
         }
+        levels[idx]++;
+        for (var k = idx + 1; k < levels.length; k++) {
+          levels[k] = 1;
+        }
+        _autonumber.levels = levels;
+        _autonumber.current = levels.first;
+      }
+      return;
+    }
+
+    // Extract optional trailing quoted format.
+    String? format;
+    final quoteIdx = raw.indexOf('"');
+    final args = quoteIdx >= 0 ? raw.substring(0, quoteIdx).trim() : raw;
+    if (quoteIdx >= 0) {
+      final endQuote = raw.lastIndexOf('"');
+      if (endQuote > quoteIdx) {
+        format = raw.substring(quoteIdx + 1, endQuote);
       }
     }
 
-    if (_check(TokenType.stringLiteral)) {
-      format = _advance().lexeme;
+    final parts = args.isEmpty ? <String>[] : args.split(RegExp(r'\s+'));
+    if (parts.isNotEmpty) {
+      final first = parts[0];
+      if (first.contains('.')) {
+        final levels = first
+            .split('.')
+            .map((s) => int.tryParse(s) ?? 1)
+            .toList();
+        _autonumber.levels = levels;
+        _autonumber.current = levels.first;
+      } else {
+        final n = int.tryParse(first);
+        if (n != null) {
+          _autonumber.current = n;
+          _autonumber.levels = null;
+        }
+      }
+      if (parts.length >= 2) {
+        final inc = int.tryParse(parts[1]);
+        if (inc != null) _autonumber.increment = inc;
+      }
+    } else {
+      _autonumber.current = 1;
     }
-
-    _autonumber.current = hasNumber ? start : 1;
-    _autonumber.increment = increment;
-    _autonumber.format = format;
+    if (format != null) _autonumber.format = format;
     _autonumber.stopped = false;
   }
 
   String _formatAutonumber(int n, String format) {
-    final marker = RegExp(r'%(0([1-9]))?d');
-    final match = marker.firstMatch(format);
-    if (match == null) {
-      return '$format $n';
+    final cstyle = RegExp(r'%(0([1-9]))?d');
+    final m2 = cstyle.firstMatch(format);
+    if (m2 != null) {
+      final widthGroup = m2.group(2);
+      final text = widthGroup != null
+          ? n.toString().padLeft(int.parse(widthGroup), '0')
+          : n.toString();
+      return format.replaceRange(m2.start, m2.end, text);
     }
-    final widthGroup = match.group(2);
-    final String numberText;
-    if (widthGroup != null) {
-      final width = int.parse(widthGroup);
-      numberText = n.toString().padLeft(width, '0');
-    } else {
-      numberText = n.toString();
+    // PlantUML placeholders: a run of `0`s = zero-padded to that width; a run
+    // of `#`s = unpadded number.
+    final puml = RegExp(r'0+|#+');
+    final match = puml.firstMatch(format);
+    if (match != null) {
+      final token = match.group(0)!;
+      final text = token.startsWith('0')
+          ? n.toString().padLeft(token.length, '0')
+          : n.toString();
+      return format.replaceRange(match.start, match.end, text);
     }
-    return format.replaceRange(match.start, match.end, numberText);
+    return '$format $n';
   }
 
   void _parseDestroy(List<SequenceEvent> events) {
@@ -745,20 +815,135 @@ class Parser {
           'Expected participant name, got ${t.type}', t.line, t.column);
     }
 
-    return Participant(alias: alias, displayName: displayName, kind: kind);
+    int? order;
+    Color? color;
+    List<ParticipantLabelSection>? labelSections;
+    // Consume optional trailing modifiers in any order: #color, order N,
+    // and multi-line `[ ... ]` rich label (kept as display name when given).
+    while (true) {
+      if (_check(TokenType.hashColor)) {
+        final t = _advance();
+        // Strip leading '#' before parsing.
+        final raw =
+            t.lexeme.startsWith('#') ? t.lexeme.substring(1) : t.lexeme;
+        color ??= text_colors.tryParseColor(raw);
+        continue;
+      }
+      if (_isKeyword('order')) {
+        _advance();
+        if (_check(TokenType.text) || _check(TokenType.identifier)) {
+          order = int.tryParse(_advance().lexeme);
+        }
+        continue;
+      }
+      if (_check(TokenType.leftBracket)) {
+        _advance();
+        final rawLines = <String>[];
+        var current = StringBuffer();
+        void flush() {
+          rawLines.add(current.toString().trim());
+          current = StringBuffer();
+        }
+        while (!_check(TokenType.rightBracket) &&
+            !_check(TokenType.eof) &&
+            !_check(TokenType.endUml)) {
+          if (_check(TokenType.newline)) {
+            _advance();
+            flush();
+            continue;
+          }
+          final t = _advance();
+          if (current.isNotEmpty) current.write(' ');
+          // Re-quote string literals so `""` markers in rich labels survive.
+          if (t.type == TokenType.stringLiteral) {
+            current.write('"${t.lexeme}"');
+          } else {
+            current.write(t.lexeme);
+          }
+        }
+        if (current.isNotEmpty) flush();
+        if (_check(TokenType.rightBracket)) _advance();
+
+        final sections = <ParticipantLabelSection>[];
+        var currentLines = <ParticipantLabelLine>[];
+        // `----` lexes into multiple `--` tokens joined by spaces; collapse
+        // whitespace before matching so any run of >=3 dashes counts.
+        final dashRe = RegExp(r'^-{3,}$');
+        final codeRe = RegExp(r'^""\s*(.*?)\s*""$');
+        var hasRichMarker = false;
+        for (final raw in rawLines) {
+          if (raw.isEmpty) continue;
+          final collapsed = raw.replaceAll(' ', '');
+          if (dashRe.hasMatch(collapsed)) {
+            hasRichMarker = true;
+            if (currentLines.isNotEmpty) {
+              sections.add(ParticipantLabelSection(currentLines));
+              currentLines = <ParticipantLabelLine>[];
+            }
+            continue;
+          }
+          if (raw.startsWith('=')) {
+            hasRichMarker = true;
+            currentLines.add(ParticipantLabelLine(
+                raw.substring(1).trim(), ParticipantLabelStyle.title));
+            continue;
+          }
+          final codeMatch = codeRe.firstMatch(raw);
+          if (codeMatch != null) {
+            hasRichMarker = true;
+            currentLines.add(ParticipantLabelLine(
+                codeMatch.group(1) ?? '', ParticipantLabelStyle.code));
+            continue;
+          }
+          currentLines
+              .add(ParticipantLabelLine(raw, ParticipantLabelStyle.normal));
+        }
+        if (currentLines.isNotEmpty) {
+          sections.add(ParticipantLabelSection(currentLines));
+        }
+        if (hasRichMarker && sections.isNotEmpty) {
+          labelSections = sections;
+          displayName ??= sections
+              .expand((s) => s.lines)
+              .map((l) => l.text)
+              .where((t) => t.isNotEmpty)
+              .join('\n');
+        } else {
+          displayName ??= rawLines.where((l) => l.isNotEmpty).join('\n');
+        }
+        continue;
+      }
+      break;
+    }
+    return Participant(
+        alias: alias,
+        displayName: displayName,
+        kind: kind,
+        order: order,
+        labelSections: labelSections,
+        color: color);
   }
 
   Note _parseNote() {
     _advance();
 
     final NotePosition position;
+    var requireTarget = true;
     if (_isKeyword('left')) {
       _advance();
-      _expectKeyword('of');
+      if (_isKeyword('of')) {
+        _advance();
+      } else {
+        requireTarget = false;
+      }
       position = NotePosition.leftOf;
     } else if (_isKeyword('right')) {
       _advance();
-      _expectKeyword('of');
+      if (_isKeyword('of')) {
+        _advance();
+      } else {
+        requireTarget = false;
+      }
       position = NotePosition.rightOf;
     } else if (_isKeyword('over')) {
       _advance();
@@ -771,12 +956,19 @@ class Parser {
           t.column);
     }
 
-    final participants = <String>[_expect(TokenType.identifier).lexeme];
-    if (position == NotePosition.over) {
-      while (_check(TokenType.comma)) {
-        _advance();
-        participants.add(_expect(TokenType.identifier).lexeme);
+    final participants = <String>[];
+    if (requireTarget) {
+      participants.add(_expect(TokenType.identifier).lexeme);
+      if (position == NotePosition.over) {
+        while (_check(TokenType.comma)) {
+          _advance();
+          participants.add(_expect(TokenType.identifier).lexeme);
+        }
       }
+    }
+    // Optional `#color` background spec; consumed but not yet surfaced.
+    if (_check(TokenType.hashColor)) {
+      _advance();
     }
 
     final String text;
@@ -911,7 +1103,7 @@ class Parser {
   }
 
   void _parseMessage(List<SequenceEvent> out) {
-    if (!_check(TokenType.identifier)) {
+    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
       final t = _peek();
       throw ParserException(
           'Expected participant, got ${t.type}', t.line, t.column);
@@ -926,12 +1118,25 @@ class Parser {
     final arrowToken = _advance();
     final decoded = _decodeArrow(arrowToken);
 
-    if (!_check(TokenType.identifier)) {
+    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
       final t = _peek();
       throw ParserException(
           'Expected participant, got ${t.type}', t.line, t.column);
     }
-    final to = _advance().lexeme;
+    var to = _advance().lexeme;
+    // `"display" as Alias` rebinds the target's alias; remember the display
+    // name so the auto-declared participant still shows it.
+    String? toDisplay;
+    if (_isKeyword('as')) {
+      _advance();
+      if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+        toDisplay = to;
+        to = _advance().lexeme;
+        if (!_pendingMessageAliases.containsKey(to)) {
+          _pendingMessageAliases[to] = toDisplay;
+        }
+      }
+    }
 
     ActivationSuffix? activation;
     if (_check(TokenType.plusPlus)) {
@@ -969,14 +1174,20 @@ class Parser {
 
     String? finalLabel = label;
     if (!_autonumber.stopped) {
-      final formatted =
-          _formatAutonumber(_autonumber.current, _autonumber.format);
+      final levels = _autonumber.levels;
+      final formatted = levels != null
+          ? levels.join('.')
+          : _formatAutonumber(_autonumber.current, _autonumber.format);
       if (label == null || label.isEmpty) {
         finalLabel = formatted;
       } else {
         finalLabel = '$formatted $label';
       }
-      _autonumber.current += _autonumber.increment;
+      if (levels != null) {
+        levels[levels.length - 1] += _autonumber.increment;
+      } else {
+        _autonumber.current += _autonumber.increment;
+      }
     }
 
     final message = Message(
@@ -1037,47 +1248,112 @@ class Parser {
   }
 
   _DecodedArrow _decodeBareArrow(String lexeme, Token token) {
-    switch (lexeme) {
-      case '->':
-        return const _DecodedArrow(
-            LineStyle.solid, ArrowHead.filled, MessageDirection.forward);
-      case '-->':
-        return const _DecodedArrow(
-            LineStyle.dashed, ArrowHead.filled, MessageDirection.forward);
-      case '->>':
-        return const _DecodedArrow(
-            LineStyle.solid, ArrowHead.open, MessageDirection.forward);
-      case '-->>':
-        return const _DecodedArrow(
-            LineStyle.dashed, ArrowHead.open, MessageDirection.forward);
-      case '->o':
-        return const _DecodedArrow(
-            LineStyle.solid, ArrowHead.openCircle, MessageDirection.forward);
-      case '-->o':
-        return const _DecodedArrow(
-            LineStyle.dashed, ArrowHead.openCircle, MessageDirection.forward);
-      case '->x':
-        return const _DecodedArrow(
-            LineStyle.solid, ArrowHead.cross, MessageDirection.forward);
-      case '-->x':
-        return const _DecodedArrow(
-            LineStyle.dashed, ArrowHead.cross, MessageDirection.forward);
-      case '<-':
-        return const _DecodedArrow(
-            LineStyle.solid, ArrowHead.filled, MessageDirection.backward);
-      case '<--':
-        return const _DecodedArrow(
-            LineStyle.dashed, ArrowHead.filled, MessageDirection.backward);
-      case '<<-':
-        return const _DecodedArrow(
-            LineStyle.solid, ArrowHead.open, MessageDirection.backward);
-      case '<<--':
-        return const _DecodedArrow(
-            LineStyle.dashed, ArrowHead.open, MessageDirection.backward);
-      default:
-        throw ParserException(
-            "Unknown arrow form '${token.lexeme}'", token.line, token.column);
+    bool isBody(String ch) =>
+        ch == '-' || ch == '.' || ch == '\\' || ch == '/';
+
+    var left = 0;
+    var right = lexeme.length;
+    final leftGlyphs = <String>[];
+    while (left < right && !isBody(lexeme[left])) {
+      leftGlyphs.add(lexeme[left]);
+      left++;
     }
+    final rightGlyphs = <String>[];
+    while (right > left && !isBody(lexeme[right - 1])) {
+      rightGlyphs.insert(0, lexeme[right - 1]);
+      right--;
+    }
+    final body = lexeme.substring(left, right);
+    if (body.isEmpty && leftGlyphs.isEmpty && rightGlyphs.isEmpty) {
+      throw ParserException(
+          "Unknown arrow form '${token.lexeme}'", token.line, token.column);
+    }
+    final dashed = body.contains('..') || body.contains('--');
+
+    ArrowHead? leftHead;
+    var leftIsHead = false;
+    if (leftGlyphs.isNotEmpty) {
+      final g = leftGlyphs.first;
+      if (g == '<') {
+        leftIsHead = true;
+        // `<<-` → open (thin/async); `<-` → filled.
+        leftHead = leftGlyphs.length >= 2 && leftGlyphs[1] == '<'
+            ? ArrowHead.open
+            : ArrowHead.filled;
+      } else if (g == 'o') {
+        leftIsHead = true;
+        leftHead = ArrowHead.openCircle;
+      } else if (g == 'x') {
+        leftIsHead = true;
+        leftHead = ArrowHead.cross;
+      }
+    }
+
+    ArrowHead? rightHead;
+    var rightIsHead = false;
+    if (rightGlyphs.isNotEmpty) {
+      final g = rightGlyphs.last;
+      if (g == '>') {
+        rightIsHead = true;
+        rightHead = ArrowHead.filled;
+      } else if (g == 'o' || g == 'x' || g == '*') {
+        rightIsHead = true;
+        if (g == 'o') {
+          rightHead = ArrowHead.openCircle;
+        } else if (g == 'x') {
+          rightHead = ArrowHead.cross;
+        } else {
+          rightHead = ArrowHead.filled;
+        }
+      }
+      // `>>` or `>o`/`>x` after `>` → open thin head with optional terminator.
+      if (rightGlyphs.length >= 2 && rightGlyphs[0] == '>' &&
+          (rightGlyphs[1] == '>' || rightGlyphs[1] == 'o' ||
+              rightGlyphs[1] == 'x')) {
+        if (rightGlyphs[1] == '>') {
+          rightHead = ArrowHead.open;
+        } else if (rightGlyphs[1] == 'o') {
+          rightHead = ArrowHead.openCircle;
+        } else {
+          rightHead = ArrowHead.cross;
+        }
+      }
+    }
+
+    // Half-arrow markers (`\`, `/`) at body edges act as a (forward/backward)
+    // open arrowhead when no explicit head glyph is present.
+    final bodyStartsHalf = body.isNotEmpty &&
+        (body[0] == '\\' || body[0] == '/');
+    final bodyEndsHalf = body.isNotEmpty &&
+        (body[body.length - 1] == '\\' || body[body.length - 1] == '/');
+    if (!rightIsHead && bodyEndsHalf) {
+      rightIsHead = true;
+      rightHead = ArrowHead.open;
+    }
+    if (!leftIsHead && bodyStartsHalf && !rightIsHead) {
+      // Only treat left half-marker as backward head when no right head exists,
+      // otherwise it stays decorative on a forward arrow.
+      leftIsHead = true;
+      leftHead = ArrowHead.open;
+    }
+
+    final lineStyle = dashed ? LineStyle.dashed : LineStyle.solid;
+    if (leftIsHead && rightIsHead) {
+      // Prefer the right head as the carried head; renderer will mirror it.
+      return _DecodedArrow(
+          lineStyle, rightHead!, MessageDirection.bidirectional);
+    }
+    if (leftIsHead) {
+      return _DecodedArrow(
+          lineStyle, leftHead!, MessageDirection.backward);
+    }
+    if (rightIsHead) {
+      return _DecodedArrow(
+          lineStyle, rightHead!, MessageDirection.forward);
+    }
+    // No head glyphs at all — fallback forward filled.
+    return _DecodedArrow(
+        lineStyle, ArrowHead.filled, MessageDirection.forward);
   }
 
   Color _parseColor(String spec, Token token) {
@@ -1118,6 +1394,25 @@ class Parser {
     while (_check(TokenType.newline)) {
       _advance();
     }
+  }
+
+  bool _hasSequenceParticipantMarker() {
+    var atLineStart = true;
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.newline) {
+        atLineStart = true;
+        continue;
+      }
+      if (atLineStart &&
+          t.type == TokenType.identifier &&
+          _participantKinds.containsKey(t.lexeme)) {
+        return true;
+      }
+      atLineStart = false;
+    }
+    return false;
   }
 
   bool _looksLikeActivityDiagram() {
@@ -1816,9 +2111,26 @@ class Parser {
     // sequence arrow ends like '->o'). Sequence arrows allow trailing 'o'
     // and 'x' but never lead with them.
     if (lexeme.contains('|')) return true;
-    if (lexeme.startsWith('*') || lexeme.startsWith('o')) return true;
+    if (lexeme.startsWith('*')) return true;
     if (lexeme.endsWith('*')) return true;
     if (lexeme.contains('..')) return true;
+    // Sequence diagrams now allow `o`/`x` prefixes when paired with a head
+    // marker (`<`) or half-arrow marker (`\`, `/`). Otherwise it's class.
+    if (lexeme.startsWith('o') || lexeme.startsWith('x')) {
+      final tail = lexeme.substring(1);
+      final sequenceLike = tail.contains('<') ||
+          tail.contains('\\') ||
+          tail.contains('/');
+      if (!sequenceLike) return true;
+      return false;
+    }
+    // Extended class arrow head prefixes only valid in class diagrams.
+    if (lexeme.startsWith('#') ||
+        lexeme.startsWith('}') ||
+        lexeme.startsWith('+') ||
+        lexeme.startsWith('^')) {
+      return true;
+    }
     return false;
   }
 
@@ -1863,6 +2175,17 @@ class Parser {
       _skipNewlines();
     }
     _expect(TokenType.endUml);
+    // Auto-declare any class referenced by a relationship that wasn't given an
+    // explicit declaration; PlantUML implicitly creates such classes.
+    final declared = {for (final c in classes) c.name};
+    final noteAliases = {for (final n in freeNotes) n.alias};
+    for (final r in relationships) {
+      for (final ref in [r.from, r.to]) {
+        if (declared.contains(ref) || noteAliases.contains(ref)) continue;
+        classes.add(ClassDecl(name: ref));
+        declared.add(ref);
+      }
+    }
     return ClassDiagram(
       classes: List.unmodifiable(classes),
       relationships: List.unmodifiable(relationships),
@@ -2025,6 +2348,14 @@ class Parser {
   }
 
   bool _isClassHeaderKeyword() {
+    if (_check(TokenType.leftParen) &&
+        _pos + 1 < _tokens.length &&
+        _tokens[_pos + 1].type == TokenType.rightParen) {
+      return true;
+    }
+    if (_check(TokenType.generics) && _peek().lexeme.isEmpty) {
+      return true;
+    }
     if (!_check(TokenType.identifier)) return false;
     const headers = {
       'class',
@@ -2037,12 +2368,29 @@ class Parser {
       'map',
       'entity',
       'record',
+      'circle',
+      'diamond',
+      'dataclass',
+      'metaclass',
+      'protocol',
+      'stereotype',
+      'struct',
     };
     return headers.contains(_peek().lexeme);
   }
 
   ClassDecl _parseClassDecl() {
     var kind = ClassKind.class_;
+    if (_check(TokenType.leftParen) &&
+        _pos + 1 < _tokens.length &&
+        _tokens[_pos + 1].type == TokenType.rightParen) {
+      _advance();
+      _advance();
+      kind = ClassKind.circle;
+    } else if (_check(TokenType.generics) && _peek().lexeme == '<>') {
+      _advance();
+      kind = ClassKind.diamond;
+    } else {
     final firstWord = _advance().lexeme;
     if (firstWord == 'abstract') {
       kind = ClassKind.abstractClass;
@@ -2069,7 +2417,22 @@ class Parser {
           kind = ClassKind.entity_;
         case 'record':
           kind = ClassKind.record_;
+        case 'circle':
+          kind = ClassKind.circle;
+        case 'diamond':
+          kind = ClassKind.diamond;
+        case 'dataclass':
+          kind = ClassKind.dataclass;
+        case 'metaclass':
+          kind = ClassKind.metaclass;
+        case 'protocol':
+          kind = ClassKind.protocol;
+        case 'stereotype':
+          kind = ClassKind.stereotype_;
+        case 'struct':
+          kind = ClassKind.struct;
       }
+    }
     }
     if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
       final t = _peek();
@@ -2365,6 +2728,36 @@ class Parser {
     final lexeme = token.lexeme;
     final crow = _decodeCrowFootArrow(lexeme);
     if (crow != null) return crow;
+    if (lexeme.startsWith('#')) {
+      return _DecodedRelArrow(RelationshipKind.squareLink, reverse: false);
+    }
+    if (lexeme.endsWith('#')) {
+      return _DecodedRelArrow(RelationshipKind.squareLink, reverse: true);
+    }
+    if (lexeme.startsWith('x')) {
+      return _DecodedRelArrow(RelationshipKind.crossLink, reverse: false);
+    }
+    if (lexeme.endsWith('x')) {
+      return _DecodedRelArrow(RelationshipKind.crossLink, reverse: true);
+    }
+    if (lexeme.startsWith('}')) {
+      return _DecodedRelArrow(RelationshipKind.bracketLink, reverse: false);
+    }
+    if (lexeme.endsWith('{')) {
+      return _DecodedRelArrow(RelationshipKind.bracketLink, reverse: true);
+    }
+    if (lexeme.startsWith('+')) {
+      return _DecodedRelArrow(RelationshipKind.plusLink, reverse: false);
+    }
+    if (lexeme.endsWith('+')) {
+      return _DecodedRelArrow(RelationshipKind.plusLink, reverse: true);
+    }
+    if (lexeme.startsWith('^')) {
+      return _DecodedRelArrow(RelationshipKind.caretLink, reverse: false);
+    }
+    if (lexeme.endsWith('v')) {
+      return _DecodedRelArrow(RelationshipKind.caretLink, reverse: true);
+    }
     final hasLeftTriangle = lexeme.startsWith('<|');
     final hasRightTriangle = lexeme.endsWith('|>');
     final startsDiamondFilled = lexeme.startsWith('*');
@@ -4598,12 +4991,14 @@ class _AutonumberState {
   int increment = 1;
   String format = '%d';
   bool stopped = true;
+  List<int>? levels;
 
   void reset() {
     current = 1;
     increment = 1;
     format = '%d';
     stopped = true;
+    levels = null;
   }
 }
 

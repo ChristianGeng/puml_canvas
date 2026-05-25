@@ -28,6 +28,10 @@ class SequenceDiagram extends Diagram {
   final List<Participant> participants;
   final List<SequenceEvent> events;
   final List<ParticipantBox> boxes;
+  // Display names for aliases introduced inline via `"X" as Alias` in a
+  // message; the alias is auto-discovered by event traversal so it must NOT
+  // be added to `participants` (which would override its layout order).
+  final Map<String, String> aliasDisplayNames;
   @override
   final DiagramDecorations decorations;
 
@@ -35,6 +39,7 @@ class SequenceDiagram extends Diagram {
     this.participants = const [],
     this.events = const [],
     this.boxes = const [],
+    this.aliasDisplayNames = const {},
     this.decorations = const DiagramDecorations(),
   });
 
@@ -66,7 +71,11 @@ class SequenceDiagram extends Diagram {
 
     void touch(String alias) {
       if (seen.add(alias)) {
-        order.add(byAlias[alias] ?? Participant(alias: alias));
+        order.add(byAlias[alias] ??
+            Participant(
+              alias: alias,
+              displayName: aliasDisplayNames[alias],
+            ));
       }
     }
 
@@ -105,6 +114,23 @@ class SequenceDiagram extends Diagram {
     }
 
     visit(events);
+    // Stable sort by explicit `order N` directive when any participant
+    // declared one; undeclared participants keep their relative position.
+    final anyOrdered = order.any((p) => p.order != null);
+    if (anyOrdered) {
+      final indexed = [
+        for (var i = 0; i < order.length; i++) (i, order[i]),
+      ];
+      indexed.sort((a, b) {
+        final ao = a.$2.order;
+        final bo = b.$2.order;
+        if (ao != null && bo != null) return ao.compareTo(bo);
+        if (ao != null) return -1;
+        if (bo != null) return 1;
+        return a.$1.compareTo(b.$1);
+      });
+      return [for (final e in indexed) e.$2];
+    }
     return order;
   }
 
@@ -193,15 +219,34 @@ enum ParticipantKind {
   queue,
 }
 
+enum ParticipantLabelStyle { normal, title, code }
+
+class ParticipantLabelLine {
+  final String text;
+  final ParticipantLabelStyle style;
+  const ParticipantLabelLine(this.text, this.style);
+}
+
+class ParticipantLabelSection {
+  final List<ParticipantLabelLine> lines;
+  const ParticipantLabelSection(this.lines);
+}
+
 class Participant {
   final String alias;
   final String? displayName;
   final ParticipantKind kind;
+  final int? order;
+  final List<ParticipantLabelSection>? labelSections;
+  final Color? color;
 
   const Participant({
     required this.alias,
     this.displayName,
     this.kind = ParticipantKind.participant,
+    this.order,
+    this.labelSections,
+    this.color,
   });
 
   String get label => displayName ?? alias;
@@ -221,9 +266,13 @@ enum ArrowHead {
   triangle,
   filledDiamond,
   hollowDiamond,
+  square,
+  bracket,
+  plus,
+  caret,
 }
 
-enum MessageDirection { forward, backward }
+enum MessageDirection { forward, backward, bidirectional }
 
 enum ActivationSuffix {
   activateTarget,
@@ -319,7 +368,7 @@ class NewPage extends SequenceEvent {
   const NewPage([this.title]);
 }
 
-enum GroupKind { alt, opt, loop, par }
+enum GroupKind { alt, opt, loop, par, group }
 
 class GroupBranch {
   final String? label;
@@ -371,6 +420,13 @@ enum ClassKind {
   map_,
   entity_,
   record_,
+  circle,
+  diamond,
+  dataclass,
+  metaclass,
+  protocol,
+  stereotype_,
+  struct,
 }
 
 enum CrowFoot { one, zeroOrOne, zeroOrMany, oneOrMany }
@@ -468,6 +524,11 @@ enum RelationshipKind {
   directedAssociation,
   dependency,
   link,
+  squareLink,
+  crossLink,
+  bracketLink,
+  plusLink,
+  caretLink,
 }
 
 class Relationship {

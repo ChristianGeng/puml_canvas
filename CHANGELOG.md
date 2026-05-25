@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+
+- Class diagrams now use the shared `graph_layout` layered layout and
+  orthogonal edge router. Directed relationships assign classes to
+  layers, sibling ordering uses barycenter-style crossing reduction,
+  offset edges route through dogleg segments, same-row edges can detour
+  around intervening boxes, and parallel / reverse relationships are
+  separated into lanes.
+- Sequence diagrams now support `group` / `partition` blocks, richer
+  participant declarations (`#color`, `order N`, and PlantUML-style
+  multi-line `[ ... ]` labels with title / separator / code sections),
+  quoted inline participants with `"Display" as Alias`, and `note left`
+  / `note right` forms without an explicit `of X` target.
+- Sequence `autonumber` handling now covers rest-of-line formats,
+  PlantUML `0` / `#` placeholders, `stop` / `resume` semantics,
+  multi-level counters such as `1.1.1`, and `inc <level>` updates.
+- Sequence arrow parsing and rendering now covers additional PlantUML
+  variants, including half arrows, circle / cross heads, bidirectional
+  forms, and colored arrows.
+- Class diagrams now accept implicit class declarations from
+  relationships, additional declaration kinds (`circle`, `diamond`,
+  `dataclass`, `metaclass`, `protocol`, `stereotype`, `struct`), the
+  `()` / `<>` shorthand forms, and extended relationship head markers
+  (`#`, `x`, `}`, `+`, `^` / `v`).
+- The example app now includes a sample picker for multiple diagram
+  types, an "Open PUML" file action, and a zoomable / pannable preview.
+- Golden coverage was expanded for the new sequence, class, activity,
+  state, and topology rendering cases.
+
+### Changed
+
+- The release workflow now runs `flutter test --exclude-tags golden`
+  because golden output is platform-font dependent.
+- Golden test helpers now set the requested surface size explicitly so
+  large diagram goldens render at their intended dimensions.
+
+### Fixed
+
+- Sequence diagrams that use `partition` groups no longer get
+  misrouted to the activity parser when sequence participant markers are
+  present.
+- Sequence group frames now span the actual rendered leftmost and
+  rightmost lifelines even when participant ordering is changed.
+- Self messages now reserve space for multi-line labels and can render
+  backward self-message loops on the left side of the lifeline.
+- Notes without an explicit target now anchor to the nearest suitable
+  participant instead of requiring `note left/right of X`.
+
 ## 0.8.0
 
 ### Added

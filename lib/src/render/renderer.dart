@@ -669,7 +669,110 @@ class Renderer {
         _drawDiamondHead(canvas, from, to, paint, filled: true);
       case ArrowHead.hollowDiamond:
         _drawDiamondHead(canvas, from, to, paint, filled: false);
+      case ArrowHead.square:
+        _drawSquareHead(canvas, from, to, paint);
+      case ArrowHead.bracket:
+        _drawBracketHead(canvas, from, to, paint);
+      case ArrowHead.plus:
+        _drawPlusHead(canvas, from, to, paint);
+      case ArrowHead.caret:
+        _drawCaretHead(canvas, from, to, paint);
     }
+  }
+
+  void _drawSquareHead(Canvas canvas, Offset from, Offset to, Paint paint) {
+    const half = _arrowSquareSide / 2;
+    final angle = math.atan2(to.dy - from.dy, to.dx - from.dx);
+    final cx = to.dx - half * math.cos(angle);
+    final cy = to.dy - half * math.sin(angle);
+    final perp = angle + math.pi / 2;
+    final ax = half * math.cos(angle);
+    final ay = half * math.sin(angle);
+    final px = half * math.cos(perp);
+    final py = half * math.sin(perp);
+    final p1 = Offset(cx - ax - px, cy - ay - py);
+    final p2 = Offset(cx + ax - px, cy + ay - py);
+    final p3 = Offset(cx + ax + px, cy + ay + py);
+    final p4 = Offset(cx - ax + px, cy - ay + py);
+    final path = Path()
+      ..moveTo(p1.dx, p1.dy)
+      ..lineTo(p2.dx, p2.dy)
+      ..lineTo(p3.dx, p3.dy)
+      ..lineTo(p4.dx, p4.dy)
+      ..close();
+    final stroke = Paint()
+      ..color = paint.color
+      ..strokeWidth = paint.strokeWidth
+      ..style = PaintingStyle.stroke;
+    canvas.drawPath(path, stroke);
+  }
+
+  void _drawBracketHead(Canvas canvas, Offset from, Offset to, Paint paint) {
+    // Bracket opens AWAY from the arrow direction: spine perpendicular to the
+    // line at the tip, two short prongs extending back toward the tail.
+    const halfTall = _arrowBracketTall / 2;
+    const deep = _arrowBracketDeep;
+    final angle = math.atan2(to.dy - from.dy, to.dx - from.dx);
+    final perp = angle + math.pi / 2;
+    final spineTop = Offset(
+      to.dx + halfTall * math.cos(perp),
+      to.dy + halfTall * math.sin(perp),
+    );
+    final spineBot = Offset(
+      to.dx - halfTall * math.cos(perp),
+      to.dy - halfTall * math.sin(perp),
+    );
+    final prongTop = Offset(
+      spineTop.dx - deep * math.cos(angle),
+      spineTop.dy - deep * math.sin(angle),
+    );
+    final prongBot = Offset(
+      spineBot.dx - deep * math.cos(angle),
+      spineBot.dy - deep * math.sin(angle),
+    );
+    canvas.drawLine(spineTop, spineBot, paint);
+    canvas.drawLine(spineTop, prongTop, paint);
+    canvas.drawLine(spineBot, prongBot, paint);
+  }
+
+  void _drawPlusHead(Canvas canvas, Offset from, Offset to, Paint paint) {
+    const half = _arrowPlusLength / 2;
+    final angle = math.atan2(to.dy - from.dy, to.dx - from.dx);
+    final perp = angle + math.pi / 2;
+    final cx = to.dx - half * math.cos(angle);
+    final cy = to.dy - half * math.sin(angle);
+    final ax = half * math.cos(angle);
+    final ay = half * math.sin(angle);
+    final px = half * math.cos(perp);
+    final py = half * math.sin(perp);
+    canvas.drawLine(
+      Offset(cx - ax, cy - ay),
+      Offset(cx + ax, cy + ay),
+      paint,
+    );
+    canvas.drawLine(
+      Offset(cx - px, cy - py),
+      Offset(cx + px, cy + py),
+      paint,
+    );
+  }
+
+  void _drawCaretHead(Canvas canvas, Offset from, Offset to, Paint paint) {
+    // Vertex sits at the tip; legs splay back along the arrow.
+    const leg = _arrowCaretLeg;
+    const halfAngle = _arrowCaretHalfAngle;
+    final angle = math.atan2(to.dy - from.dy, to.dx - from.dx);
+    final back = angle + math.pi;
+    final p1 = Offset(
+      to.dx + leg * math.cos(back - halfAngle),
+      to.dy + leg * math.sin(back - halfAngle),
+    );
+    final p2 = Offset(
+      to.dx + leg * math.cos(back + halfAngle),
+      to.dy + leg * math.sin(back + halfAngle),
+    );
+    canvas.drawLine(to, p1, paint);
+    canvas.drawLine(to, p2, paint);
   }
 
   void _drawHollowTriangleHead(
@@ -803,4 +906,10 @@ class Renderer {
 
   static const _arrowCircleRadius = 4.0;
   static const _arrowCrossLength = 8.0;
+  static const _arrowSquareSide = 8.0;
+  static const _arrowBracketTall = 10.0;
+  static const _arrowBracketDeep = 6.0;
+  static const _arrowPlusLength = 10.0;
+  static const _arrowCaretLeg = 8.0;
+  static const _arrowCaretHalfAngle = math.pi / 6; // 60-degree opening
 }

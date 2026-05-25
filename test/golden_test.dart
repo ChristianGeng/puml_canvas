@@ -250,6 +250,55 @@ void main() {
       );
     });
 
+    testWidgets('par/alt/loop with boxes and reordered participants',
+        (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'actor Customer as C\n'
+        'box "Edge" #LightBlue\n'
+        '  participant "Web App" as Web\n'
+        '  participant "API Gateway" as GW\n'
+        'end box\n'
+        'box "Core Services" #LightYellow\n'
+        '  control "Order" as Order\n'
+        '  database "Inv" as Inv\n'
+        '  queue "PayQ" as PayQ\n'
+        '  participant "PayW" as PayW\n'
+        'end box\n'
+        'participant "Fraud API" as Fraud\n'
+        'collections "Audit" as Audit\n'
+        'C -> Web : submitCart\n'
+        'Web -> GW : POST /checkout\n'
+        'GW -> Order : createOrder\n'
+        'GW -> Audit : event\n'
+        'Order -> Inv : reserve\n'
+        'par fraud score\n'
+        '  Order -> Fraud : score\n'
+        '  Fraud --> Order : risk=medium\n'
+        'else queue payment\n'
+        '  Order -> PayQ : publish\n'
+        '  PayQ --> PayW : deliver\n'
+        '  PayW -> PayW : check\n'
+        'end\n'
+        'Order -> PayW : await result\n'
+        'loop exponential backoff up to 3\n'
+        '  PayW -> Fraud : enrich\n'
+        '  alt provider timeout\n'
+        '    PayW -> PayW : sleep\n'
+        '  else accepted\n'
+        '    PayW --> Order : PaymentAccepted\n'
+        '  else declined\n'
+        '    PayW --> Order : PaymentDeclined\n'
+        '  end\n'
+        'end\n'
+        'Order -> Audit : event\n'
+        '@enduml\n',
+        'sequence_par_alt_loop',
+        size: const Size(1300, 1100),
+      );
+    });
+
     testWidgets('separators gallery', (tester) async {
       await expectPumlGolden(
         tester,
@@ -835,6 +884,410 @@ void main() {
         '@endnwdiag\n',
         'network_diagram',
         size: const Size(720, 480),
+      );
+    });
+
+    testWidgets('sequence partition as group', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant a\n'
+        '\n'
+        'partition p1\n'
+        'b -> c: msg\n'
+        'c --> b: OK\n'
+        'note right: Some right note\n'
+        'end\n'
+        '\n'
+        'partition p2\n'
+        'a -> b: msg\n'
+        'note left: Some left note\n'
+        'end\n'
+        '@enduml\n',
+        'sequence_partition_groups',
+        size: const Size(700, 700),
+      );
+    });
+
+    testWidgets('sequence newpage with title', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '\n'
+        'Alice -> Bob : message 1\n'
+        'Alice -> Bob : message 2\n'
+        '\n'
+        'newpage\n'
+        '\n'
+        'Alice -> Bob : message 3\n'
+        'Alice -> Bob : message 4\n'
+        '\n'
+        'newpage A title for the\\nlast page\n'
+        '\n'
+        'Alice -> Bob : message 5\n'
+        'Alice -> Bob : message 6\n'
+        '@enduml\n',
+        'sequence_newpage_titles',
+        size: const Size(600, 900),
+      );
+    });
+
+    testWidgets('sequence header footer page placeholders', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '\n'
+        'header Page Header\n'
+        'footer Page %page% of %lastpage%\n'
+        '\n'
+        'title Example Title\n'
+        '\n'
+        'Alice -> Bob : message 1\n'
+        'Alice -> Bob : message 2\n'
+        '\n'
+        '@enduml\n',
+        'sequence_header_footer',
+        size: const Size(600, 400),
+      );
+    });
+
+    testWidgets('sequence autonumber stop resume format', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'autonumber 10 10 "<b>[000]"\n'
+        'Bob -> Alice : Authentication Request\n'
+        'Bob <- Alice : Authentication Response\n'
+        '\n'
+        'autonumber stop\n'
+        'Bob -> Alice : dummy\n'
+        '\n'
+        'autonumber resume "<font color=red><b>Message 0  "\n'
+        'Bob -> Alice : Yet another authentication Request\n'
+        'Bob <- Alice : Yet another authentication Response\n'
+        '\n'
+        'autonumber stop\n'
+        'Bob -> Alice : dummy\n'
+        '\n'
+        'autonumber resume 1 "<font color=blue><b>Message 0  "\n'
+        'Bob -> Alice : Yet another authentication Request\n'
+        'Bob <- Alice : Yet another authentication Response\n'
+        '@enduml\n',
+        'sequence_autonumber_stop_resume',
+        size: const Size(900, 700),
+      );
+    });
+
+    testWidgets('sequence autonumber multi-level inc', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'autonumber 1.1.1\n'
+        'Alice -> Bob: Authentication request\n'
+        'Bob --> Alice: Response\n'
+        'autonumber inc A\n'
+        'Alice -> Bob: Another authentication request\n'
+        'Bob --> Alice: Response\n'
+        'autonumber inc B\n'
+        'Alice -> Bob: Another authentication request\n'
+        'Bob --> Alice: Response\n'
+        'autonumber inc A\n'
+        'Alice -> Bob: Another authentication request\n'
+        'autonumber inc B\n'
+        'Bob --> Alice: Response\n'
+        '@enduml\n',
+        'sequence_autonumber_multilevel',
+        size: const Size(800, 700),
+      );
+    });
+
+    testWidgets('sequence note positions with colors', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice\n'
+        'participant Bob\n'
+        'note left of Alice #aqua\n'
+        'This is displayed\n'
+        'left of Alice.\n'
+        'end note\n'
+        '\n'
+        'note right of Alice: This is displayed right of Alice.\n'
+        '\n'
+        'note over Alice: This is displayed over Alice.\n'
+        '\n'
+        'note over Alice, Bob #FFAAAA: This is displayed\\n over Bob and Alice.\n'
+        '\n'
+        'note over Bob, Alice\n'
+        'This is yet another\n'
+        'example of\n'
+        'a long note.\n'
+        'end note\n'
+        '@enduml\n',
+        'sequence_note_positions',
+        size: const Size(700, 900),
+      );
+    });
+
+    testWidgets('sequence alt else group loop nested', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Alice -> Bob: Authentication Request\n'
+        '\n'
+        'alt successful case\n'
+        '    Bob -> Alice: Authentication Accepted\n'
+        'else some kind of failure\n'
+        '    Bob -> Alice: Authentication Failure\n'
+        '    group My own label\n'
+        '    Alice -> Log : Log attack start\n'
+        '        loop 1000 times\n'
+        '            Alice -> Bob: DNS Attack\n'
+        '        end\n'
+        '    Alice -> Log : Log attack end\n'
+        '    end\n'
+        'else Another type of failure\n'
+        '   Bob -> Alice: Please repeat\n'
+        'end\n'
+        '@enduml\n',
+        'sequence_alt_group_loop',
+        size: const Size(800, 700),
+      );
+    });
+
+    testWidgets('sequence autonumber format strings', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'autonumber "<b>[000]"\n'
+        'Bob -> Alice : Authentication Request\n'
+        'Bob <- Alice : Authentication Response\n'
+        '\n'
+        'autonumber 15 "<b>(<u>##</u>)"\n'
+        'Bob -> Alice : Another authentication Request\n'
+        'Bob <- Alice : Another authentication Response\n'
+        '\n'
+        'autonumber 40 10 "<font color=red><b>Message 0  "\n'
+        'Bob -> Alice : Yet another authentication Request\n'
+        'Bob <- Alice : Yet another authentication Response\n'
+        '@enduml\n',
+        'sequence_autonumber_formats',
+        size: const Size(800, 600),
+      );
+    });
+
+    testWidgets('sequence autonumber and note no target', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'autonumber 10\n'
+        'Alice -> Bob\n'
+        'note right\n'
+        '  the %autonumber% works everywhere.\n'
+        '  Here, its value is ** %autonumber% **\n'
+        'end note\n'
+        'Bob --> Alice: //This is the response %autonumber%//\n'
+        '@enduml\n',
+        'sequence_autonumber_note',
+        size: const Size(700, 500),
+      );
+    });
+
+    testWidgets('sequence colored arrows', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Bob -[#red]> Alice : hello\n'
+        'Alice -[#0000FF]->Bob : ok\n'
+        '@enduml\n',
+        'sequence_colored_arrows',
+        size: const Size(500, 350),
+      );
+    });
+
+    testWidgets('sequence hide footbox directive', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'skinparam actorStyle awesome\n'
+        'actor Alice\n'
+        'actor Bob\n'
+        'Alice -> Bob : hello\n'
+        'hide footbox\n'
+        '@enduml\n',
+        'sequence_hide_footbox',
+        size: const Size(500, 300),
+      );
+    });
+
+    testWidgets('sequence self message backward direction', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Alice <- Alice: This is a signal to self.\\nIt also demonstrates\\nmultiline \\ntext\n'
+        '@enduml\n',
+        'sequence_self_backward',
+        size: const Size(500, 400),
+      );
+    });
+
+    testWidgets('sequence multiline self message', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Alice -> Alice: This is a signal to self.\\nIt also demonstrates\\nmultiline \\ntext\n'
+        '@enduml\n',
+        'sequence_self_multiline',
+        size: const Size(500, 400),
+      );
+    });
+
+    testWidgets('sequence quoted participants and as alias', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Alice -> "Bob()" : Hello\n'
+        '"Bob()" -> "This is very\\nlong" as Long\n'
+        'Long --> "Bob()" : ok\n'
+        '@enduml\n',
+        'sequence_quoted_participants',
+        size: const Size(700, 350),
+      );
+    });
+
+    testWidgets('sequence participant rich label', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Participant [\n'
+        '    =Title\n'
+        '    ----\n'
+        '    ""SubTitle""\n'
+        ']\n'
+        '\n'
+        'participant Bob\n'
+        '\n'
+        'Participant -> Bob\n'
+        '@enduml\n',
+        'sequence_rich_label',
+        size: const Size(600, 300),
+      );
+    });
+
+    testWidgets('sequence participant order directive', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Last order 30\n'
+        'participant Middle order 20\n'
+        'participant First order 10\n'
+        '@enduml\n',
+        'sequence_order_directive',
+        size: const Size(500, 250),
+      );
+    });
+
+    testWidgets('sequence participant colors and comments', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'actor Bob #red\n'
+        "' The only difference between actor\n"
+        "'and participant is the drawing\n"
+        'participant Alice\n'
+        'participant "I have a really\\nlong name" as L #99FF99\n'
+        "/' You can also declare:\n"
+        '   participant L as "I have a really\\nlong name"  #99FF99\n'
+        "  '/\n"
+        '\n'
+        'Alice->Bob: Authentication Request\n'
+        'Bob->Alice: Authentication Response\n'
+        'Bob->L: Log transaction\n'
+        '@enduml\n',
+        'sequence_with_colors',
+        size: const Size(800, 400),
+      );
+    });
+
+    testWidgets('sequence arrow variants', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Bob ->x Alice\n'
+        'Bob -> Alice\n'
+        'Bob ->> Alice\n'
+        'Bob -\\ Alice\n'
+        'Bob \\\\- Alice\n'
+        'Bob //-- Alice\n'
+        '\n'
+        'Bob ->o Alice\n'
+        'Bob o\\\\-- Alice\n'
+        '\n'
+        'Bob <-> Alice\n'
+        'Bob <->o Alice\n'
+        '@enduml\n',
+        'sequence_arrow_variants',
+        size: const Size(600, 700),
+      );
+    });
+
+    testWidgets('class relations extended arrow heads', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Class21 #-- Class22\n'
+        'Class23 x-- Class24\n'
+        'Class25 }-- Class26\n'
+        'Class27 +-- Class28\n'
+        'Class29 ^-- Class30\n'
+        '@enduml\n',
+        'class_relations_extended',
+        size: const Size(1100, 250),
+      );
+    });
+
+    testWidgets('class relations implicit declarations', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Class01 <|-- Class02\n'
+        'Class03 *-- Class04\n'
+        'Class05 o-- Class06\n'
+        'Class07 .. Class08\n'
+        'Class09 -- Class10\n'
+        '@enduml\n',
+        'class_relations_implicit',
+        size: const Size(1100, 250),
+      );
+    });
+
+    testWidgets('class diagram kinds gallery', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'hide empty members\n'
+        'abstract        abstract\n'
+        'abstract class  "abstract class"\n'
+        'annotation      annotation\n'
+        'circle          circle\n'
+        '()              circle_short_form\n'
+        'class           class\n'
+        'class           class_stereo  <<stereotype>>\n'
+        'dataclass       dataclass\n'
+        'diamond         diamond\n'
+        '<>              diamond_short_form\n'
+        'entity          entity\n'
+        'enum            enum\n'
+        'exception       exception\n'
+        'interface       interface\n'
+        'metaclass       metaclass\n'
+        'protocol        protocol\n'
+        'record          record\n'
+        'stereotype      stereotype\n'
+        'struct          struct\n'
+        '@enduml\n',
+        'class_diagram_kinds',
+        size: const Size(3300, 200),
       );
     });
 

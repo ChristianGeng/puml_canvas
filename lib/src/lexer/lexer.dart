@@ -204,6 +204,30 @@ class Lexer {
         continue;
       }
 
+      if (c == '/') {
+        final startCol = col;
+        final arrowLex = _scanArrow(source, i);
+        if (arrowLex != null) {
+          emit(TokenType.arrow, arrowLex, startCol);
+          i += arrowLex.length;
+          col += arrowLex.length;
+          continue;
+        }
+        throw LexerException("Unexpected '/'", line, col);
+      }
+
+      if (c == '\\') {
+        final startCol = col;
+        final arrowLex = _scanArrow(source, i);
+        if (arrowLex != null) {
+          emit(TokenType.arrow, arrowLex, startCol);
+          i += arrowLex.length;
+          col += arrowLex.length;
+          continue;
+        }
+        throw LexerException("Unexpected '\\'", line, col);
+      }
+
       if (c == "'") {
         while (i < source.length && source[i] != '\n') {
           i++;
@@ -419,6 +443,13 @@ class Lexer {
           col += crowLex.length;
           continue;
         }
+        final arrowLex = _scanArrow(source, i);
+        if (arrowLex != null) {
+          emit(TokenType.arrow, arrowLex, startCol);
+          i += arrowLex.length;
+          col += arrowLex.length;
+          continue;
+        }
         emit(TokenType.rightBrace, '}', col);
         i++;
         col++;
@@ -615,6 +646,13 @@ class Lexer {
           emit(TokenType.plusPlus, '++', startCol);
           i += 2;
           col += 2;
+          continue;
+        }
+        final arrowLex = _scanArrow(source, i);
+        if (arrowLex != null) {
+          emit(TokenType.arrow, arrowLex, startCol);
+          i += arrowLex.length;
+          col += arrowLex.length;
           continue;
         }
         throw LexerException("Unexpected '+'", line, col);
@@ -840,6 +878,13 @@ class Lexer {
 
       if (c == '#') {
         final startCol = col;
+        final arrowLex = _scanArrow(source, i);
+        if (arrowLex != null) {
+          emit(TokenType.arrow, arrowLex, startCol);
+          i += arrowLex.length;
+          col += arrowLex.length;
+          continue;
+        }
         final start = i;
         i++;
         col++;
@@ -853,6 +898,19 @@ class Lexer {
         }
         emit(TokenType.hashColor, source.substring(start, i), startCol);
         continue;
+      }
+
+      if ((c == 'x' || c == '}' || c == '^') &&
+          i + 1 < source.length &&
+          (source[i + 1] == '-' || source[i + 1] == '.')) {
+        final startCol = col;
+        final arrowLex = _scanArrow(source, i);
+        if (arrowLex != null) {
+          emit(TokenType.arrow, arrowLex, startCol);
+          i += arrowLex.length;
+          col += arrowLex.length;
+          continue;
+        }
       }
 
       if (_isIdentStart(c)) {
@@ -874,7 +932,54 @@ class Lexer {
           }
           break;
         }
-        emit(TokenType.identifier, source.substring(start, i), startCol);
+        final word = source.substring(start, i);
+        emit(TokenType.identifier, word, startCol);
+        // `autonumber`, `header`, `footer` accept free-form rest-of-line
+        // arguments (dotted versions, `%page%` placeholders, etc.); capture
+        // the rest as a text token so the lexer doesn't choke on `.` or `%`.
+        // `header`/`footer` optionally allow a leading alignment word; emit
+        // that as its own identifier first so the parser can read alignment.
+        if ((word == 'autonumber' ||
+                word == 'header' ||
+                word == 'footer' ||
+                word == 'newpage') &&
+            _isLineStart(tokens.sublist(0, tokens.length - 1))) {
+          while (i < source.length && (source[i] == ' ' || source[i] == '\t')) {
+            i++;
+            col++;
+          }
+          if (word == 'header' || word == 'footer') {
+            const aligns = {'left', 'right', 'center'};
+            for (final a in aligns) {
+              if (i + a.length <= source.length &&
+                  source.substring(i, i + a.length) == a &&
+                  (i + a.length == source.length ||
+                      source[i + a.length] == ' ' ||
+                      source[i + a.length] == '\t' ||
+                      source[i + a.length] == '\n')) {
+                emit(TokenType.identifier, a, col);
+                i += a.length;
+                col += a.length;
+                while (i < source.length &&
+                    (source[i] == ' ' || source[i] == '\t')) {
+                  i++;
+                  col++;
+                }
+                break;
+              }
+            }
+          }
+          final restStart = i;
+          final restStartCol = col;
+          while (i < source.length && source[i] != '\n') {
+            i++;
+            col++;
+          }
+          final rest = source.substring(restStart, i).trim();
+          if (rest.isNotEmpty) {
+            emit(TokenType.text, rest, restStartCol);
+          }
+        }
         continue;
       }
 
@@ -971,12 +1076,14 @@ class Lexer {
     if (second.type != TokenType.identifier) return false;
     int afterPosition;
     if (second.lexeme == 'left' || second.lexeme == 'right') {
-      if (start + 2 >= tokens.length - 1) return false;
-      final third = tokens[start + 2];
-      if (third.type != TokenType.identifier || third.lexeme != 'of') {
-        return false;
+      // `note right of X` and `note right` (no target) both open a body.
+      if (start + 2 < tokens.length - 1 &&
+          tokens[start + 2].type == TokenType.identifier &&
+          tokens[start + 2].lexeme == 'of') {
+        afterPosition = start + 3;
+      } else {
+        return start + 2 == tokens.length - 1;
       }
-      afterPosition = start + 3;
     } else if (second.lexeme == 'over') {
       afterPosition = start + 2;
     } else {
@@ -988,6 +1095,10 @@ class Lexer {
     while (k2 < tokens.length - 1) {
       final t = tokens[k2];
       if (t.type == TokenType.newline) break;
+      if (t.type == TokenType.hashColor) {
+        k2++;
+        continue;
+      }
       if (t.type != TokenType.comma) return false;
       k2++;
       if (k2 >= tokens.length - 1 ||
@@ -1050,7 +1161,7 @@ class Lexer {
       var k = j;
       var sawDashes = false;
       var sawDots = false;
-      while (k < n && source[k] == '-') {
+      while (k < n && (source[k] == '-' || source[k] == '\\' || source[k] == '/')) {
         sawDashes = true;
         k++;
       }
@@ -1062,7 +1173,7 @@ class Lexer {
         final close = source.indexOf(']', k + 1);
         if (close < 0) return null;
         k = close + 1;
-        while (k < n && source[k] == '-') {
+        while (k < n && (source[k] == '-' || source[k] == '\\' || source[k] == '/')) {
           sawDashes = true;
           k++;
         }
@@ -1090,14 +1201,17 @@ class Lexer {
           while (j < n && source[j] == '.') {
             j++;
           }
-        } else {
-          return null;
         }
+        // No additional body chars required after `]` — falls through to the
+        // arrow suffix scan (>, |, *, o) below.
       }
       if (j < n && source[j] == '.') {
         while (j < n && source[j] == '.') {
           j++;
         }
+      }
+      while (j < n && (source[j] == '\\' || source[j] == '/')) {
+        j++;
       }
       if (j < n && source[j] == '>') {
         j++;
@@ -1115,6 +1229,10 @@ class Lexer {
       }
       if (j < n && (source[j] == '*' || source[j] == 'o')) {
         j++;
+        return source.substring(start, j);
+      }
+      // Half-arrow bodies like `-\` or `-/` end with the slash/backslash itself.
+      if (j > i + 1 && j - 1 < n && (source[j - 1] == '\\' || source[j - 1] == '/')) {
         return source.substring(start, j);
       }
       return null;
@@ -1144,7 +1262,13 @@ class Lexer {
       }
       return null;
     }
-    if (first == '*' || first == 'o') {
+    if (first == '*' ||
+        first == 'o' ||
+        first == '#' ||
+        first == 'x' ||
+        first == '}' ||
+        first == '+' ||
+        first == '^') {
       var j = i + 1;
       final after = consumeBody(j);
       if (after == null) return null;
@@ -1171,11 +1295,14 @@ class Lexer {
       var j = i + 1;
       if (j < n && source[j] == '-') {
         var k = j;
-        while (k < n && source[k] == '-') {
+        while (k < n && (source[k] == '-' || source[k] == '.' ||
+            source[k] == '\\' || source[k] == '/')) {
           k++;
         }
         if (k < n && source[k] == '>') {
-          return source.substring(start, k + 1);
+          var m = k + 1;
+          if (m < n && (source[m] == 'o' || source[m] == 'x')) m++;
+          return source.substring(start, m);
         }
       }
       if (j < n && source[j] == '<') {
@@ -1211,6 +1338,23 @@ class Lexer {
         return source.substring(start, j);
       }
       return null;
+    }
+    if (first == '\\' || first == '/') {
+      var j = i + 1;
+      final after = consumeBody(j);
+      if (after == null) return null;
+      j = after;
+      if (j < n && source[j] == '>') {
+        j++;
+        if (j < n && source[j] == '>') j++;
+        if (j < n && (source[j] == 'o' || source[j] == 'x')) j++;
+        return source.substring(start, j);
+      }
+      if (j < n && (source[j] == '*' || source[j] == 'o')) {
+        j++;
+        return source.substring(start, j);
+      }
+      return source.substring(start, j);
     }
     return null;
   }
