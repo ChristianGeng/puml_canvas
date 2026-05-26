@@ -88,14 +88,23 @@ class Lexer {
           end++;
         }
         final raw = source.substring(i, end);
-        if (raw.trim() == 'end note') {
+        final trimmed = raw.trim();
+        if (trimmed == 'end note' ||
+            trimmed == 'endnote' ||
+            trimmed == 'endrnote' ||
+            trimmed == 'endhnote') {
           inNoteBody = false;
-          final endIdx = raw.indexOf('end');
-          emit(TokenType.identifier, 'end', col + endIdx);
-          final noteIdx = raw.indexOf('note', endIdx + 3);
-          emit(TokenType.identifier, 'note', col + noteIdx);
+          if (trimmed == 'end note') {
+            final endIdx = raw.indexOf('end');
+            emit(TokenType.identifier, 'end', col + endIdx);
+            final noteIdx = raw.indexOf('note', endIdx + 3);
+            emit(TokenType.identifier, 'note', col + noteIdx);
+          } else {
+            final idx = raw.indexOf(trimmed);
+            emit(TokenType.identifier, trimmed, col + idx);
+          }
         } else {
-          emit(TokenType.text, raw.trim(), col);
+          emit(TokenType.text, trimmed, col);
         }
         col += raw.length;
         i = end;
@@ -592,6 +601,33 @@ class Lexer {
           emit(TokenType.dotDotDot, '...', startCol);
           i += 3;
           col += 3;
+          // `... text ...` captures the inline text between the two markers
+          // so inline markup like `~~` doesn't get re-tokenized.
+          if (_isLineStart(tokens.sublist(0, tokens.length - 1))) {
+            var j = i;
+            while (j < source.length &&
+                source[j] != '\n' &&
+                !(j + 2 < source.length &&
+                    source[j] == '.' &&
+                    source[j + 1] == '.' &&
+                    source[j + 2] == '.')) {
+              j++;
+            }
+            final raw = source.substring(i, j).trim();
+            if (raw.isNotEmpty) {
+              emit(TokenType.text, raw, col);
+            }
+            col += j - i;
+            i = j;
+            if (i + 2 < source.length &&
+                source[i] == '.' &&
+                source[i + 1] == '.' &&
+                source[i + 2] == '.') {
+              emit(TokenType.dotDotDot, '...', col);
+              i += 3;
+              col += 3;
+            }
+          }
           continue;
         }
         final lexeme = _scanArrow(source, i);
@@ -793,6 +829,16 @@ class Lexer {
           emit(TokenType.doublePipe, '||', startCol);
           i += 2;
           col += 2;
+          // PlantUML shorthand `|||` = opening `||` + closing `|` (no count).
+          // Only kick in when EXACTLY three pipes (next char isn't another |).
+          if (i < source.length &&
+              source[i] == '|' &&
+              (i + 1 >= source.length || source[i + 1] != '|')) {
+            emit(TokenType.doublePipe, '||', col);
+            i += 1;
+            col += 1;
+            continue;
+          }
           final digitStart = i;
           final digitStartCol = col;
           while (i < source.length &&
@@ -1068,7 +1114,10 @@ class Lexer {
     final start = k + 1;
     if (start >= tokens.length - 1) return false;
     final first = tokens[start];
-    if (first.type != TokenType.identifier || first.lexeme != 'note') {
+    if (first.type != TokenType.identifier ||
+        (first.lexeme != 'note' &&
+            first.lexeme != 'hnote' &&
+            first.lexeme != 'rnote')) {
       return false;
     }
     if (start + 1 >= tokens.length - 1) return false;

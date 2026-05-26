@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- Sequence diagrams now carry explicit note background colors through to
+  layout, including `note ... #color` forms.
+- Sequence activation bars now support `activate X #color`, preserving
+  nested activation colors in the rendered bars.
+- Sequence parsing now accepts additional note variants and endings such
+  as `hnote`, `rnote`, `endnote`, `endrnote`, and `endhnote`.
+- Sequence diagrams now support delay separators written as `|||` and
+  labeled skip separators such as `... Some delay ...`.
+- Sequence parsing now handles `return ...` as a dashed reply from the
+  most recent forward message and consumes `autoactivate` directives so
+  diagrams using PlantUML auto-activation syntax continue to render.
+- Inline markup support was expanded with Creole / PlantUML-style
+  monospace (`""text""`), `--strike--`, colored underline / strike /
+  wavy underline tags, text backgrounds, `<font ...>` color / size
+  attributes, and deterministic image placeholders.
+- Sequence labels and notes now expand `<U+HHHH>` unicode escapes and
+  `%autonumber%` placeholders.
+- Sequence messages now accept a per-message `#color` after the target,
+  in addition to arrow-embedded color syntax.
+- Golden coverage was expanded for autoactivate / return, colored
+  activations, delay separators, Creole markup, and advanced inline
+  markup cases.
+
+### Changed
+
+- Autonumber labels now close any still-open inline markup tags before
+  appending message text, preventing the autonumber format styling from
+  leaking into the rest of the label.
+- The example app editor now debounces preview rendering, preserves the
+  cursor when loading samples / files, supports select-all shortcuts, and
+  suppresses a known macOS keyboard state assertion.
+
+### Fixed
+
+- Sequence notes and labels that extend left of the first lifeline now
+  shift the diagram right instead of being clipped off-canvas.
+- Note body lexing now preserves inline separator / markup text inside
+  labeled skip separators instead of re-tokenizing it.
+
 ## 0.9.0
 
 ### Added

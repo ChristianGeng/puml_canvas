@@ -216,10 +216,11 @@ class SequenceLayout implements DiagramLayout {
       final cx = actorCenters[entry.key];
       if (cx == null) continue;
       while (entry.value.isNotEmpty) {
-        final startY = entry.value.removeLast();
+        final tuple = entry.value.removeLast();
         final endY = ctx.destroyY[entry.key] ?? bottomActorY;
         _emitActivationBar(
-            eventShapes, cx, startY, endY, entry.value.length);
+            eventShapes, cx, tuple.$1, endY, entry.value.length,
+            color: tuple.$2);
       }
     }
 
@@ -342,7 +343,16 @@ class SequenceLayout implements DiagramLayout {
 
     shapes.addAll(eventShapes);
 
-    totalWidth = math.max(totalWidth, ctx.rightmost + _padding);
+    // Shift everything right when notes / labels extend past the left margin
+    // so left-of notes don't get clipped off-canvas.
+    final leftShift = ctx.leftmost < _padding ? _padding - ctx.leftmost : 0.0;
+    if (leftShift > 0) {
+      for (var i = 0; i < shapes.length; i++) {
+        shapes[i] = _translateShape(shapes[i], leftShift, 0);
+      }
+    }
+
+    totalWidth = math.max(totalWidth, ctx.rightmost + _padding) + leftShift;
     final diagramBottomY = bottomActorY + actorBoxHeight;
     final totalHeight = diagramBottomY + _padding;
 
@@ -352,6 +362,60 @@ class SequenceLayout implements DiagramLayout {
       background: skin.backgroundColor,
     );
     return wrapWithDecorations(innerScene, diagram.decorations, measurer);
+  }
+
+  SceneShape _translateShape(SceneShape s, double dx, double dy) {
+    if (s is SceneBox) {
+      return SceneBox(
+        rect: s.rect.shift(Offset(dx, dy)),
+        fill: s.fill,
+        stroke: s.stroke,
+        strokeWidth: s.strokeWidth,
+        label: s.label,
+        textStyle: s.textStyle,
+      );
+    }
+    if (s is SceneLine) {
+      return SceneLine(
+        from: s.from + Offset(dx, dy),
+        to: s.to + Offset(dx, dy),
+        dashed: s.dashed,
+        head: s.head,
+        headAtFrom: s.headAtFrom,
+        stroke: s.stroke,
+        strokeWidth: s.strokeWidth,
+        label: s.label,
+        labelStyle: s.labelStyle,
+      );
+    }
+    if (s is SceneText) {
+      return SceneText(
+        offset: s.offset + Offset(dx, dy),
+        text: s.text,
+        textStyle: s.textStyle,
+        maxWidth: s.maxWidth,
+      );
+    }
+    if (s is SceneNote) {
+      return SceneNote(
+        rect: s.rect.shift(Offset(dx, dy)),
+        text: s.text,
+        textStyle: s.textStyle,
+        fill: s.fill,
+        stroke: s.stroke,
+      );
+    }
+    if (s is SceneSymbol) {
+      return SceneSymbol(
+        rect: s.rect.shift(Offset(dx, dy)),
+        label: s.label,
+        labelStyle: s.labelStyle,
+        kind: s.kind,
+        fill: s.fill,
+        stroke: s.stroke,
+      );
+    }
+    return s;
   }
 
   void _emitDestroyMark(List<SceneShape> shapes, double cx, double y) {
@@ -544,24 +608,27 @@ class SequenceLayout implements DiagramLayout {
             rect: rect,
             text: event.text,
             textStyle: ctx.noteStyle,
-            fill: ctx.noteFill,
+            fill: event.color ?? ctx.noteFill,
             stroke: ctx.noteStroke,
           ));
           if (rect.right > ctx.rightmost) ctx.rightmost = rect.right;
+          if (rect.left < ctx.leftmost) ctx.leftmost = rect.left;
           y += boxSize.height + _noteVerticalGap * 2;
         case RefBox():
           y = _emitRefBox(event, y, ctx);
         case Activate():
           final stack = ctx.activationStacks
-              .putIfAbsent(event.participant, () => <double>[]);
-          stack.add(ctx.lastMessageY ?? y);
+              .putIfAbsent(event.participant, () => <(double, Color?)>[]);
+          stack.add((ctx.lastMessageY ?? y, event.color));
         case Deactivate():
           final stack = ctx.activationStacks[event.participant];
           if (stack != null && stack.isNotEmpty) {
-            final s = stack.removeLast();
+            final entry = stack.removeLast();
             final endY = ctx.lastMessageY ?? y;
             _emitActivationBar(ctx.shapes,
-                ctx.centers[event.participant]!, s, endY, stack.length);
+                ctx.centers[event.participant]!,
+                entry.$1, endY, stack.length,
+                color: entry.$2);
           }
         case Create():
           ctx.createY[event.participant] = ctx.lastMessageY ?? y;
@@ -1050,7 +1117,8 @@ class SequenceLayout implements DiagramLayout {
   }
 
   void _emitActivationBar(List<SceneShape> shapes, double cx, double startY,
-      double endY, int nestingDepth) {
+      double endY, int nestingDepth,
+      {Color? color}) {
     if (endY <= startY) return;
     final offset = nestingDepth * _activationNestingOffset;
     shapes.add(SceneBox(
@@ -1061,7 +1129,7 @@ class SequenceLayout implements DiagramLayout {
         endY - startY,
       ),
       textStyle: _labelStyle,
-      fill: const Color(0xFFFFFFFF),
+      fill: color ?? const Color(0xFFFFFFFF),
       stroke: const Color(0xFF000000),
     ));
   }
@@ -1079,11 +1147,12 @@ class _Ctx {
   final Color defaultArrowColor;
   final Color noteFill;
   final Color noteStroke;
-  final Map<String, List<double>> activationStacks = {};
+  final Map<String, List<(double, Color?)>> activationStacks = {};
   final Map<String, double> createY = {};
   final Map<String, double> destroyY = {};
   double? lastMessageY;
   double rightmost;
+  double leftmost;
 
   _Ctx({
     required this.shapes,
@@ -1097,5 +1166,6 @@ class _Ctx {
     required this.defaultArrowColor,
     required this.noteFill,
     required this.noteStroke,
-  }) : rightmost = diagramRightX;
+  })  : rightmost = diagramRightX,
+        leftmost = diagramLeftX;
 }

@@ -42,6 +42,7 @@ class Parser {
   final _autonumber = _AutonumberState();
   var _decorations = _DiagramDecorationBuilder();
   final _pendingMessageAliases = <String, String>{};
+  Message? _lastForwardMessage;
 
   Diagram parse(List<Token> tokens) {
     _tokens = tokens;
@@ -49,6 +50,7 @@ class Parser {
     _autonumber.reset();
     _decorations = _DiagramDecorationBuilder();
     _pendingMessageAliases.clear();
+    _lastForwardMessage = null;
 
     _skipNewlines();
     if (_check(TokenType.startMindmap)) {
@@ -142,6 +144,8 @@ class Parser {
         boxes.add(_parseBox(participants));
       } else if (_isKeyword('autonumber')) {
         _parseAutonumber();
+      } else if (_isKeyword('autoactivate')) {
+        _consumeRestOfLine();
       } else if (_isKeyword('hide') || _isKeyword('show')) {
         _consumeRestOfLine();
       } else {
@@ -529,7 +533,34 @@ class Parser {
       _parseAutonumber();
       return;
     }
-    if (_isKeyword('note')) {
+    if (_isKeyword('autoactivate')) {
+      _consumeRestOfLine();
+      return;
+    }
+    if (_isKeyword('return')) {
+      _advance();
+      final label = _collectInlineText();
+      // PlantUML semantics: `return` is a reply from current callee back to
+      // the most recent caller. We approximate by reusing the last forward
+      // message's reverse direction.
+      final last = _lastForwardMessage;
+      if (last != null) {
+        out.add(Message(
+          from: last.to,
+          to: last.from,
+          label: label == null ? null : _expandText(label),
+          lineStyle: LineStyle.dashed,
+          head: ArrowHead.open,
+          direction: MessageDirection.backward,
+          activation: ActivationSuffix.deactivateSource,
+        ));
+        out.add(Deactivate(last.to));
+      }
+      return;
+    }
+    if (_isKeyword('note') ||
+        _isKeyword('hnote') ||
+        _isKeyword('rnote')) {
       out.add(_parseNote());
       return;
     }
@@ -539,12 +570,24 @@ class Parser {
     }
     if (_isKeyword('activate')) {
       _advance();
-      out.add(Activate(_expect(TokenType.identifier).lexeme));
+      final name = _expect(TokenType.identifier).lexeme;
+      Color? actColor;
+      if (_check(TokenType.hashColor)) {
+        final t = _advance();
+        final raw =
+            t.lexeme.startsWith('#') ? t.lexeme.substring(1) : t.lexeme;
+        actColor = text_colors.tryParseColor(raw);
+      }
+      out.add(Activate(name, color: actColor));
       return;
     }
     if (_isKeyword('deactivate')) {
       _advance();
-      out.add(Deactivate(_expect(TokenType.identifier).lexeme));
+      final name = _expect(TokenType.identifier).lexeme;
+      if (_check(TokenType.hashColor)) {
+        _advance();
+      }
+      out.add(Deactivate(name));
       return;
     }
     if (_check(TokenType.doubleEquals)) {
@@ -557,7 +600,14 @@ class Parser {
     }
     if (_check(TokenType.dotDotDot)) {
       _advance();
-      out.add(const Separator(kind: SeparatorKind.skip));
+      String? skipLabel;
+      if (_check(TokenType.text)) {
+        skipLabel = _expandText(_advance().lexeme);
+      }
+      if (_check(TokenType.dotDotDot)) {
+        _advance();
+      }
+      out.add(Separator(kind: SeparatorKind.skip, label: skipLabel));
       return;
     }
     if (_check(TokenType.minusMinus)) {
@@ -752,6 +802,60 @@ class Parser {
     }
     if (format != null) _autonumber.format = format;
     _autonumber.stopped = false;
+  }
+
+  // Append matching close tags for any markup left open in the format string
+  // so subsequent label text isn't inadvertently styled by the autonumber.
+  String _closeOpenTags(String s) {
+    final openRe = RegExp(r'<\s*(b|i|u|s|strike|color|font|size)\b[^>]*>',
+        caseSensitive: false);
+    final closeRe =
+        RegExp(r'<\s*/\s*(b|i|u|s|strike|color|font|size)\s*>',
+            caseSensitive: false);
+    final stack = <String>[];
+    var pos = 0;
+    while (pos < s.length) {
+      final lt = s.indexOf('<', pos);
+      if (lt < 0) break;
+      final openMatch = openRe.matchAsPrefix(s, lt);
+      if (openMatch != null) {
+        stack.add(openMatch.group(1)!.toLowerCase());
+        pos = openMatch.end;
+        continue;
+      }
+      final closeMatch = closeRe.matchAsPrefix(s, lt);
+      if (closeMatch != null) {
+        final tag = closeMatch.group(1)!.toLowerCase();
+        for (var i = stack.length - 1; i >= 0; i--) {
+          if (stack[i] == tag) {
+            stack.removeAt(i);
+            break;
+          }
+        }
+        pos = closeMatch.end;
+        continue;
+      }
+      pos = lt + 1;
+    }
+    final buf = StringBuffer(s);
+    for (var i = stack.length - 1; i >= 0; i--) {
+      buf.write('</${stack[i]}>');
+    }
+    return buf.toString();
+  }
+
+  // Expand inline placeholders in text: `<U+HHHH>` to the unicode character
+  // and `%autonumber%` to the most-recently displayed autonumber value.
+  String _expandText(String text) {
+    var out = text.replaceAllMapped(
+      RegExp(r'<U\+([0-9A-Fa-f]{2,6})>'),
+      (m) => String.fromCharCode(int.parse(m.group(1)!, radix: 16)),
+    );
+    final last = _autonumber.lastDisplayed;
+    if (last != null) {
+      out = out.replaceAll('%autonumber%', last);
+    }
+    return out;
   }
 
   String _formatAutonumber(int n, String format) {
@@ -966,9 +1070,11 @@ class Parser {
         }
       }
     }
-    // Optional `#color` background spec; consumed but not yet surfaced.
+    Color? color;
     if (_check(TokenType.hashColor)) {
-      _advance();
+      final t = _advance();
+      final raw = t.lexeme.startsWith('#') ? t.lexeme.substring(1) : t.lexeme;
+      color = text_colors.tryParseColor(raw);
     }
 
     final String text;
@@ -979,9 +1085,9 @@ class Parser {
         throw ParserException(
             'Expected note text, got ${t.type}', t.line, t.column);
       }
-      text = _advance().lexeme;
+      text = _expandText(_advance().lexeme);
     } else if (_check(TokenType.newline)) {
-      text = _consumeMultilineNoteBody();
+      text = _expandText(_consumeMultilineNoteBody());
     } else {
       final t = _peek();
       throw ParserException(
@@ -994,6 +1100,7 @@ class Parser {
       position: position,
       participants: List.unmodifiable(participants),
       text: text,
+      color: color,
     );
   }
 
@@ -1137,6 +1244,13 @@ class Parser {
         }
       }
     }
+    // Optional per-message color spec `#RRGGBB` between target and `:`.
+    Color? messageColor;
+    if (_check(TokenType.hashColor)) {
+      final t = _advance();
+      final raw = t.lexeme.startsWith('#') ? t.lexeme.substring(1) : t.lexeme;
+      messageColor = text_colors.tryParseColor(raw);
+    }
 
     ActivationSuffix? activation;
     if (_check(TokenType.plusPlus)) {
@@ -1178,16 +1292,22 @@ class Parser {
       final formatted = levels != null
           ? levels.join('.')
           : _formatAutonumber(_autonumber.current, _autonumber.format);
-      if (label == null || label.isEmpty) {
+      _autonumber.lastDisplayed = levels != null
+          ? levels.join('.')
+          : _autonumber.current.toString();
+      final expanded = label == null ? null : _expandText(label);
+      if (expanded == null || expanded.isEmpty) {
         finalLabel = formatted;
       } else {
-        finalLabel = '$formatted $label';
+        finalLabel = '${_closeOpenTags(formatted)} $expanded';
       }
       if (levels != null) {
         levels[levels.length - 1] += _autonumber.increment;
       } else {
         _autonumber.current += _autonumber.increment;
       }
+    } else if (label != null) {
+      finalLabel = _expandText(label);
     }
 
     final message = Message(
@@ -1198,10 +1318,13 @@ class Parser {
       head: decoded.head,
       direction: decoded.direction,
       hidden: decoded.hidden,
-      color: decoded.color,
+      color: messageColor ?? decoded.color,
       activation: activation,
     );
     out.add(message);
+    if (message.direction == MessageDirection.forward) {
+      _lastForwardMessage = message;
+    }
     switch (activation) {
       case ActivationSuffix.activateTarget:
         out.add(Activate(to));
@@ -4992,6 +5115,7 @@ class _AutonumberState {
   String format = '%d';
   bool stopped = true;
   List<int>? levels;
+  String? lastDisplayed;
 
   void reset() {
     current = 1;
@@ -4999,6 +5123,7 @@ class _AutonumberState {
     format = '%d';
     stopped = true;
     levels = null;
+    lastDisplayed = null;
   }
 }
 

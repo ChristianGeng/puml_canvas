@@ -307,7 +307,8 @@ class Message extends SequenceEvent {
 
 class Activate extends SequenceEvent {
   final String participant;
-  const Activate(this.participant);
+  final Color? color;
+  const Activate(this.participant, {this.color});
 }
 
 class Deactivate extends SequenceEvent {
@@ -331,11 +332,13 @@ class Note extends SequenceEvent {
   final NotePosition position;
   final List<String> participants;
   final String text;
+  final Color? color;
 
   const Note({
     required this.position,
     required this.participants,
     required this.text,
+    this.color,
   });
 }
 

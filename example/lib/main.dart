@@ -1,8 +1,27 @@
+import 'dart:async';
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:puml_canvas/puml_canvas.dart';
 
-void main() => runApp(const ExampleApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  _ignoreKnownMacosKeyboardAssertion();
+  runApp(const ExampleApp());
+}
+
+void _ignoreKnownMacosKeyboardAssertion() {
+  final previous = FlutterError.onError;
+  FlutterError.onError = (details) {
+    final message = details.exceptionAsString();
+    final isKeyboardStateMismatch =
+        message.contains('A KeyUpEvent is dispatched') &&
+        message.contains('physical key is pressed on a different logical key');
+    if (isKeyboardStateMismatch) return;
+    previous?.call(details);
+  };
+}
 
 const _samples = <_SampleDiagram>[
   _SampleDiagram(
@@ -128,9 +147,11 @@ class _ExampleAppState extends State<ExampleApp> {
   late final _controller = TextEditingController(text: _samples.first.source);
   String _source = _samples.first.source;
   String _title = _samples.first.name;
+  Timer? _renderDebounce;
 
   @override
   void dispose() {
+    _renderDebounce?.cancel();
     _controller.dispose();
     super.dispose();
   }
@@ -147,7 +168,7 @@ class _ExampleAppState extends State<ExampleApp> {
     setState(() {
       _title = file.name;
       _source = source;
-      _controller.text = source;
+      _setEditorText(source);
     });
   }
 
@@ -155,7 +176,30 @@ class _ExampleAppState extends State<ExampleApp> {
     setState(() {
       _title = sample.name;
       _source = sample.source;
-      _controller.text = sample.source;
+      _setEditorText(sample.source);
+    });
+  }
+
+  void _setEditorText(String source) {
+    _renderDebounce?.cancel();
+    _controller.value = TextEditingValue(
+      text: source,
+      selection: TextSelection.collapsed(offset: source.length),
+    );
+  }
+
+  void _selectAllText() {
+    _controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _controller.text.length,
+    );
+  }
+
+  void _scheduleRender(String value) {
+    _renderDebounce?.cancel();
+    _renderDebounce = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted) return;
+      setState(() => _source = value);
     });
   }
 
@@ -181,16 +225,28 @@ class _ExampleAppState extends State<ExampleApp> {
                   Expanded(
                     child: Padding(
                       padding: const EdgeInsets.all(12),
-                      child: TextField(
-                        controller: _controller,
-                        maxLines: null,
-                        expands: true,
-                        style: const TextStyle(fontFamily: 'monospace'),
-                        decoration: const InputDecoration(
-                          border: OutlineInputBorder(),
-                          hintText: 'Enter PlantUML source',
+                      child: CallbackShortcuts(
+                        bindings: <ShortcutActivator, VoidCallback>{
+                          const SingleActivator(
+                            LogicalKeyboardKey.keyA,
+                            control: true,
+                          ): _selectAllText,
+                          const SingleActivator(
+                            LogicalKeyboardKey.keyA,
+                            meta: true,
+                          ): _selectAllText,
+                        },
+                        child: TextField(
+                          controller: _controller,
+                          maxLines: null,
+                          expands: true,
+                          style: const TextStyle(fontFamily: 'monospace'),
+                          decoration: const InputDecoration(
+                            border: OutlineInputBorder(),
+                            hintText: 'Enter PlantUML source',
+                          ),
+                          onChanged: _scheduleRender,
                         ),
-                        onChanged: (value) => setState(() => _source = value),
                       ),
                     ),
                   ),

@@ -887,6 +887,123 @@ void main() {
       );
     });
 
+    testWidgets('sequence autoactivate and return', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'autoactivate on\n'
+        'alice -> bob : hello\n'
+        'bob -> bob : self call\n'
+        'bill -> bob #005500 : hello from thread 2\n'
+        'bob -> george ** : create\n'
+        'return done in thread 2\n'
+        'return rc\n'
+        'bob -> george !! : delete\n'
+        'return success\n'
+        '\n'
+        '@enduml\n',
+        'sequence_autoactivate_return',
+        size: const Size(800, 700),
+      );
+    });
+
+    testWidgets('sequence activate with color', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant User\n'
+        '\n'
+        'User -> A: DoWork\n'
+        'activate A #FFBBBB\n'
+        '\n'
+        'A -> A: Internal call\n'
+        'activate A #DarkSalmon\n'
+        '\n'
+        'A -> B: << createRequest >>\n'
+        'activate B\n'
+        '\n'
+        'B --> A: RequestCreated\n'
+        'deactivate B\n'
+        'deactivate A\n'
+        'A -> User: Done\n'
+        'deactivate A\n'
+        '\n'
+        '@enduml\n',
+        'sequence_activate_color',
+        size: const Size(700, 700),
+      );
+    });
+
+    testWidgets('sequence delay separators', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '\n'
+        'Alice -> Bob: message 1\n'
+        'Bob --> Alice: ok\n'
+        '|||\n'
+        'Alice -> Bob: message 2\n'
+        'Bob --> Alice: ok\n'
+        '||45||\n'
+        'Alice -> Bob: message 3\n'
+        'Bob --> Alice: ok\n'
+        '\n'
+        '@enduml\n',
+        'sequence_delay_separators',
+        size: const Size(600, 600),
+      );
+    });
+
+    testWidgets('sequence creole inline markup', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice\n'
+        'participant "The **Famous** Bob" as Bob\n'
+        '\n'
+        'Alice -> Bob : hello --there--\n'
+        '... Some ~~long delay~~ ...\n'
+        'Bob -> Alice : ok\n'
+        'note left\n'
+        '  This is **bold**\n'
+        '  This is //italics//\n'
+        '  This is ""monospaced""\n'
+        '  This is --stroked--\n'
+        '  This is __underlined__\n'
+        '  This is ~~waved~~\n'
+        'end note\n'
+        '\n'
+        'Alice -> Bob : A //well formatted// message\n'
+        '@enduml\n',
+        'sequence_creole_markup',
+        size: const Size(700, 600),
+      );
+    });
+
+    testWidgets('sequence advanced markup', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice\n'
+        'participant Bob\n'
+        '\n'
+        'note right of Alice\n'
+        ' This is <back:cadetblue><size:18>displayed</size></back>\n'
+        ' __left of__ Alice.\n'
+        'end note\n'
+        'note left of Bob\n'
+        ' <u:red>This</u> is <color #118888>displayed</color>\n'
+        ' **<color purple>left of</color> <s:red>Alice</strike> Bob**.\n'
+        'end note\n'
+        'note over Alice, Bob\n'
+        ' <w:#FF33FF>This is hosted</w> by <img sourceforge.jpg>\n'
+        'end note\n'
+        '@enduml\n',
+        'sequence_advanced_markup',
+        size: const Size(700, 600),
+      );
+    });
+
     testWidgets('sequence partition as group', (tester) async {
       await expectPumlGolden(
         tester,
