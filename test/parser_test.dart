@@ -73,6 +73,133 @@ void main() {
       }
     });
 
+    group('arrow head/tail decoration variants', () {
+      // The 20 PlantUML message arrow head/tail combos the user-supplied
+      // repro covers. Each entry is (arrow, head, direction, tailDecoration).
+      // The line style is implicitly solid for all of these.
+      const cases = <(
+        String,
+        ArrowHead,
+        MessageDirection,
+        EndpointDecoration?
+      )>[
+        ('->', ArrowHead.filled, MessageDirection.forward, null),
+        ('->>', ArrowHead.open, MessageDirection.forward, null),
+        ('-\\', ArrowHead.open, MessageDirection.forward, null),
+        ('-\\\\', ArrowHead.open, MessageDirection.forward, null),
+        ('-/', ArrowHead.open, MessageDirection.forward, null),
+        ('-//', ArrowHead.open, MessageDirection.forward, null),
+        ('->x', ArrowHead.cross, MessageDirection.forward, null),
+        (
+          'x->',
+          ArrowHead.filled,
+          MessageDirection.forward,
+          EndpointDecoration.cross,
+        ),
+        (
+          'o->',
+          ArrowHead.filled,
+          MessageDirection.forward,
+          EndpointDecoration.openCircle,
+        ),
+        ('->o', ArrowHead.openCircle, MessageDirection.forward, null),
+        (
+          'o->o',
+          ArrowHead.openCircle,
+          MessageDirection.forward,
+          EndpointDecoration.openCircle,
+        ),
+        ('<->', ArrowHead.filled, MessageDirection.bidirectional, null),
+        (
+          'o<->o',
+          ArrowHead.openCircle,
+          MessageDirection.bidirectional,
+          EndpointDecoration.openCircle,
+        ),
+        (
+          'x<->x',
+          ArrowHead.cross,
+          MessageDirection.bidirectional,
+          EndpointDecoration.cross,
+        ),
+        ('->>o', ArrowHead.openCircle, MessageDirection.forward, null),
+        ('-\\o', ArrowHead.openCircle, MessageDirection.forward, null),
+        ('-\\\\o', ArrowHead.openCircle, MessageDirection.forward, null),
+        ('-/o', ArrowHead.openCircle, MessageDirection.forward, null),
+        ('-//o', ArrowHead.openCircle, MessageDirection.forward, null),
+        (
+          'x->o',
+          ArrowHead.openCircle,
+          MessageDirection.forward,
+          EndpointDecoration.cross,
+        ),
+      ];
+      for (final c in cases) {
+        test('"${c.$1}" decodes to head=${c.$2} dir=${c.$3} tail=${c.$4}', () {
+          final d = parseSequence('@startuml\nA ${c.$1} B\n@enduml\n');
+          final m = d.events.single as Message;
+          expect(m.from, 'A');
+          expect(m.to, 'B');
+          expect(m.lineStyle, LineStyle.solid);
+          expect(m.head, c.$2);
+          expect(m.direction, c.$3);
+          expect(m.tailDecoration, c.$4);
+        });
+      }
+
+      test('the full repro source parses all 20 arrows in order', () {
+        final d = parseSequence(
+          '@startuml\n'
+          'participant Alice as a\n'
+          'participant Bob   as b\n'
+          'a ->     b\n'
+          'a ->>    b\n'
+          'a -\\     b\n'
+          'a -\\\\    b\n'
+          'a -/     b\n'
+          'a -//    b\n'
+          'a ->x    b\n'
+          'a x->    b\n'
+          'a o->    b\n'
+          'a ->o    b\n'
+          'a o->o   b\n'
+          'a <->    b\n'
+          'a o<->o  b\n'
+          'a x<->x  b\n'
+          'a ->>o   b\n'
+          'a -\\o    b\n'
+          'a -\\\\o   b\n'
+          'a -/o    b\n'
+          'a -//o   b\n'
+          'a x->o   b\n'
+          '@enduml\n',
+        );
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(20));
+        // Each message addresses a / b, never collapses into a bidirectional
+        // misparse, and never produces a stray identifier consumption.
+        for (final m in messages) {
+          expect(m.from, 'a');
+          expect(m.to, 'b');
+        }
+        // Spot-check the four lexer-bug regressions specifically. Order
+        // matches the verbatim source: index 10 is `o->o`, 12 is `o<->o`,
+        // 13 is `x<->x`, 19 is `x->o`.
+        expect(messages[10].direction, MessageDirection.forward); // o->o
+        expect(messages[10].head, ArrowHead.openCircle);
+        expect(messages[10].tailDecoration, EndpointDecoration.openCircle);
+        expect(messages[12].direction, MessageDirection.bidirectional); // o<->o
+        expect(messages[12].head, ArrowHead.openCircle);
+        expect(messages[12].tailDecoration, EndpointDecoration.openCircle);
+        expect(messages[13].direction, MessageDirection.bidirectional); // x<->x
+        expect(messages[13].head, ArrowHead.cross);
+        expect(messages[13].tailDecoration, EndpointDecoration.cross);
+        expect(messages[19].direction, MessageDirection.forward); // x->o
+        expect(messages[19].head, ArrowHead.openCircle);
+        expect(messages[19].tailDecoration, EndpointDecoration.cross);
+      });
+    });
+
     group('arrow modifiers', () {
       test('hidden flag is decoded', () {
         final d = parseSequence('@startuml\nA -[hidden]-> B\n@enduml\n');
@@ -172,6 +299,900 @@ void main() {
       );
     });
 
+    group('found / lost messages (anonymous endpoints)', () {
+      test('?-> Target marks fromShort source', () {
+        final d = parseSequence('@startuml\n?-> Alice\n@enduml\n');
+        final m = d.events.single as Message;
+        expect(m.fromExternal, MessageExternal.fromShort);
+        expect(m.toExternal, isNull);
+        expect(m.to, 'Alice');
+        expect(m.direction, MessageDirection.forward);
+        expect(m.head, ArrowHead.filled);
+        // Anonymous source must not pollute the participant order.
+        expect(d.participantsInOrder().map((p) => p.alias).toList(), ['Alice']);
+      });
+
+      test('[-> Target marks fromEdge source', () {
+        final d = parseSequence('@startuml\n[-> Alice\n@enduml\n');
+        final m = d.events.single as Message;
+        expect(m.fromExternal, MessageExternal.fromEdge);
+        expect(m.toExternal, isNull);
+        expect(m.to, 'Alice');
+        expect(d.participantsInOrder().map((p) => p.alias).toList(), ['Alice']);
+      });
+
+      test('Source ->] marks toEdge target', () {
+        final d = parseSequence('@startuml\nAlice ->]\n@enduml\n');
+        final m = d.events.single as Message;
+        expect(m.fromExternal, isNull);
+        expect(m.toExternal, MessageExternal.toEdge);
+        expect(m.from, 'Alice');
+        expect(d.participantsInOrder().map((p) => p.alias).toList(), ['Alice']);
+      });
+
+      test('Source ->? marks toShort target', () {
+        final d = parseSequence('@startuml\nAlice ->?\n@enduml\n');
+        final m = d.events.single as Message;
+        expect(m.fromExternal, isNull);
+        expect(m.toExternal, MessageExternal.toShort);
+        expect(m.from, 'Alice');
+        expect(d.participantsInOrder().map((p) => p.alias).toList(), ['Alice']);
+      });
+
+      test('dashed forms `?-->` / `-->]` preserve LineStyle.dashed', () {
+        final d = parseSequence(
+          '@startuml\n?--> Alice\nAlice -->]\n@enduml\n',
+        );
+        final ms = d.events.whereType<Message>().toList();
+        expect(ms, hasLength(2));
+        expect(ms[0].lineStyle, LineStyle.dashed);
+        expect(ms[0].fromExternal, MessageExternal.fromShort);
+        expect(ms[1].lineStyle, LineStyle.dashed);
+        expect(ms[1].toExternal, MessageExternal.toEdge);
+      });
+
+      test('verbatim source with all four forms parses cleanly', () {
+        final d = parseSequence('''@startuml
+?-> Alice    : ""?->""\\n**short** to actor1
+[-> Alice    : ""[->""\\n**from start** to actor1
+[-> Bob      : ""[->""\\n**from start** to actor2
+?-> Bob      : ""?->""\\n**short** to actor2
+Alice ->]    : ""->]""\\nfrom actor1 **to end**
+Alice ->?    : ""->?""\\n**short** from actor1
+Alice -> Bob : ""->"" \\nfrom actor1 to actor2
+@enduml
+''');
+        final ms = d.events.whereType<Message>().toList();
+        expect(ms, hasLength(7));
+        expect(ms[0].fromExternal, MessageExternal.fromShort);
+        expect(ms[0].to, 'Alice');
+        expect(ms[1].fromExternal, MessageExternal.fromEdge);
+        expect(ms[1].to, 'Alice');
+        expect(ms[2].fromExternal, MessageExternal.fromEdge);
+        expect(ms[2].to, 'Bob');
+        expect(ms[3].fromExternal, MessageExternal.fromShort);
+        expect(ms[3].to, 'Bob');
+        expect(ms[4].from, 'Alice');
+        expect(ms[4].toExternal, MessageExternal.toEdge);
+        expect(ms[5].from, 'Alice');
+        expect(ms[5].toExternal, MessageExternal.toShort);
+        expect(ms[6].from, 'Alice');
+        expect(ms[6].to, 'Bob');
+        expect(ms[6].fromExternal, isNull);
+        expect(ms[6].toExternal, isNull);
+        // Only Alice + Bob — no anonymous-endpoint participant pollution.
+        expect(d.participantsInOrder().map((p) => p.alias).toList(),
+            ['Alice', 'Bob']);
+      });
+    });
+
+    group('lost-endpoint `?` combined with arrow-head variants', () {
+      // Regression: previously the lexer accepted `?` only after a plain `>`
+      // / `>>` head, NOT after head/cap decorations (`o`, `x`, `\`, `\\`,
+      // `/`, `//`) or trailing caps (`>o`, `>>o`, `>x`). This group locks in
+      // the 20 head-variant + short-lost combinations from the bug report.
+      Message decode(String arrow) {
+        final d = parseSequence('@startuml\nAlice $arrow\n@enduml\n');
+        return d.events.whereType<Message>().single;
+      }
+
+      void expectShortLost(Message m,
+          {required ArrowHead head,
+          required MessageDirection direction,
+          required LineStyle lineStyle,
+          EndpointDecoration? tailDecoration}) {
+        expect(m.toExternal, MessageExternal.toShort);
+        expect(m.fromExternal, isNull);
+        expect(m.from, 'Alice');
+        expect(m.head, head);
+        expect(m.direction, direction);
+        expect(m.lineStyle, lineStyle);
+        expect(m.tailDecoration, tailDecoration);
+      }
+
+      test('->? : plain filled head + short lost', () {
+        expectShortLost(decode('->?'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('->>? : open (thin/async) head + short lost', () {
+        expectShortLost(decode('->>?'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'-\? : single-half head + short lost', () {
+        expectShortLost(decode(r'-\?'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'-\\? : double-half head + short lost', () {
+        expectShortLost(decode(r'-\\?'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('-/? : single-half head + short lost', () {
+        expectShortLost(decode('-/?'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('-//? : double-half head + short lost', () {
+        expectShortLost(decode('-//?'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('->x? : cross head + short lost', () {
+        expectShortLost(decode('->x?'),
+            head: ArrowHead.cross,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('x->? : cross tail + filled head + short lost', () {
+        expectShortLost(decode('x->?'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.cross);
+      });
+
+      test('o->? : circle tail + filled head + short lost', () {
+        expectShortLost(decode('o->?'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('->o? : circle head + short lost', () {
+        expectShortLost(decode('->o?'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('o->o? : circle tail + circle head + short lost', () {
+        // The combined glyph `o->o` MUST decode as (tail=o, head=o) — not
+        // as (head=o) + literal `?o` left over. This is the textbook
+        // failure mode the bug report calls out.
+        expectShortLost(decode('o->o?'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('->>o? : open head with circle cap + short lost', () {
+        expectShortLost(decode('->>o?'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'-\o? : half head with circle cap + short lost', () {
+        expectShortLost(decode(r'-\o?'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'-\\o? : double-half head with circle cap + short lost', () {
+        expectShortLost(decode(r'-\\o?'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('-/o? : half head with circle cap + short lost', () {
+        expectShortLost(decode('-/o?'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('-//o? : double-half head with circle cap + short lost', () {
+        expectShortLost(decode('-//o?'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('x->o? : cross tail + circle head + short lost', () {
+        expectShortLost(decode('x->o?'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.cross);
+      });
+
+      group('bidirectional + lost-endpoint normalizes to forward', () {
+        // Structural decision: a bidirectional arrow needs a real participant
+        // on BOTH sides to mount the return triangle. When the right side is
+        // anonymous (`?`/`]`), there's nothing to point back at, so the
+        // parser collapses the direction to forward. The head shape and any
+        // tail decoration ARE preserved so the visible glyphs from the
+        // source still appear in the rendered output.
+        test('<->? : plain bidirectional + short lost → forward', () {
+          expectShortLost(decode('<->?'),
+              head: ArrowHead.filled,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid);
+        });
+
+        test('o<->o? : circle-decorated bidirectional + short lost → forward',
+            () {
+          expectShortLost(decode('o<->o?'),
+              head: ArrowHead.openCircle,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid,
+              tailDecoration: EndpointDecoration.openCircle);
+        });
+
+        test('x<->x? : cross-decorated bidirectional + short lost → forward',
+            () {
+          expectShortLost(decode('x<->x?'),
+              head: ArrowHead.cross,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid,
+              tailDecoration: EndpointDecoration.cross);
+        });
+      });
+
+      test(
+          'verbatim 21-line source from the bug report parses with all '
+          'forms producing toShort right endpoints', () {
+        // The exact source from the user bug report (lines 5–25). Line 4
+        // is the italic-label baseline; the remaining 20 lines exercise the
+        // head-variant + short-lost combination. All 20 must mark
+        // toExternal = toShort with the head/tail decoded from the glyphs.
+        final d = parseSequence('@startuml\n'
+            'participant Alice as a\n'
+            'participant Bob   as b\n'
+            'a ->     b : //Long long label//\n'
+            'a ->?      : ""->?   ""\n'
+            'a ->>?     : ""->>?  ""\n'
+            'a -\\?      : ""-\\?   ""\n'
+            'a -\\\\?     : ""-\\\\\\\\?""\n'
+            'a -/?      : ""-/?   ""\n'
+            'a -//?     : ""-//?  ""\n'
+            'a ->x?     : ""->x?  ""\n'
+            'a x->?     : ""x->?  ""\n'
+            'a o->?     : ""o->?  ""\n'
+            'a ->o?     : ""->o?  ""\n'
+            'a o->o?    : ""o->o? ""\n'
+            'a <->?     : ""<->?  ""\n'
+            'a o<->o?   : ""o<->o?""\n'
+            'a x<->x?   : ""x<->x?""\n'
+            'a ->>o?    : ""->>o? ""\n'
+            'a -\\o?     : ""-\\o?  ""\n'
+            'a -\\\\o?    : ""-\\\\\\\\o?""\n'
+            'a -/o?     : ""-/o?  ""\n'
+            'a -//o?    : ""-//o? ""\n'
+            'a x->o?    : ""x->o? ""\n'
+            '@enduml\n');
+        final ms = d.events.whereType<Message>().toList();
+        expect(ms, hasLength(21));
+        // First message: plain `->` (no lost endpoint), with the italic
+        // label preserved verbatim for inline markup to interpret.
+        expect(ms[0].toExternal, isNull);
+        expect(ms[0].label, '//Long long label//');
+        // Every other message ends at a short-lost stub.
+        for (final m in ms.skip(1)) {
+          expect(m.toExternal, MessageExternal.toShort,
+              reason: 'arrow with label ${m.label} should be toShort');
+          expect(m.fromExternal, isNull);
+        }
+        // No bidirectional arrow survives — the three `<->?` rows collapse
+        // to forward (since the lost-endpoint can't receive a return tip).
+        expect(ms.where((m) => m.direction == MessageDirection.bidirectional),
+            isEmpty);
+        // The 21 arrow rows must NOT introduce extra participants — only
+        // `a` and `b` should appear in declaration order.
+        expect(d.participantsInOrder().map((p) => p.alias).toList(),
+            ['a', 'b']);
+      });
+    });
+
+    group('found-endpoint `?` combined with arrow-head variants (Case B)', () {
+      // Left-side mirror of the lost-endpoint `?` group above. Previously the
+      // lexer accepted `?->` and `?->>` but rejected `?-\`, `?o->`, `?o->o`,
+      // `?<->`, etc. — the found-marker scan composed badly with leading
+      // tail decorations and half-arrow body forms. This group locks in all
+      // 20 head-variant + short-found combinations.
+      Message decode(String arrow) {
+        final d = parseSequence('@startuml\n$arrow Bob\n@enduml\n');
+        return d.events.whereType<Message>().single;
+      }
+
+      void expectShortFound(Message m,
+          {required ArrowHead head,
+          required MessageDirection direction,
+          required LineStyle lineStyle,
+          EndpointDecoration? tailDecoration}) {
+        expect(m.fromExternal, MessageExternal.fromShort);
+        expect(m.toExternal, isNull);
+        expect(m.to, 'Bob');
+        expect(m.head, head);
+        expect(m.direction, direction);
+        expect(m.lineStyle, lineStyle);
+        expect(m.tailDecoration, tailDecoration);
+      }
+
+      test('?-> : plain filled head + short found', () {
+        expectShortFound(decode('?->'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?->> : open (thin/async) head + short found', () {
+        expectShortFound(decode('?->>'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'?-\ : single-half head + short found', () {
+        expectShortFound(decode(r'?-\'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'?-\\ : double-half head + short found', () {
+        expectShortFound(decode(r'?-\\'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?-/ : single-half head + short found', () {
+        expectShortFound(decode('?-/'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?-// : double-half head + short found', () {
+        expectShortFound(decode('?-//'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?->x : cross head + short found', () {
+        expectShortFound(decode('?->x'),
+            head: ArrowHead.cross,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?x-> : cross tail + filled head + short found', () {
+        expectShortFound(decode('?x->'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.cross);
+      });
+
+      test('?o-> : circle tail + filled head + short found', () {
+        expectShortFound(decode('?o->'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('?->o : circle head + short found', () {
+        expectShortFound(decode('?->o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?o->o : circle tail + circle head + short found', () {
+        expectShortFound(decode('?o->o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('?->>o : open head with circle cap + short found', () {
+        expectShortFound(decode('?->>o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'?-\o : half head with circle cap + short found', () {
+        expectShortFound(decode(r'?-\o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'?-\\o : double-half head with circle cap + short found', () {
+        expectShortFound(decode(r'?-\\o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?-/o : half head with circle cap + short found', () {
+        expectShortFound(decode('?-/o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?-//o : double-half head with circle cap + short found', () {
+        expectShortFound(decode('?-//o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('?x->o : cross tail + circle head + short found', () {
+        expectShortFound(decode('?x->o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.cross);
+      });
+
+      group('bidirectional + short-found normalizes to forward', () {
+        // Structural decision: a bidirectional arrow with an anonymous SOURCE
+        // (left-external) has no real participant on the left to mount a
+        // return triangle. PlantUML's intent for found messages is an arrow
+        // flowing FROM the stub TOWARD the real participant, so we collapse
+        // bidirectional to forward. The head shape + tail decoration are
+        // preserved so the visible glyphs from the source still appear.
+        test('?<-> : plain bidirectional + short found → forward', () {
+          expectShortFound(decode('?<->'),
+              head: ArrowHead.filled,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid);
+        });
+
+        test('?o<->o : circle-decorated bidirectional + short found → forward',
+            () {
+          expectShortFound(decode('?o<->o'),
+              head: ArrowHead.openCircle,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid,
+              tailDecoration: EndpointDecoration.openCircle);
+        });
+
+        test('?x<->x : cross-decorated bidirectional + short found → forward',
+            () {
+          expectShortFound(decode('?x<->x'),
+              head: ArrowHead.cross,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid,
+              tailDecoration: EndpointDecoration.cross);
+        });
+      });
+
+      test(
+          'verbatim 21-line source with all forms produces fromShort left endpoints',
+          () {
+        // The verbatim source from the user bug report, line for line. Line 4
+        // is the italic-label baseline; the remaining 20 lines exercise the
+        // head-variant + short-found combination. All 20 must mark
+        // fromExternal = fromShort with the head/tail decoded from the glyphs.
+        final d = parseSequence('@startuml\n'
+            'participant Alice as a\n'
+            'participant Bob   as b\n'
+            'a ->     b : //Long long label//\n'
+            '?->      b : ""?->   ""\n'
+            '?->>     b : ""?->>  ""\n'
+            '?-\\      b : ""?-\\   ""\n'
+            '?-\\\\     b : ""?-\\\\\\\\""\n'
+            '?-/      b : ""?-/   ""\n'
+            '?-//     b : ""?-//  ""\n'
+            '?->x     b : ""?->x  ""\n'
+            '?x->     b : ""?x->  ""\n'
+            '?o->     b : ""?o->  ""\n'
+            '?->o     b : ""?->o  ""\n'
+            '?o->o    b : ""?o->o ""\n'
+            '?<->     b : ""?<->  ""\n'
+            '?o<->o   b : ""?o<->o""\n'
+            '?x<->x   b : ""?x<->x""\n'
+            '?->>o    b : ""?->>o ""\n'
+            '?-\\o     b : ""?-\\o  ""\n'
+            '?-\\\\o    b : ""?-\\\\\\\\o ""\n'
+            '?-/o     b : ""?-/o  ""\n'
+            '?-//o    b : ""?-//o ""\n'
+            '?x->o    b : ""?x->o ""\n'
+            '@enduml\n');
+        final ms = d.events.whereType<Message>().toList();
+        expect(ms, hasLength(21));
+        // First message: plain `->` (no found endpoint), with the italic
+        // label preserved verbatim for inline markup to interpret.
+        expect(ms[0].fromExternal, isNull);
+        expect(ms[0].label, '//Long long label//');
+        // Every other message starts at a short-found stub.
+        for (final m in ms.skip(1)) {
+          expect(m.fromExternal, MessageExternal.fromShort,
+              reason: 'arrow with label ${m.label} should be fromShort');
+          expect(m.toExternal, isNull);
+        }
+        // Bidirectional arrows collapse — none should survive.
+        expect(ms.where((m) => m.direction == MessageDirection.bidirectional),
+            isEmpty);
+        expect(d.participantsInOrder().map((p) => p.alias).toList(),
+            ['a', 'b']);
+      });
+    });
+
+    group('edge-lost-endpoint `]` combined with arrow-head variants (Case C)',
+        () {
+      // The right-side `]` lost-endpoint marker. This case ALREADY worked
+      // before this task because the lexer's `consumeLostEnd` accepts both
+      // `?` and `]`, and the parser strips a trailing `]` as `toEdge`. The
+      // tests below are a structural smoke check that locks in the behavior.
+      Message decode(String arrow) {
+        final d = parseSequence('@startuml\nAlice $arrow\n@enduml\n');
+        return d.events.whereType<Message>().single;
+      }
+
+      void expectEdgeLost(Message m,
+          {required ArrowHead head,
+          required MessageDirection direction,
+          required LineStyle lineStyle,
+          EndpointDecoration? tailDecoration}) {
+        expect(m.toExternal, MessageExternal.toEdge);
+        expect(m.fromExternal, isNull);
+        expect(m.from, 'Alice');
+        expect(m.head, head);
+        expect(m.direction, direction);
+        expect(m.lineStyle, lineStyle);
+        expect(m.tailDecoration, tailDecoration);
+      }
+
+      test('->] : plain filled head + edge lost', () {
+        expectEdgeLost(decode('->]'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('->>] : open head + edge lost', () {
+        expectEdgeLost(decode('->>]'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'-\] : single-half head + edge lost', () {
+        expectEdgeLost(decode(r'-\]'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('o->] : circle tail + filled head + edge lost', () {
+        expectEdgeLost(decode('o->]'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('o->o] : circle tail + circle head + edge lost', () {
+        expectEdgeLost(decode('o->o]'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('<->] : bidirectional + edge lost → forward', () {
+        expectEdgeLost(decode('<->]'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('o<->o] : bidirectional with circle decorations + edge lost → forward',
+          () {
+        expectEdgeLost(decode('o<->o]'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('verbatim Case C 20-arrow source parses to all toEdge', () {
+        final d = parseSequence('@startuml\n'
+            'participant Alice as a\n'
+            'participant Bob   as b\n'
+            'a ->]      : ""->]   ""\n'
+            'a ->>]     : ""->>]  ""\n'
+            'a -\\]      : ""-\\]   ""\n'
+            'a -\\\\]     : ""-\\\\\\\\]""\n'
+            'a -/]      : ""-/]   ""\n'
+            'a -//]     : ""-//]  ""\n'
+            'a ->x]     : ""->x]  ""\n'
+            'a x->]     : ""x->]  ""\n'
+            'a o->]     : ""o->]  ""\n'
+            'a ->o]     : ""->o]  ""\n'
+            'a o->o]    : ""o->o] ""\n'
+            'a <->]     : ""<->]  ""\n'
+            'a o<->o]   : ""o<->o]""\n'
+            'a x<->x]   : ""x<->x]""\n'
+            'a ->>o]    : ""->>o] ""\n'
+            'a -\\o]     : ""-\\o]  ""\n'
+            'a -\\\\o]    : ""-\\\\\\\\o]""\n'
+            'a -/o]     : ""-/o]  ""\n'
+            'a -//o]    : ""-//o] ""\n'
+            'a x->o]    : ""x->o] ""\n'
+            '@enduml\n');
+        final ms = d.events.whereType<Message>().toList();
+        expect(ms, hasLength(20));
+        for (final m in ms) {
+          expect(m.toExternal, MessageExternal.toEdge,
+              reason: 'arrow with label ${m.label} should be toEdge');
+          expect(m.fromExternal, isNull);
+        }
+        expect(ms.where((m) => m.direction == MessageDirection.bidirectional),
+            isEmpty);
+        expect(d.participantsInOrder().map((p) => p.alias).toList(),
+            ['a', 'b']);
+      });
+    });
+
+    group('edge-found-endpoint `[` combined with arrow-head variants (Case D)',
+        () {
+      // Left-side mirror of Case C. Previously the parser accepted `[->`,
+      // `[->>`, etc. but rejected `[x->`, `[o->`, `[<->`, `[-\`, `[-\o`, etc.
+      // The lexer didn't absorb `[` for those head-variant forms, so the
+      // parser saw a stray leftBracket. This group locks in 20 head-variant
+      // + edge-found combinations.
+      Message decode(String arrow) {
+        final d = parseSequence('@startuml\n$arrow Bob\n@enduml\n');
+        return d.events.whereType<Message>().single;
+      }
+
+      void expectEdgeFound(Message m,
+          {required ArrowHead head,
+          required MessageDirection direction,
+          required LineStyle lineStyle,
+          EndpointDecoration? tailDecoration}) {
+        expect(m.fromExternal, MessageExternal.fromEdge);
+        expect(m.toExternal, isNull);
+        expect(m.to, 'Bob');
+        expect(m.head, head);
+        expect(m.direction, direction);
+        expect(m.lineStyle, lineStyle);
+        expect(m.tailDecoration, tailDecoration);
+      }
+
+      test('[-> : plain filled head + edge found', () {
+        expectEdgeFound(decode('[->'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[->> : open head + edge found', () {
+        expectEdgeFound(decode('[->>'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'[-\ : single-half head + edge found', () {
+        expectEdgeFound(decode(r'[-\'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'[-\\ : double-half head + edge found', () {
+        expectEdgeFound(decode(r'[-\\'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[-/ : half head + edge found', () {
+        expectEdgeFound(decode('[-/'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[-// : double-half head + edge found', () {
+        expectEdgeFound(decode('[-//'),
+            head: ArrowHead.open,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[->x : cross head + edge found', () {
+        expectEdgeFound(decode('[->x'),
+            head: ArrowHead.cross,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[x-> : cross tail + filled head + edge found', () {
+        expectEdgeFound(decode('[x->'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.cross);
+      });
+
+      test('[o-> : circle tail + filled head + edge found', () {
+        expectEdgeFound(decode('[o->'),
+            head: ArrowHead.filled,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('[->o : circle head + edge found', () {
+        expectEdgeFound(decode('[->o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[o->o : circle tail + circle head + edge found', () {
+        expectEdgeFound(decode('[o->o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.openCircle);
+      });
+
+      test('[->>o : open head with circle cap + edge found', () {
+        expectEdgeFound(decode('[->>o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'[-\o : half head with circle cap + edge found', () {
+        expectEdgeFound(decode(r'[-\o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test(r'[-\\o : double-half head with circle cap + edge found', () {
+        expectEdgeFound(decode(r'[-\\o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[-/o : half head with circle cap + edge found', () {
+        expectEdgeFound(decode('[-/o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[-//o : double-half head with circle cap + edge found', () {
+        expectEdgeFound(decode('[-//o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid);
+      });
+
+      test('[x->o : cross tail + circle head + edge found', () {
+        expectEdgeFound(decode('[x->o'),
+            head: ArrowHead.openCircle,
+            direction: MessageDirection.forward,
+            lineStyle: LineStyle.solid,
+            tailDecoration: EndpointDecoration.cross);
+      });
+
+      group('bidirectional + edge-found normalizes to forward', () {
+        // Mirrors the `?<->` group: edge-found bidirectional collapses to
+        // forward because the anonymous left source has nothing to receive a
+        // return triangle. The arrow flows from the diagram edge toward the
+        // real participant on the right.
+        test('[<-> : bidirectional + edge found → forward', () {
+          expectEdgeFound(decode('[<->'),
+              head: ArrowHead.filled,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid);
+        });
+
+        test('[o<->o : circle-decorated bidirectional + edge found → forward',
+            () {
+          expectEdgeFound(decode('[o<->o'),
+              head: ArrowHead.openCircle,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid,
+              tailDecoration: EndpointDecoration.openCircle);
+        });
+
+        test('[x<->x : cross-decorated bidirectional + edge found → forward',
+            () {
+          expectEdgeFound(decode('[x<->x'),
+              head: ArrowHead.cross,
+              direction: MessageDirection.forward,
+              lineStyle: LineStyle.solid,
+              tailDecoration: EndpointDecoration.cross);
+        });
+      });
+
+      test('verbatim Case D 20-arrow source parses to all fromEdge', () {
+        final d = parseSequence('@startuml\n'
+            'participant Alice as a\n'
+            'participant Bob   as b\n'
+            '[->      b : ""[->   ""\n'
+            '[->>     b : ""[->>  ""\n'
+            '[-\\      b : ""[-\\   ""\n'
+            '[-\\\\     b : ""[-\\\\\\\\""\n'
+            '[-/      b : ""[-/   ""\n'
+            '[-//     b : ""[-//  ""\n'
+            '[->x     b : ""[->x  ""\n'
+            '[x->     b : ""[x->  ""\n'
+            '[o->     b : ""[o->  ""\n'
+            '[->o     b : ""[->o  ""\n'
+            '[o->o    b : ""[o->o ""\n'
+            '[<->     b : ""[<->  ""\n'
+            '[o<->o   b : ""[o<->o""\n'
+            '[x<->x   b : ""[x<->x""\n'
+            '[->>o    b : ""[->>o ""\n'
+            '[-\\o     b : ""[-\\o  ""\n'
+            '[-\\\\o    b : ""[-\\\\\\\\o""\n'
+            '[-/o     b : ""[-/o  ""\n'
+            '[-//o    b : ""[-//o ""\n'
+            '[x->o    b : ""[x->o ""\n'
+            '@enduml\n');
+        final ms = d.events.whereType<Message>().toList();
+        expect(ms, hasLength(20));
+        for (final m in ms) {
+          expect(m.fromExternal, MessageExternal.fromEdge,
+              reason: 'arrow with label ${m.label} should be fromEdge');
+          expect(m.toExternal, isNull);
+        }
+        expect(ms.where((m) => m.direction == MessageDirection.bidirectional),
+            isEmpty);
+        expect(d.participantsInOrder().map((p) => p.alias).toList(),
+            ['a', 'b']);
+      });
+    });
+
     group('notes', () {
       test('note left of', () {
         final d = parseSequence(
@@ -258,6 +1279,157 @@ void main() {
           throwsA(isA<ParserException>()),
         );
       });
+
+      test('note across / hnote across spans all declared participants', () {
+        // Verbatim source from the user-reported repro mixing the explicit
+        // `note over <first>, <last>` form with the `across` shorthand. The
+        // `across` notes should snapshot the participant set at parse time
+        // (Alice, Bob, Charlie) so layout treats them as over-multiple notes.
+        final d = parseSequence('@startuml\n'
+            'Alice->Bob:m1\n'
+            'Bob->Charlie:m2\n'
+            'note over Alice, Charlie: Old method for note over all part. with:\\n ""note over //FirstPart, LastPart//"".\n'
+            'note across: New method with:\\n""note across""\n'
+            'Bob->Alice\n'
+            'hnote across:Note across all part.\n'
+            '@enduml\n');
+        final notes = d.events.whereType<Note>().toList();
+        expect(notes, hasLength(3));
+
+        // 1) explicit `note over Alice, Charlie`
+        expect(notes[0].position, NotePosition.over);
+        expect(notes[0].participants, ['Alice', 'Charlie']);
+        expect(notes[0].shape, NoteShape.rectangle);
+
+        // 2) `note across` — span all participants declared so far
+        expect(notes[1].position, NotePosition.over);
+        expect(notes[1].participants, ['Alice', 'Bob', 'Charlie']);
+        expect(notes[1].shape, NoteShape.rectangle);
+
+        // 3) `hnote across` — same span, hexagon shape
+        expect(notes[2].position, NotePosition.over);
+        expect(notes[2].participants, ['Alice', 'Bob', 'Charlie']);
+        expect(notes[2].shape, NoteShape.hexagon);
+      });
+
+      test('hnote/rnote inline and multi-line forms with verbatim body', () {
+        // Verbatim source from the user-reported repro covering all four
+        // shape variants: inline hnote, multi-line rnote with body that
+        // literally contains `"r" as rectangle` / `"h" as hexagon`, and
+        // multi-line rnote/hnote with plain text bodies.
+        final d = parseSequence('@startuml\n'
+            'caller -> server : conReq\n'
+            'hnote over caller : idle\n'
+            'caller <- server : conConf\n'
+            'rnote over server "r" as rectangle\n'
+            '"h" as hexagon\n'
+            'endrnote\n'
+            'rnote over server\n'
+            'this is on several lines\n'
+            'endrnote\n'
+            'hnote over caller\n'
+            'this is on several lines\n'
+            'endhnote\n'
+            '@enduml\n');
+        final notes = d.events.whereType<Note>().toList();
+        expect(notes, hasLength(4));
+
+        // 1) inline hnote
+        expect(notes[0].position, NotePosition.over);
+        expect(notes[0].participants, ['caller']);
+        expect(notes[0].text, 'idle');
+        expect(notes[0].shape, NoteShape.hexagon);
+
+        // 2) multi-line rnote whose body text is literally the rest of the
+        //    header line plus the next line; lexer captures the full
+        //    trimmed line so the body should preserve the quoted tokens.
+        expect(notes[1].position, NotePosition.over);
+        expect(notes[1].participants, ['server']);
+        expect(notes[1].shape, NoteShape.rectangle);
+        expect(notes[1].text, '"r" as rectangle\n"h" as hexagon');
+
+        // 3) multi-line rnote, plain body
+        expect(notes[2].position, NotePosition.over);
+        expect(notes[2].participants, ['server']);
+        expect(notes[2].text, 'this is on several lines');
+        expect(notes[2].shape, NoteShape.rectangle);
+
+        // 4) multi-line hnote, plain body
+        expect(notes[3].position, NotePosition.over);
+        expect(notes[3].participants, ['caller']);
+        expect(notes[3].text, 'this is on several lines');
+        expect(notes[3].shape, NoteShape.hexagon);
+      });
+
+      test('standalone slash between notes parses as sync marker', () {
+        // PlantUML's `/` line is a sync directive that aligns the next event
+        // with the previous one at the same Y. Visual alignment is currently
+        // deferred — the goal here is that the source parses without error
+        // and the `/` produces no event (notes still appear in the AST).
+        final d = parseSequence('@startuml\n'
+            'note over Alice : initial state of Alice\n'
+            '/\n'
+            'note over Bob : initial state of Bob\n'
+            'Bob -> Alice : hello\n'
+            '@enduml\n');
+        final notes = d.events.whereType<Note>().toList();
+        expect(notes, hasLength(2));
+        expect(notes[0].participants, ['Alice']);
+        expect(notes[0].text, 'initial state of Alice');
+        expect(notes[1].participants, ['Bob']);
+        expect(notes[1].text, 'initial state of Bob');
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(1));
+        expect(messages.single.from, 'Bob');
+        expect(messages.single.to, 'Alice');
+      });
+
+      test('standalone & between messages parses as sync marker', () {
+        // PlantUML teoz `&` on its own line aligns the next event with the
+        // previous one at the same Y. Visual alignment is currently deferred —
+        // the goal here is that the source parses without error and the `&`
+        // produces no event (messages still appear in the AST).
+        final d = parseSequence('@startuml\n'
+            '!pragma teoz true\n'
+            'Alice -> Bob : hello\n'
+            '&\n'
+            'Bob -> Charlie : hi\n'
+            '@enduml\n');
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(2));
+        expect(messages[0].from, 'Alice');
+        expect(messages[0].to, 'Bob');
+        expect(messages[1].from, 'Bob');
+        expect(messages[1].to, 'Charlie');
+      });
+
+      test('standalone & with note left/right shorthand', () {
+        // Covers two PlantUML teoz features together:
+        //  * standalone `&` line preceding a message OR a note as a sync mark
+        //  * `note left/right <Id>` (no `of`) shorthand for the target
+        //    participant.
+        final d = parseSequence('@startuml\n'
+            '!pragma teoz true\n'
+            'S1 ->(30) S2: msg 1\\n\n'
+            '&\n'
+            'S2 ->(30) S1: msg 2\n'
+            'note left S1: msg\\nS2 to S1\n'
+            '&\n'
+            'note right S2: msg\\nS1 to S2\n'
+            '@enduml\n');
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(2));
+        expect(messages[0].from, 'S1');
+        expect(messages[0].to, 'S2');
+        expect(messages[1].from, 'S2');
+        expect(messages[1].to, 'S1');
+        final notes = d.events.whereType<Note>().toList();
+        expect(notes, hasLength(2));
+        expect(notes[0].position, NotePosition.leftOf);
+        expect(notes[0].participants, ['S1']);
+        expect(notes[1].position, NotePosition.rightOf);
+        expect(notes[1].participants, ['S2']);
+      });
     });
 
     group('ref over', () {
@@ -284,6 +1456,26 @@ void main() {
           () => parseSequence('@startuml\nref X : foo\n@enduml\n'),
           throwsA(isA<ParserException>()),
         );
+      });
+
+      test('multi-line ref over block with end ref', () {
+        final d = parseSequence(
+          '@startuml\n'
+          'participant Alice\n'
+          'actor Bob\n'
+          'ref over Alice, Bob : init\n'
+          'Alice -> Bob : hello\n'
+          'ref over Bob\n'
+          'This can be on several lines\n'
+          'end ref\n'
+          '@enduml\n',
+        );
+        final refs = d.events.whereType<RefBox>().toList();
+        expect(refs, hasLength(2));
+        expect(refs[0].participants, ['Alice', 'Bob']);
+        expect(refs[0].text, 'init');
+        expect(refs[1].participants, ['Bob']);
+        expect(refs[1].text, 'This can be on several lines');
       });
     });
 
@@ -356,6 +1548,446 @@ void main() {
           throwsA(isA<ParserException>()),
         );
       });
+
+      test('chained "--++" deactivates source then activates target', () {
+        // Verbatim source from the bug report: extra whitespace between
+        // tokens, plus a chained `--++` suffix. The full event stream must
+        // be Message(alice->bob) + Activate(bob),
+        //    Message(bob->charlie) + Deactivate(bob) + Activate(charlie),
+        //    Message(charlie-->alice dashed) + Deactivate(charlie).
+        final d = parseSequence('@startuml\n'
+            'alice   ->  bob     ++   : hello1\n'
+            'bob     ->  charlie --++ : hello2\n'
+            'charlie --> alice   --   : ok\n'
+            '@enduml\n');
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(3));
+        // Third message must remain a dashed forward arrow (NOT a return).
+        expect(messages[2].from, 'charlie');
+        expect(messages[2].to, 'alice');
+        expect(messages[2].lineStyle, LineStyle.dashed);
+        expect(messages[2].direction, MessageDirection.forward);
+
+        // Full event sequence including secondary events.
+        final kinds = d.events.map((e) => e.runtimeType.toString()).toList();
+        expect(kinds, [
+          'Message',     // alice -> bob ++
+          'Activate',    //   -> Activate(bob)
+          'Message',     // bob -> charlie --++
+          'Deactivate',  //   -> Deactivate(bob)
+          'Activate',    //   -> Activate(charlie)
+          'Message',     // charlie --> alice --
+          'Deactivate',  //   -> Deactivate(charlie)
+        ]);
+        final acts = d.events.whereType<Activate>().toList();
+        expect(acts.map((a) => a.participant).toList(), ['bob', 'charlie']);
+        final deacts = d.events.whereType<Deactivate>().toList();
+        expect(deacts.map((d) => d.participant).toList(),
+            ['bob', 'charlie']);
+        // The chained `--++` message records the target-side effect in the
+        // legacy single-slot field for backward compatibility.
+        expect(messages[1].activation, ActivationSuffix.activateTarget);
+      });
+
+      test('chained "++--" is accepted (reverse order)', () {
+        // Same combination as `--++` but written in the opposite order:
+        // target-activate first, then source-deactivate. Both effects must
+        // still apply.
+        final d = parseSequence('@startuml\n'
+            'A -> B ++-- : msg\n'
+            '@enduml\n');
+        final kinds = d.events.map((e) => e.runtimeType.toString()).toList();
+        // Emission order is fixed (Deactivate(source) before Activate(target))
+        // regardless of the textual order of the two suffixes.
+        expect(kinds, ['Message', 'Deactivate', 'Activate']);
+        expect(d.events.whereType<Deactivate>().single.participant, 'A');
+        expect(d.events.whereType<Activate>().single.participant, 'B');
+      });
+
+      test('"--++" pops the matching call-stack frame for the source', () {
+        // alice ++ pushes (alice,bob). The chained --++ on the next call
+        // deactivates bob (which must pop the (alice,bob) frame) and pushes
+        // (bob,charlie). A subsequent `return` must therefore unwind to bob,
+        // not to alice.
+        final d = parseSequence('@startuml\n'
+            'alice -> bob ++ : hello1\n'
+            'bob -> charlie --++ : hello2\n'
+            'return done\n'
+            '@enduml\n');
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(3));
+        final ret = messages.last;
+        expect(ret.direction, MessageDirection.backward);
+        expect(ret.from, 'charlie');
+        expect(ret.to, 'bob');
+        expect(ret.label, 'done');
+      });
+
+      test('duplicate "--" suffix is rejected', () {
+        expect(
+          () => parseSequence('@startuml\nA -> B -- --\n@enduml\n'),
+          throwsA(isA<ParserException>()),
+        );
+      });
+
+      test('conflicting "++" + "**" suffix is rejected', () {
+        expect(
+          () => parseSequence('@startuml\nA -> B ++ **\n@enduml\n'),
+          throwsA(isA<ParserException>()),
+        );
+      });
+    });
+
+    group('autoactivate', () {
+      test('autoactivate off (default) leaves return tied to last forward', () {
+        final d = parseSequence('@startuml\n'
+            'A -> B : call\n'
+            'return ok\n'
+            '@enduml\n');
+        expect(d.autoactivate, isFalse);
+        // No implicit Activate emitted.
+        expect(d.events.whereType<Activate>(), isEmpty);
+        // Single explicit return -> reverse message + Deactivate(B).
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(2));
+        expect(messages[1].from, 'B');
+        expect(messages[1].to, 'A');
+        expect(messages[1].direction, MessageDirection.backward);
+      });
+
+      test('autoactivate on sets the flag and emits implicit Activate', () {
+        final d = parseSequence('@startuml\n'
+            'autoactivate on\n'
+            'A -> B : hello\n'
+            '@enduml\n');
+        expect(d.autoactivate, isTrue);
+        final acts = d.events.whereType<Activate>().toList();
+        expect(acts, hasLength(1));
+        expect(acts.single.participant, 'B');
+      });
+
+      test('return unwinds the call stack to the original caller', () {
+        final d = parseSequence('@startuml\n'
+            'autoactivate on\n'
+            'alice -> bob : hello\n'
+            'bob -> bob : self call\n'
+            'bill -> bob #005500 : hello from thread 2\n'
+            'bob -> george ** : create\n'
+            'return done in thread 2\n'
+            'return rc\n'
+            'bob -> george !! : delete\n'
+            'return success\n'
+            '@enduml\n');
+        expect(d.autoactivate, isTrue);
+        final messages = d.events.whereType<Message>().toList();
+        // 4 forward calls + 3 returns + 1 destroy call = 8 messages.
+        expect(messages, hasLength(8));
+        // The three returns must close the stack in LIFO order, ignoring
+        // self-calls (which don't push) and destroy-calls (which don't push).
+        final returns = messages.where((m) => m.lineStyle == LineStyle.dashed).toList();
+        expect(returns, hasLength(3));
+        expect(returns[0].from, 'george');
+        expect(returns[0].to, 'bob');
+        expect(returns[0].label, 'done in thread 2');
+        expect(returns[1].from, 'bob');
+        expect(returns[1].to, 'bill');
+        expect(returns[1].label, 'rc');
+        // After the destroy, the only remaining frame is (alice, bob), so
+        // `return success` must travel back to alice.
+        expect(returns[2].from, 'bob');
+        expect(returns[2].to, 'alice');
+        expect(returns[2].label, 'success');
+      });
+
+      test('autoactivate carries the per-message color into Activate', () {
+        final d = parseSequence('@startuml\n'
+            'autoactivate on\n'
+            'bill -> bob #005500 : hi\n'
+            '@enduml\n');
+        final act = d.events.whereType<Activate>().single;
+        expect(act.participant, 'bob');
+        expect(act.color, const Color(0xFF005500));
+      });
+
+      test('autoactivate skips push and implicit activate for self calls', () {
+        final d = parseSequence('@startuml\n'
+            'autoactivate on\n'
+            'A -> A : self\n'
+            'return done\n'
+            '@enduml\n');
+        // Self-call neither pushes a stack frame nor emits an implicit
+        // Activate, so the `return` should fall back to the last-forward
+        // heuristic and produce a reverse self-message (A -> A backward).
+        expect(d.events.whereType<Activate>(), isEmpty);
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(2));
+        expect(messages[1].direction, MessageDirection.backward);
+        expect(messages[1].from, 'A');
+        expect(messages[1].to, 'A');
+      });
+
+      test('autoactivate off disables implicit activation', () {
+        final d = parseSequence('@startuml\n'
+            'autoactivate on\n'
+            'A -> B : on\n'
+            'autoactivate off\n'
+            'A -> B : off\n'
+            '@enduml\n');
+        // Only the first forward call should produce an implicit Activate.
+        final acts = d.events.whereType<Activate>().toList();
+        expect(acts, hasLength(1));
+        expect(acts.single.participant, 'B');
+        expect(d.autoactivate, isFalse);
+      });
+
+      test('explicit ++ pushes a call-stack frame so return unwinds it', () {
+        final d = parseSequence('@startuml\n'
+            'A -> B ++ : call\n'
+            'return ok\n'
+            '@enduml\n');
+        expect(d.autoactivate, isFalse);
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(2));
+        // The forward `++` push plus the matching return must aim at the
+        // ++ caller (A), not the legacy last-forward heuristic.
+        expect(messages[1].from, 'B');
+        expect(messages[1].to, 'A');
+        expect(messages[1].direction, MessageDirection.backward);
+        expect(messages[1].label, 'ok');
+        // Activate(B) from ++ then Deactivate(B) from return.
+        final acts = d.events.whereType<Activate>().toList();
+        expect(acts, hasLength(1));
+        expect(acts.single.participant, 'B');
+        final deacts = d.events.whereType<Deactivate>().toList();
+        expect(deacts, hasLength(1));
+        expect(deacts.single.participant, 'B');
+      });
+
+      test('explicit ++/**/!! with chained returns and color after suffix', () {
+        // Verbatim user source from the bug report. Covers:
+        //   - explicit ++ activation pushing onto the call stack while
+        //     autoactivate is off
+        //   - self-call under explicit ++ (still pushes — user opted in)
+        //   - double space between ++ and #005500 (lexer/parser tolerance)
+        //   - ** creates george and pushes a frame
+        //   - !! destroys george and does NOT push
+        //   - chained `return` unwinding the stack in LIFO order
+        final d = parseSequence('@startuml\n'
+            'alice -> bob ++ : hello\n'
+            'bob -> bob ++ : self call\n'
+            'bob -> bib ++  #005500 : hello\n'
+            'bob -> george ** : create\n'
+            'return done\n'
+            'return rc\n'
+            'bob -> george !! : delete\n'
+            'return success\n'
+            '@enduml\n');
+        expect(d.autoactivate, isFalse);
+        // Four forward calls (++,++,++,**) + three returns + one !! call
+        // = 8 messages total.
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(8));
+        // The double space + color-after-suffix line must keep the color.
+        expect(messages[2].from, 'bob');
+        expect(messages[2].to, 'bib');
+        expect(messages[2].color, const Color(0xFF005500));
+        expect(messages[2].activation, ActivationSuffix.activateTarget);
+        // The three `return`s should unwind in LIFO order:
+        //   stack just before first return: (alice,bob),(bob,bob),(bob,bib),(bob,george)
+        //   return done  → pops (bob, george) -> george → bob
+        //   return rc    → pops (bob, bib)    -> bib    → bob
+        //   then `bob -> george !!`           — does NOT push
+        //   return success → pops (bob, bob)  -> bob    → bob (self return)
+        final returns =
+            messages.where((m) => m.direction == MessageDirection.backward).toList();
+        expect(returns, hasLength(3));
+        expect(returns[0].from, 'george');
+        expect(returns[0].to, 'bob');
+        expect(returns[0].label, 'done');
+        expect(returns[1].from, 'bib');
+        expect(returns[1].to, 'bob');
+        expect(returns[1].label, 'rc');
+        expect(returns[2].from, 'bob');
+        expect(returns[2].to, 'bob');
+        expect(returns[2].label, 'success');
+        // !! emits Destroy(george).
+        expect(d.events.whereType<Destroy>().single.participant, 'george');
+        // ** emits Create(george).
+        expect(d.events.whereType<Create>().single.participant, 'george');
+        // Explicit ++ on three non-self calls (bob, bib) plus the self call
+        // emit Activate events. ** does NOT add an implicit Activate when
+        // autoactivate is off.
+        final acts = d.events.whereType<Activate>().toList();
+        // ++ on bob (from alice), ++ on bob (from bob self), ++ on bib.
+        expect(acts.map((a) => a.participant).toList(), ['bob', 'bob', 'bib']);
+        // The bib activation carries the #005500 color through.
+        expect(acts[2].color, const Color(0xFF005500));
+      });
+    });
+
+    group('hide unlinked', () {
+      test('default is false', () {
+        final d = parseSequence('@startuml\n'
+            'participant Alice\n'
+            'participant Bob\n'
+            'Alice -> Bob : hi\n'
+            '@enduml\n');
+        expect(d.hideUnlinked, isFalse);
+      });
+
+      test('hide unlinked sets the flag', () {
+        final d = parseSequence('@startuml\n'
+            'hide unlinked\n'
+            'participant Alice\n'
+            'participant Bob\n'
+            'participant Carol\n'
+            'Alice -> Bob : hello\n'
+            '@enduml\n');
+        expect(d.hideUnlinked, isTrue);
+        // Carol is still parsed as a declared participant — the filter is
+        // applied at render time, not by mutating the AST.
+        expect(d.participants.map((p) => p.alias).toList(),
+            ['Alice', 'Bob', 'Carol']);
+      });
+
+      test('hide unlinked is order-independent (after participants)', () {
+        final d = parseSequence('@startuml\n'
+            'participant Alice\n'
+            'participant Bob\n'
+            'participant Carol\n'
+            'Alice -> Bob : hello\n'
+            'hide unlinked\n'
+            '@enduml\n');
+        expect(d.hideUnlinked, isTrue);
+      });
+
+      test('other hide variants do not set hideUnlinked', () {
+        final d = parseSequence('@startuml\n'
+            'hide footbox\n'
+            'Alice -> Bob : hi\n'
+            '@enduml\n');
+        expect(d.hideUnlinked, isFalse);
+      });
+
+      test('linkedAliases includes only Message endpoints', () {
+        final d = parseSequence('@startuml\n'
+            'hide unlinked\n'
+            'participant Alice\n'
+            'participant Bob\n'
+            'participant Carol\n'
+            'activate Carol\n'
+            'Alice -> Bob : hello\n'
+            'deactivate Carol\n'
+            '@enduml\n');
+        // Carol is referenced only by activate/deactivate, so she's NOT
+        // linked. This is the strict interpretation called out in the spec.
+        expect(d.linkedAliases(), {'Alice', 'Bob'});
+      });
+
+      test('create syntax (**) links the created participant', () {
+        // Per spec: a participant created via `**` IS linked because the
+        // create message references it as a target.
+        final d = parseSequence('@startuml\n'
+            'hide unlinked\n'
+            'Alice -> Bob ** : new\n'
+            '@enduml\n');
+        expect(d.linkedAliases(), containsAll(['Alice', 'Bob']));
+      });
+
+      test('linkedAliases recurses into group branches', () {
+        final d = parseSequence('@startuml\n'
+            'hide unlinked\n'
+            'alt happy\n'
+            'Alice -> Bob : ok\n'
+            'else sad\n'
+            'Alice -> Carol : err\n'
+            'end\n'
+            '@enduml\n');
+        expect(d.linkedAliases(), {'Alice', 'Bob', 'Carol'});
+      });
+    });
+
+    group('mainframe directive', () {
+      test('captures the rest-of-line label verbatim incl. inline markup', () {
+        final d = parseSequence('@startuml\n'
+            'mainframe This is a **mainframe**\n'
+            'Alice->Bob : Hello\n'
+            '@enduml\n');
+        // The lexer captures the post-keyword remainder as a single text
+        // token so `**bold**` markers reach layout intact; layout then runs
+        // it through parseInlineMarkup so "mainframe" inside `**...**`
+        // renders bold.
+        expect(d.mainframeLabel, 'This is a **mainframe**');
+        // Sanity: the rest of the diagram still parses.
+        final m = d.events.whereType<Message>().single;
+        expect(m.from, 'Alice');
+        expect(m.to, 'Bob');
+        expect(m.label, 'Hello');
+      });
+
+      test('defaults to null when no mainframe directive is present', () {
+        final d = parseSequence('@startuml\n'
+            'Alice -> Bob : hi\n'
+            '@enduml\n');
+        expect(d.mainframeLabel, isNull);
+      });
+
+      test('bare `mainframe` (no label) sets an empty string label', () {
+        // PlantUML accepts a bare `mainframe` line; layout still draws the
+        // wrapping frame, just with no tab text.
+        final d = parseSequence('@startuml\n'
+            'mainframe\n'
+            'Alice -> Bob : hi\n'
+            '@enduml\n');
+        expect(d.mainframeLabel, '');
+      });
+
+      test('label with bold span is parseable as inline markup', () {
+        // Verify the captured label, when fed through parseInlineMarkup,
+        // yields a bold subtree whose flattened text contains "mainframe".
+        // The bold style is on the parent TextSpan; the literal word lives
+        // in its child (text: 'mainframe'), so flatten before matching.
+        final d = parseSequence('@startuml\n'
+            'mainframe This is a **mainframe**\n'
+            'Alice->Bob : Hi\n'
+            '@enduml\n');
+        final span = parseInlineMarkup(
+            d.mainframeLabel!, const TextStyle(fontSize: 12));
+        String flatten(InlineSpan s) {
+          final buf = StringBuffer();
+          if (s is TextSpan) {
+            if (s.text != null) buf.write(s.text);
+            final children = s.children;
+            if (children != null) {
+              for (final c in children) {
+                buf.write(flatten(c));
+              }
+            }
+          }
+          return buf.toString();
+        }
+
+        var sawBoldMainframe = false;
+        void visit(InlineSpan s) {
+          if (s is TextSpan) {
+            final w = s.style?.fontWeight;
+            if ((w == FontWeight.bold || w == FontWeight.w700) &&
+                flatten(s).contains('mainframe')) {
+              sawBoldMainframe = true;
+            }
+            final children = s.children;
+            if (children != null) {
+              for (final c in children) {
+                visit(c);
+              }
+            }
+          }
+        }
+
+        visit(span);
+        expect(sawBoldMainframe, isTrue,
+            reason: 'expected a bold span containing "mainframe"');
+      });
     });
 
     group('groups', () {
@@ -414,6 +2046,41 @@ void main() {
         final innerLoop = outer.branches[0].events.whereType<Group>().single;
         expect(innerLoop.kind, GroupKind.loop);
         expect(innerLoop.branches.single.label, '3 times');
+      });
+
+      test('alt with tab and body colors strips color codes from labels', () {
+        final d = parseSequence('@startuml\n'
+            'Alice -> Bob: Authentication Request\n'
+            'alt#Gold #LightBlue Successful case\n'
+            '    Bob -> Alice: Authentication Accepted\n'
+            'else #Pink Failure\n'
+            '    Bob -> Alice: Authentication Rejected\n'
+            'end\n'
+            '@enduml\n');
+        final g = d.events.whereType<Group>().single;
+        expect(g.kind, GroupKind.alt);
+        expect(g.tabColor, const Color(0xFFFFD700));
+        expect(g.branches, hasLength(2));
+        expect(g.branches[0].label, 'Successful case');
+        expect(g.branches[0].bodyColor, const Color(0xFFADD8E6));
+        expect(g.branches[1].label, 'Failure');
+        expect(g.branches[1].bodyColor, const Color(0xFFFFC0CB));
+      });
+
+      test('uncolored alt/else leaves tabColor and bodyColor null', () {
+        final d = parseSequence('@startuml\n'
+            'alt happy path\n'
+            'A -> B : ok\n'
+            'else error\n'
+            'A -> B : fail\n'
+            'end\n'
+            '@enduml\n');
+        final g = d.events.whereType<Group>().single;
+        expect(g.tabColor, isNull);
+        expect(g.branches[0].bodyColor, isNull);
+        expect(g.branches[1].bodyColor, isNull);
+        expect(g.branches[0].label, 'happy path');
+        expect(g.branches[1].label, 'error');
       });
     });
 
@@ -650,17 +2317,119 @@ void main() {
         expect(d.boxOf('Unknown'), isNull);
       });
 
-      test('nested box throws ParserException', () {
-        expect(
-          () => parseSequence('@startuml\n'
-              'box "Outer"\n'
-              'box "Inner"\n'
-              'participant A\n'
-              'end box\n'
-              'end box\n'
-              '@enduml\n'),
-          throwsA(isA<ParserException>()),
-        );
+      test('nested box is parsed with children', () {
+        final d = parseSequence('@startuml\n'
+            'box "Outer"\n'
+            'box "Inner"\n'
+            'participant A\n'
+            'end box\n'
+            'end box\n'
+            '@enduml\n');
+        expect(d.boxes, hasLength(1));
+        final outer = d.boxes.single;
+        expect(outer.label, 'Outer');
+        expect(outer.participants, isEmpty);
+        expect(outer.children, hasLength(1));
+        final inner = outer.children.single;
+        expect(inner.label, 'Inner');
+        expect(inner.participants.map((p) => p.alias).toList(), ['A']);
+        // Inner participants are still surfaced at the top level so that
+        // participantsInOrder() and message resolution see them.
+        expect(d.participants.map((p) => p.alias).toList(), ['A']);
+        expect(d.boxOf('A')!.label, 'Inner');
+      });
+
+      test('nested box keeps outer direct participants', () {
+        final d = parseSequence('@startuml\n'
+            'box "Outer" #LightBlue\n'
+            'participant Bob\n'
+            'box "Inner"\n'
+            'participant Alice\n'
+            'participant John\n'
+            'end box\n'
+            'end box\n'
+            'participant Other\n'
+            '@enduml\n');
+        expect(d.participants.map((p) => p.alias).toList(),
+            ['Bob', 'Alice', 'John', 'Other']);
+        final outer = d.boxes.single;
+        expect(outer.label, 'Outer');
+        expect(outer.color, const Color(0xFFADD8E6));
+        expect(outer.participants.map((p) => p.alias).toList(), ['Bob']);
+        expect(outer.children, hasLength(1));
+        final inner = outer.children.single;
+        expect(inner.label, 'Inner');
+        expect(inner.color, isNull);
+        expect(inner.participants.map((p) => p.alias).toList(),
+            ['Alice', 'John']);
+        // Both inner participants and inner box should be enclosed by outer
+        // when iterating allParticipants().
+        expect(outer.allParticipants().map((p) => p.alias).toList(),
+            ['Bob', 'Alice', 'John']);
+      });
+
+      test('verbatim nested box with !pragma and #LightBlue', () {
+        final d = parseSequence('@startuml\n'
+            '\n'
+            '!pragma teoz true\n'
+            'box "Internal Service" #LightBlue\n'
+            'participant Bob\n'
+            'box "Subteam"\n'
+            'participant Alice\n'
+            'participant John\n'
+            'end box\n'
+            '\n'
+            'end box\n'
+            'participant Other\n'
+            '\n'
+            'Bob -> Alice : hello\n'
+            'Alice -> John : hello\n'
+            'John -> Other: Hello\n'
+            '\n'
+            '@enduml\n');
+        // Participant declaration order must remain Bob, Alice, John, Other.
+        expect(d.participants.map((p) => p.alias).toList(),
+            ['Bob', 'Alice', 'John', 'Other']);
+        // Same order should hold from participantsInOrder().
+        expect(d.participantsInOrder().map((p) => p.alias).toList(),
+            ['Bob', 'Alice', 'John', 'Other']);
+        expect(d.boxes, hasLength(1));
+        final outer = d.boxes.single;
+        expect(outer.label, 'Internal Service');
+        expect(outer.color, const Color(0xFFADD8E6));
+        expect(outer.participants.map((p) => p.alias).toList(), ['Bob']);
+        expect(outer.children, hasLength(1));
+        final inner = outer.children.single;
+        expect(inner.label, 'Subteam');
+        expect(inner.color, isNull);
+        expect(inner.participants.map((p) => p.alias).toList(),
+            ['Alice', 'John']);
+        // Messages: Bob->Alice, Alice->John, John->Other.
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(3));
+        expect(messages[0].from, 'Bob');
+        expect(messages[0].to, 'Alice');
+        expect(messages[1].from, 'Alice');
+        expect(messages[1].to, 'John');
+        expect(messages[2].from, 'John');
+        expect(messages[2].to, 'Other');
+      });
+
+      test('!pragma line is consumed silently and produces no events', () {
+        final d = parseSequence('@startuml\n'
+            '!pragma teoz true\n'
+            'A -> B : hi\n'
+            '@enduml\n');
+        expect(d.events.whereType<Message>(), hasLength(1));
+      });
+
+      test('#LightBlue resolves to the expected color', () {
+        final d = parseSequence('@startuml\n'
+            'box "L" #LightBlue\n'
+            'participant A\n'
+            'end box\n'
+            '@enduml\n');
+        expect(d.boxes.single.color, const Color(0xFFADD8E6));
       });
 
       test('message inside box throws ParserException', () {
@@ -735,6 +2504,62 @@ void main() {
         expect(d.participants.single.alias, 'S');
         expect(d.participants.single.displayName, 'Service');
       });
+
+      test('":Name:" implicit actor declaration derives alias from name', () {
+        final d = parseSequence('@startuml\n:First Actor:\n@enduml\n');
+        final p = d.participants.single;
+        expect(p.kind, ParticipantKind.actor);
+        expect(p.displayName, 'First Actor');
+        expect(p.alias, 'FirstActor');
+      });
+
+      test('":Name\\nLine: as Alias" keeps \\n as newline, uses explicit alias',
+          () {
+        final d = parseSequence(
+          '@startuml\n:Another\\nactor: as Man2\n@enduml\n',
+        );
+        final p = d.participants.single;
+        expect(p.kind, ParticipantKind.actor);
+        expect(p.displayName, 'Another\nactor');
+        expect(p.alias, 'Man2');
+      });
+
+      test('"actor :Name: as Alias" uses colon-wrapped display name', () {
+        final d = parseSequence(
+          '@startuml\nactor :Last actor: as Person1\n@enduml\n',
+        );
+        final p = d.participants.single;
+        expect(p.kind, ParticipantKind.actor);
+        expect(p.displayName, 'Last actor');
+        expect(p.alias, 'Person1');
+      });
+
+      test('plain "actor Name" still parses (regression)', () {
+        final d = parseSequence('@startuml\nactor Woman3\n@enduml\n');
+        final p = d.participants.single;
+        expect(p.kind, ParticipantKind.actor);
+        expect(p.alias, 'Woman3');
+        expect(p.displayName, isNull);
+      });
+
+      test('all four inline-actor forms in one diagram', () {
+        final d = parseSequence(
+          '@startuml\n'
+          ':First Actor:\n'
+          ':Another\\nactor: as Man2\n'
+          'actor Woman3\n'
+          'actor :Last actor: as Person1\n'
+          '@enduml\n',
+        );
+        expect(d.participants.map((p) => p.alias).toList(),
+            ['FirstActor', 'Man2', 'Woman3', 'Person1']);
+        expect(d.participants.every((p) => p.kind == ParticipantKind.actor),
+            isTrue);
+        expect(d.participants[0].displayName, 'First Actor');
+        expect(d.participants[1].displayName, 'Another\nactor');
+        expect(d.participants[2].displayName, isNull);
+        expect(d.participants[3].displayName, 'Last actor');
+      });
     });
 
     group('separators', () {
@@ -804,6 +2629,107 @@ void main() {
           SeparatorKind.skip,
           SeparatorKind.dash,
         ]);
+      });
+    });
+
+    group('style block', () {
+      // `<style>...</style>` is PlantUML's CSS-like skin override. We consume
+      // and ignore the entire block at the lexer level — style application is
+      // deferred — so the surrounding diagram still parses normally.
+      test('empty <style></style> block is skipped', () {
+        final d = parseSequence('@startuml\n'
+            '<style></style>\n'
+            'A -> B : hi\n'
+            '@enduml\n');
+        expect(d.events, hasLength(1));
+        final m = d.events.single as Message;
+        expect(m.from, 'A');
+        expect(m.to, 'B');
+        expect(m.label, 'hi');
+      });
+
+      test('multiline <style> block with CSS-like body is skipped', () {
+        final d = parseSequence('@startuml\n'
+            '<style>\n'
+            'lifeLine {\n'
+            '  LineStyle 0\n'
+            '}\n'
+            'delay {\n'
+            '  LineStyle 1-4\n'
+            '}\n'
+            '</style>\n'
+            'Alice -> Bob : hello\n'
+            'Alice <- Bob : hello\n'
+            '@enduml\n');
+        final msgs = d.events.whereType<Message>().toList();
+        expect(msgs, hasLength(2));
+        expect(msgs[0].from, 'Alice');
+        expect(msgs[0].to, 'Bob');
+        expect(msgs[0].direction, MessageDirection.forward);
+        expect(msgs[1].from, 'Alice');
+        expect(msgs[1].to, 'Bob');
+        expect(msgs[1].direction, MessageDirection.backward);
+      });
+
+      test('<style> block + ... delay marker (user repro)', () {
+        // Verbatim user source: the block both contains a `delay` selector and
+        // is followed by a `...` delay marker. Both must parse.
+        final d = parseSequence('@startuml\n'
+            '<style>\n'
+            'lifeLine {\n'
+            '  LineStyle 0\n'
+            '}\n'
+            'delay {\n'
+            '  LineStyle 1-4\n'
+            '}\n'
+            '</style>\n'
+            'Alice -> Bob : hello\n'
+            '...\n'
+            'Alice <- Bob : hello\n'
+            '@enduml\n');
+        final types = d.events.map((e) => e.runtimeType).toList();
+        expect(types, [Message, Separator, Message]);
+        final sep = d.events[1] as Separator;
+        expect(sep.kind, SeparatorKind.skip);
+      });
+
+      test('case-insensitive <STYLE> and </Style> tags', () {
+        final d = parseSequence('@startuml\n'
+            '<STYLE>\n'
+            'anything {\n'
+            '  foo bar\n'
+            '}\n'
+            '</Style>\n'
+            'A -> B\n'
+            '@enduml\n');
+        expect(d.events.single, isA<Message>());
+      });
+
+      test('unterminated <style> block throws LexerException', () {
+        expect(
+          () => Lexer().tokenize('@startuml\n<style>\nincomplete\n@enduml\n'),
+          throwsA(isA<LexerException>()),
+        );
+      });
+    });
+
+    group('delay marker (...)', () {
+      // `...` already lowers to `Separator(kind: SeparatorKind.skip)` in this
+      // engine — the AST/layout treat it as the visible delay break. These
+      // tests pin the lowering so future refactors don't regress it.
+      test('bare ... emits Separator(skip) with no label', () {
+        final d = parseSequence('@startuml\nA -> B\n...\nB -> A\n@enduml\n');
+        final sep = d.events.whereType<Separator>().single;
+        expect(sep.kind, SeparatorKind.skip);
+        expect(sep.label, isNull);
+      });
+
+      test('"... 5 minutes later ..." parses with label', () {
+        final d = parseSequence(
+            '@startuml\nA -> B\n... 5 minutes later ...\nB -> A\n@enduml\n');
+        final sep = d.events.whereType<Separator>().single;
+        expect(sep.kind, SeparatorKind.skip);
+        expect(sep.label, '5 minutes later');
       });
     });
 
@@ -1045,6 +2971,37 @@ void main() {
         expect(d.decorations.footer, isNull);
         expect(d.decorations.caption, isNull);
       });
+
+      test('title with inline markup and \\n escape', () {
+        final d = parseSequence('@startuml\n'
+            'title __Simple__ communication example\\non several lines\n'
+            'Alice -> Bob: Authentication Request\n'
+            'Bob -> Alice: Authentication Response\n'
+            '@enduml\n');
+        // Inline markup is preserved verbatim for the renderer to consume,
+        // and `\n` is normalized to a real newline so the title spans 2 lines.
+        expect(d.decorations.title,
+            '__Simple__ communication example\non several lines');
+      });
+
+      test('multi-line title block with inline HTML tags', () {
+        // Regression test: the block form `title ... end title` must capture
+        // body lines verbatim, including inline HTML markup like <u>, <i>,
+        // <font color=red>, and <img:...>, without the lexer trying to
+        // interpret `<...>` as arrows/generics/stereotypes.
+        final d = parseSequence('@startuml\n'
+            'title <u>Simple</u> communication example on <i>several</i> lines and using <font color=red>html</font>\n'
+            'This is hosted by <img:sourceforge.jpg>\n'
+            'end title\n'
+            'Alice -> Bob: Authentication Request\n'
+            'Bob -> Alice: Authentication Response\n'
+            '@enduml\n');
+        expect(
+          d.decorations.title,
+          '<u>Simple</u> communication example on <i>several</i> lines and using <font color=red>html</font>\n'
+          'This is hosted by <img:sourceforge.jpg>',
+        );
+      });
     });
 
     group('newpage', () {
@@ -1082,6 +3039,56 @@ void main() {
         expect(pages, hasLength(2));
         expect(pages[0].title, isNull);
         expect(pages[1].title, 'Page Three');
+      });
+
+      test('edge endpoint with cap decorations and reverse arrows', () {
+        // Sequence 89 case 53: every supported edge + cap + direction combo.
+        // Failure mode before the fix: `Bob <-]` and `Bob x<-]` left the
+        // trailing `]` un-consumed by the lexer's `<-` body branch.
+        final d = parseSequence('@startuml\n'
+            'participant Alice\n'
+            'participant Bob #lightblue\n'
+            'Alice -> Bob\n'
+            'Bob -> Carol\n'
+            '...\n'
+            '[-> Bob\n'
+            '[o-> Bob\n'
+            '[o->o Bob\n'
+            '[x-> Bob\n'
+            '...\n'
+            '[<- Bob\n'
+            '[x<- Bob\n'
+            '...\n'
+            'Bob ->]\n'
+            'Bob ->o]\n'
+            'Bob o->o]\n'
+            'Bob ->x]\n'
+            '...\n'
+            'Bob <-]\n'
+            'Bob x<-]\n'
+            '@enduml\n');
+        // Every message line must parse — count Messages (separators
+        // contribute the `...` markers but are not Messages).
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages.length, greaterThanOrEqualTo(14));
+      });
+
+      test('"ignore newpage" suppresses subsequent newpage events', () {
+        final d = parseSequence('@startuml\n'
+            'ignore newpage\n'
+            'Alice -> Bob : message 1\n'
+            'Alice -> Bob : message 2\n'
+            'newpage\n'
+            'Alice -> Bob : message 3\n'
+            'Alice -> Bob : message 4\n'
+            'newpage A title for the\\nlast page\n'
+            'Alice -> Bob : message 5\n'
+            'Alice -> Bob : message 6\n'
+            '@enduml\n');
+        final pages = d.events.whereType<NewPage>().toList();
+        expect(pages, isEmpty);
+        final messages = d.events.whereType<Message>().toList();
+        expect(messages, hasLength(6));
       });
     });
 
@@ -1569,6 +3576,300 @@ void main() {
       expect(r.to, 'OrderRepository');
       expect(r.kind, RelationshipKind.realization);
     });
+
+    test('accepts extensive element-type matrix (source 31)', () {
+      final d = parseClass('@startuml\n'
+          'hide empty members\n'
+          'abstract abstract\n'
+          'abstract class "abstract class"\n'
+          'annotation annotation\n'
+          'circle circle ()\n'
+          'circle_short_form\n'
+          'class class\n'
+          'class class_stereo <<stereotype>>\n'
+          'dataclass dataclass\n'
+          'diamond diamond <>\n'
+          'diamond_short_form\n'
+          'entity entity\n'
+          'enum enum\n'
+          'exception exception\n'
+          'interface interface\n'
+          'metaclass metaclass\n'
+          'protocol protocol\n'
+          'record record\n'
+          'stereotype stereotype\n'
+          'struct struct\n'
+          '@enduml\n');
+      expect(d.classes.length, greaterThanOrEqualTo(15));
+    });
+
+    test('accepts label text containing < and > (source 32)', () {
+      final d = parseClass('@startuml\n'
+          'class Car\n'
+          'Driver - Car : drives >\n'
+          'Car *- Wheel : have 4 >\n'
+          'Car -- Person : < owns\n'
+          '@enduml\n');
+      expect(d.relationships, hasLength(3));
+      // All labels are preserved (or at least the rels parse).
+      expect(d.classes.map((c) => c.name),
+          containsAll(['Car', 'Driver', 'Wheel', 'Person']));
+    });
+
+    test('accepts `class X as "alias"` quoted alias forms (source 33)', () {
+      final d = parseClass('@startuml\n'
+          'class "This is my class" as class1\n'
+          'class class2 as "It works this way too"\n'
+          'class2 *-- "foo/dummy" : use\n'
+          '@enduml\n');
+      expect(d.classes.length, greaterThanOrEqualTo(2));
+      expect(d.relationships, hasLength(1));
+      final r = d.relationships.single;
+      expect(r.kind, RelationshipKind.composition);
+      expect(r.label, 'use');
+    });
+
+    test('accepts `\$`-prefixed names and `remove` directive (source 34)', () {
+      final d = parseClass('@startuml\n'
+          'class \$C1\n'
+          'class \$C2\n'
+          '\$C2 class "\$C2" as dollarC2\n'
+          'remove \$C1\n'
+          'remove \$C2\n'
+          'remove dollarC2\n'
+          '@enduml\n');
+      expect(d.classes.map((c) => c.name), containsAll([r'$C1', r'$C2']));
+    });
+
+    test('accepts inline `ClassName : member` declarations (source 35)', () {
+      final d = parseClass('@startuml\n'
+          'Object <|-- ArrayList\n'
+          'Object : equals()\n'
+          'ArrayList : Object[] elementData\n'
+          'ArrayList : size()\n'
+          '@enduml\n');
+      expect(d.classes.map((c) => c.name),
+          containsAll(['Object', 'ArrayList']));
+      expect(d.relationships, hasLength(1));
+    });
+
+    test('accepts visibility prefix on class keyword (source 36)', () {
+      final d = parseClass('@startuml\n'
+          '-class "private Class" { }\n'
+          '#class "protected Class" { }\n'
+          '~class "package private Class" { }\n'
+          '+class "public Class" { }\n'
+          '@enduml\n');
+      expect(d.classes, hasLength(4));
+    });
+
+    test('accepts notes (stereotype + attachments) (source 37)', () {
+      final d = parseClass('@startuml\n'
+          'class Foo << General >>\n'
+          'Foo .. N1 : link\n'
+          'note left: simple note\n'
+          'note top of Foo : top note\n'
+          'note "freenote" as N1\n'
+          '@enduml\n');
+      expect(d.classes.any((c) => c.name == 'Foo'), isTrue);
+    });
+
+    test('accepts multi-line notes with HTML (source 38)', () {
+      final d = parseClass('@startuml\n'
+          'class Foo\n'
+          'note top of Foo\n'
+          '  A <b>note</b>\n'
+          '  on Foo\n'
+          'end note\n'
+          'note as N1\n'
+          '  <b>free</b> note\n'
+          'end note\n'
+          '@enduml\n');
+      expect(d.classes.any((c) => c.name == 'Foo'), isTrue);
+    });
+
+    test('accepts class notes with punctuation in multi-line bodies', () {
+      // Regression: multi-line note bodies for `note top of <id>` and
+      // `note as <id>` must be captured as raw text by the lexer; previously
+      // the lexer only entered note-body mode for sequence-diagram forms
+      // (`note over X`, `note left/right of X`), so a `.` inside the body
+      // raised a LexerException at `one.` on line 6.
+      final d = parseClass('@startuml\n'
+          'class Foo\n'
+          'note left: On last defined class\n'
+          'note top of Foo\n'
+          '  In java, <size:18>every</size> <u>class</u>\n'
+          '  <b>extends</b> <i>this</i> one.\n'
+          'end note\n'
+          'note as N1\n'
+          '  This note is <u>also</u> <b><color:royalBlue>on\n'
+          '  several</color> <s>words</s> lines\n'
+          '  And this is hosted by <img:https://plantuml.com/sourceforge.jpg>\n'
+          'end note\n'
+          '@enduml\n');
+      expect(d.classes.any((c) => c.name == 'Foo'), isTrue);
+      // The verbatim sample contains three notes: one inline `note left:`,
+      // one multi-line `note top of Foo`, and one free-standing
+      // `note as N1`. The target-less `note left:` form is consumed
+      // gracefully without producing a FreeNote, so we assert the two
+      // multi-line notes are captured here.
+      expect(d.freeNotes, hasLength(2));
+      expect(
+          d.freeNotes.any(
+              (n) => n.alias == 'N1' && n.text.contains('several')),
+          isTrue);
+      expect(
+          d.freeNotes.any((n) =>
+              n.attachedTo == 'Foo' &&
+              n.text.contains('extends') &&
+              n.text.contains('one.')),
+          isTrue);
+    });
+
+    test('accepts notes attached to members (source 39)', () {
+      final d = parseClass('@startuml\n'
+          'class A {\n'
+          '  {static} int counter\n'
+          '  +void {abstract} start(int timeout)\n'
+          '}\n'
+          'note right of A::counter : a note for counter\n'
+          'note right of A::start : a note for start\n'
+          '@enduml\n');
+      expect(d.classes.any((c) => c.name == 'A'), isTrue);
+    });
+
+    test('accepts notes on quoted member signature (source 40)', () {
+      final d = parseClass('@startuml\n'
+          'class A {\n'
+          '  +void start(int timeoutms)\n'
+          '}\n'
+          'note right of A::"start(int timeoutms)" : a note\n'
+          '@enduml\n');
+      expect(d.classes.any((c) => c.name == 'A'), isTrue);
+    });
+
+    test('accepts notes on links (source 41)', () {
+      // Notes on links (`note on link …`, `note right on link …`) are
+      // consumed gracefully so the surrounding diagram parses without error.
+      // Visual rendering of the note-on-link attachment is deferred — we
+      // only assert the diagram parses with at least the first relationship.
+      final d = parseClass('@startuml\n'
+          'class Dummy\n'
+          'Dummy --> Foo : A link\n'
+          'note on link #red: note that is red\n'
+          'Dummy --> Foo2 : Another link\n'
+          'note right on link #blue\n'
+          '  this is my note on right link and in blue\n'
+          'end note\n'
+          '@enduml\n');
+      expect(d.relationships.length, greaterThanOrEqualTo(1));
+    });
+
+    test('accepts hide/show member control (source 42)', () {
+      final d = parseClass('@startuml\n'
+          'class Dummy1 { +myMethods() }\n'
+          'class Dummy2 { +hiddenMethod() }\n'
+          'class Dummy3 <<Serializable>> { String name }\n'
+          'hide members\n'
+          'hide <<Serializable>> circle\n'
+          'show Dummy1 methods\n'
+          'show <<Serializable>> fields\n'
+          '@enduml\n');
+      expect(d.classes, hasLength(3));
+    });
+
+    test('accepts `remove X` directive (source 43)', () {
+      final d = parseClass('@startuml\n'
+          'class Foo1\n'
+          'class Foo2\n'
+          'Foo2 *-- Foo1\n'
+          'remove Foo2\n'
+          '@enduml\n');
+      expect(d.classes.map((c) => c.name), containsAll(['Foo1', 'Foo2']));
+      expect(d.relationships, hasLength(1));
+    });
+
+    test('accepts `\$tag` suffix on declarations (source 44)', () {
+      final d = parseClass('@startuml\n'
+          'class C1 \$tag13\n'
+          'enum E1\n'
+          'interface I1 \$tag13\n'
+          'C1 -- I1\n'
+          '@enduml\n');
+      expect(d.classes.map((c) => c.name),
+          containsAll(['C1', 'E1', 'I1']));
+      expect(d.relationships, hasLength(1));
+    });
+
+    test('accepts `hide \$tag` (source 45)', () {
+      final d = parseClass('@startuml\n'
+          'class C1 \$tag13\n'
+          'enum E1\n'
+          'interface I1 \$tag13\n'
+          'C1 -- I1\n'
+          'hide \$tag13\n'
+          '@enduml\n');
+      expect(d.classes.length, greaterThanOrEqualTo(3));
+    });
+
+    test('accepts `remove \$tag` (source 46)', () {
+      final d = parseClass('@startuml\n'
+          'class C1 \$tag13\n'
+          'enum E1\n'
+          'interface I1 \$tag13\n'
+          'C1 -- I1\n'
+          'remove \$tag13\n'
+          '@enduml\n');
+      expect(d.classes.length, greaterThanOrEqualTo(3));
+    });
+
+    test('accepts multi-`\$tag` suffix + `restore \$tag` (source 47)', () {
+      final d = parseClass('@startuml\n'
+          'class C1 \$tag13 \$tag1\n'
+          'enum E1\n'
+          'interface I1 \$tag13\n'
+          'C1 -- I1\n'
+          'remove \$tag13\n'
+          'restore \$tag1\n'
+          '@enduml\n');
+      expect(d.classes.length, greaterThanOrEqualTo(3));
+    });
+
+    test('accepts `remove *` wildcard selector (source 48)', () {
+      final d = parseClass('@startuml\n'
+          'class C1 \$tag13 \$tag1\n'
+          'enum E1\n'
+          'interface I1 \$tag13\n'
+          'C1 -- I1\n'
+          'remove *\n'
+          'restore \$tag1\n'
+          '@enduml\n');
+      expect(d.classes.length, greaterThanOrEqualTo(3));
+    });
+
+    test('accepts `hide @unlinked` selector (source 49)', () {
+      final d = parseClass('@startuml\n'
+          'class C1\n'
+          'class C2\n'
+          'class C3\n'
+          'C1 -- C2\n'
+          'hide @unlinked\n'
+          '@enduml\n');
+      expect(d.classes.map((c) => c.name),
+          containsAll(['C1', 'C2', 'C3']));
+    });
+
+    test('accepts `remove @unlinked` selector (source 50)', () {
+      final d = parseClass('@startuml\n'
+          'class C1\n'
+          'class C2\n'
+          'class C3\n'
+          'C1 -- C2\n'
+          'remove @unlinked\n'
+          '@enduml\n');
+      expect(d.classes.map((c) => c.name),
+          containsAll(['C1', 'C2', 'C3']));
+    });
   });
 
   group('object diagram', () {
@@ -1818,6 +4119,34 @@ void main() {
       expect(actor.kind, UseCaseNodeKind.actor);
     });
 
+    test('"newpage" is consumed as a no-op between relations', () {
+      // Use case diagrams don't render page breaks, but the keyword must
+      // still parse cleanly so that multi-page sources don't error. Both
+      // bare `newpage` and `newpage <title>` should be accepted.
+      final d = parseUseCase('@startuml\n'
+          ':actor1: --> (Usecase1)\n'
+          'newpage\n'
+          ':actor2: --> (Usecase2)\n'
+          'newpage Page Three\n'
+          ':actor3: --> (Usecase3)\n'
+          '@enduml\n');
+      expect(d.relations, hasLength(3));
+      expect(d.nodes.where((n) => n.kind == UseCaseNodeKind.actor),
+          hasLength(3));
+      expect(d.nodes.where((n) => n.kind == UseCaseNodeKind.useCase),
+          hasLength(3));
+    });
+
+    test('"ignore newpage" is consumed as a no-op', () {
+      final d = parseUseCase('@startuml\n'
+          'ignore newpage\n'
+          ':actor1: --> (Usecase1)\n'
+          'newpage\n'
+          ':actor2: --> (Usecase2)\n'
+          '@enduml\n');
+      expect(d.relations, hasLength(2));
+    });
+
     test('parses an actor with quoted name and alias', () {
       final d = parseUseCase('@startuml\n'
           'actor "Admin User" as Admin\n'
@@ -1843,6 +4172,80 @@ void main() {
       expect(n.alias, 'UC1');
       expect(n.label, 'Browse Products');
       expect(n.kind, UseCaseNodeKind.useCase);
+    });
+
+    test('parses mixed bare-paren and usecase-keyword declarations', () {
+      // Covers four declaration shapes in a single diagram:
+      //   1. `(Name)`                       — bare ellipse, alias=label
+      //   2. `(Name) as (Alias)`            — bare ellipse with paren alias
+      //   3. `usecase ID`                   — keyword + identifier
+      //   4. `usecase (Display\n...) as ID` — keyword + paren display + alias,
+      //      with an embedded `\n` escape converted to a literal newline.
+      final d = parseUseCase('@startuml\n'
+          '(First usecase)\n'
+          '(Another usecase) as (UC2)\n'
+          'usecase UC3\n'
+          'usecase (Last\\nusecase) as UC4\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(4));
+      expect(d.nodes[0].alias, 'First usecase');
+      expect(d.nodes[0].label, 'First usecase');
+      expect(d.nodes[0].kind, UseCaseNodeKind.useCase);
+      expect(d.nodes[1].alias, 'UC2');
+      expect(d.nodes[1].label, 'Another usecase');
+      expect(d.nodes[1].kind, UseCaseNodeKind.useCase);
+      expect(d.nodes[2].alias, 'UC3');
+      expect(d.nodes[2].label, 'UC3');
+      expect(d.nodes[2].kind, UseCaseNodeKind.useCase);
+      expect(d.nodes[3].alias, 'UC4');
+      expect(d.nodes[3].label, 'Last\nusecase');
+      expect(d.nodes[3].kind, UseCaseNodeKind.useCase);
+    });
+
+    test('consumes trailing "/" hidden-node marker on use case declarations',
+        () {
+      // PlantUML marks a node as "phantom"/hidden with a trailing `/` on the
+      // declaration. The marker may appear after every declaration shape:
+      //   1. `(Name)/`                            — bare ellipse + slash
+      //   2. `(Name)/ as (Alias)`                 — bare ellipse + slash + alias
+      //   3. `usecase/ ID`                        — keyword + slash + identifier
+      //   4. `usecase/ (Display\n...) as Alias`   — keyword + slash + paren
+      //                                              display + alias
+      // The slash is currently consumed as a no-op (visual hiding deferred);
+      // the four declarations must still produce four nodes.
+      final d = parseUseCase('@startuml\n'
+          '(First usecase)/\n'
+          '(Another usecase)/ as (UC2)\n'
+          'usecase/ UC3\n'
+          'usecase/ (Last\\nusecase) as UC4\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(4));
+      expect(d.nodes[0].alias, 'First usecase');
+      expect(d.nodes[0].kind, UseCaseNodeKind.useCase);
+      expect(d.nodes[1].alias, 'UC2');
+      expect(d.nodes[1].label, 'Another usecase');
+      expect(d.nodes[2].alias, 'UC3');
+      expect(d.nodes[3].alias, 'UC4');
+      expect(d.nodes[3].label, 'Last\nusecase');
+    });
+
+    test('consumes trailing "/" hidden-node marker on actor declarations', () {
+      // Same phantom marker applies to actor declarations. Covers the four
+      // canonical shapes:
+      //   1. `:Display:/`                  — colon-wrapped + slash
+      //   2. `:Display:/ as Alias`         — colon-wrapped + slash + alias
+      //   3. `actor/ ID`                   — keyword + slash + identifier
+      //   4. `actor/ :Display: as Alias`   — keyword + slash + colon-wrapped
+      //                                       + alias
+      final d = parseUseCase('@startuml\n'
+          ':First Actor:/\n'
+          ':Another\\nactor:/ as Man2\n'
+          'actor/ Woman3\n'
+          'actor/ :Last actor: as Person1\n'
+          '@enduml\n');
+      final actors =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.actor).toList();
+      expect(actors, hasLength(4));
     });
 
     test('parses rectangle boundary with contained use cases', () {
@@ -1942,6 +4345,461 @@ void main() {
       expect(
           d.boundaries.single.containedAliases, ['UC1', 'UC2', 'UC3', 'UC4']);
       expect(d.relations, hasLength(6));
+    });
+
+    test('parses usecase with multi-line label and internal separators', () {
+      final d = parseUseCase('@startuml\n'
+          'usecase UC1 as "You can use\n'
+          'several lines to define your usecase.\n'
+          'You can also use separators.\n'
+          '--\n'
+          'Several separators are possible.\n'
+          '==\n'
+          'And you can add titles:\n'
+          '..Conclusion..\n'
+          'This allows large description."\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(1));
+      final n = d.nodes.single;
+      expect(n.alias, 'UC1');
+      expect(n.kind, UseCaseNodeKind.useCase);
+      expect(n.label, contains('You can use\n'));
+      final spans = n.labelSpans!;
+      final separators =
+          spans.whereType<UseCaseLabelSeparatorSpan>().toList();
+      expect(separators.map((s) => s.kind), [
+        UseCaseLabelSeparator.thin,
+        UseCaseLabelSeparator.thick,
+        UseCaseLabelSeparator.labeled,
+      ]);
+      expect(separators.last.text, 'Conclusion');
+      // Sandwich text spans between every separator.
+      final texts = spans.whereType<UseCaseLabelText>().toList();
+      expect(texts, hasLength(4));
+    });
+
+    test('parses actor + use case with various arrow lengths', () {
+      final d = parseUseCase('@startuml\n'
+          'User -> (Start)\n'
+          'User --> (Use the application) : A small label\n'
+          ':Main Admin: ---> (Use the application) : This is\\nyet another\\nlabel\n'
+          '@enduml\n');
+      final actors =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.actor).toList();
+      expect(actors.map((n) => n.alias).toSet(), {'User', 'MainAdmin'});
+      final useCases =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.useCase).toList();
+      expect(useCases.map((n) => n.alias).toSet(),
+          {'Start', 'Use the application'});
+      // Three relations with progressively longer dashed bodies.
+      expect(d.relations, hasLength(3));
+      expect(d.relations[0].from, 'User');
+      expect(d.relations[0].to, 'Start');
+      expect(d.relations[1].label, 'A small label');
+      expect(d.relations[2].from, 'MainAdmin');
+      expect(d.relations[2].to, 'Use the application');
+      expect(d.relations[2].label, contains('\n'));
+    });
+
+    test('parses minimal use case with colon-wrapped actor and ellipse', () {
+      final d = parseUseCase('@startuml\n'
+          ':user: --> (Use case 1)\n'
+          ':user: -> (Use case 2)\n'
+          '@enduml\n');
+      expect(d.relations, hasLength(2));
+      final actors =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.actor).toList();
+      expect(actors.single.alias, 'user');
+      final useCases =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.useCase).toList();
+      expect(useCases.map((n) => n.alias).toSet(),
+          {'Use case 1', 'Use case 2'});
+      for (final r in d.relations) {
+        expect(r.from, 'user');
+      }
+    });
+
+    test('parses colon-wrapped actor with explicit as alias', () {
+      // Routes to the use-case parser via the trailing `-> (Start)` arrow
+      // on a use-case ellipse.
+      final d = parseUseCase('@startuml\n'
+          ':Main Admin: as Admin\n'
+          'Admin -> (Start)\n'
+          '@enduml\n');
+      final actor = d.nodes.firstWhere((n) => n.alias == 'Admin');
+      expect(actor.label, 'Main Admin');
+      expect(actor.kind, UseCaseNodeKind.actor);
+    });
+
+    test('parses parenthesized use case with parenthesized alias', () {
+      final d = parseUseCase('@startuml\n'
+          '(Use the application) as (Use)\n'
+          'User -> (Use)\n'
+          '@enduml\n');
+      final uc = d.nodes.firstWhere((n) => n.alias == 'Use');
+      expect(uc.label, 'Use the application');
+      expect(uc.kind, UseCaseNodeKind.useCase);
+      // The relation should reference the ellipse by its overriden alias.
+      expect(d.relations, hasLength(1));
+      expect(d.relations.single.from, 'User');
+      expect(d.relations.single.to, 'Use');
+    });
+
+    test('parses parenthesized use case with bare alias', () {
+      final d = parseUseCase('@startuml\n'
+          '(Browse) as B\n'
+          'User -> (Browse)\n'
+          '@enduml\n');
+      final uc = d.nodes.firstWhere((n) => n.alias == 'B');
+      expect(uc.label, 'Browse');
+    });
+
+    test('parses inline note right of actor', () {
+      final d = parseUseCase('@startuml\n'
+          'actor Admin\n'
+          'Admin -> (Start)\n'
+          'note right of Admin : This is an example.\n'
+          '@enduml\n');
+      expect(d.notes, hasLength(1));
+      final n = d.notes.single;
+      expect(n.text, 'This is an example.');
+      expect(n.position, NotePosition.rightOf);
+      expect(n.attachedTo, 'Admin');
+      expect(n.isFreeStanding, isFalse);
+    });
+
+    test('parses multi-line note right of parenthesized use case', () {
+      final d = parseUseCase('@startuml\n'
+          '(Use the application) as (Use)\n'
+          'User -> (Use)\n'
+          'note right of (Use)\n'
+          '  A note can also\n'
+          '  be on several lines\n'
+          'end note\n'
+          '@enduml\n');
+      expect(d.notes, hasLength(1));
+      final n = d.notes.single;
+      expect(n.position, NotePosition.rightOf);
+      expect(n.attachedTo, 'Use');
+      expect(n.text, contains('A note can also'));
+      expect(n.text, contains('be on several lines'));
+    });
+
+    test('parses free-standing note with alias', () {
+      final d = parseUseCase('@startuml\n'
+          'User -> (Start)\n'
+          'note "This note is connected\\nto several objects." as N2\n'
+          '@enduml\n');
+      expect(d.notes, hasLength(1));
+      final n = d.notes.single;
+      expect(n.alias, 'N2');
+      expect(n.text, 'This note is connected\nto several objects.');
+      expect(n.position, isNull);
+      expect(n.attachedTo, isNull);
+      expect(n.isFreeStanding, isTrue);
+    });
+
+    test('parses dotted note connection lines', () {
+      final d = parseUseCase('@startuml\n'
+          'note "Floating" as N2\n'
+          '(Start) .. N2\n'
+          'N2 .. (Use)\n'
+          '@enduml\n');
+      expect(d.noteConnections, hasLength(2));
+      expect(d.noteConnections[0].from, 'Start');
+      expect(d.noteConnections[0].to, 'N2');
+      expect(d.noteConnections[1].from, 'N2');
+      expect(d.noteConnections[1].to, 'Use');
+      // The note should not be promoted to a use-case node.
+      expect(d.nodes.any((n) => n.alias == 'N2'), isFalse);
+      // The connected use cases SHOULD be auto-declared.
+      expect(d.nodes.where((n) => n.alias == 'Start'), hasLength(1));
+      expect(d.nodes.where((n) => n.alias == 'Use'), hasLength(1));
+    });
+
+    test('parses the full notes-and-connections example end-to-end', () {
+      final d = parseUseCase('@startuml\n'
+          ':Main Admin: as Admin\n'
+          '(Use the application) as (Use)\n'
+          '\n'
+          'User -> (Start)\n'
+          'User --> (Use)\n'
+          '\n'
+          'Admin ---> (Use)\n'
+          '\n'
+          'note right of Admin : This is an example.\n'
+          '\n'
+          'note right of (Use)\n'
+          '  A note can also\n'
+          '  be on several lines\n'
+          'end note\n'
+          '\n'
+          'note "This note is connected\\nto several objects." as N2\n'
+          '(Start) .. N2\n'
+          'N2 .. (Use)\n'
+          '@enduml\n');
+      // 2 actors + 2 use cases.
+      final actors =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.actor).toList();
+      expect(actors.map((a) => a.alias).toSet(), {'Admin', 'User'});
+      final useCases =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.useCase).toList();
+      expect(useCases.map((u) => u.alias).toSet(), {'Use', 'Start'});
+      // 3 arrow relations.
+      expect(d.relations, hasLength(3));
+      // 3 notes: two attached + one free-standing.
+      expect(d.notes, hasLength(3));
+      expect(d.notes.where((n) => n.isFreeStanding), hasLength(1));
+      expect(d.notes.where((n) => !n.isFreeStanding), hasLength(2));
+      // 2 dotted note connections.
+      expect(d.noteConnections, hasLength(2));
+    });
+
+    test('direction-hint arrows -left-> / -right-> / -up-> / -down-> '
+        'parse without error', () {
+      final d = parseUseCase('@startuml\n'
+          ':user: -left-> (dummyLeft)\n'
+          ':user: -right-> (dummyRight)\n'
+          ':user: -up-> (dummyUp)\n'
+          ':user: -down-> (dummyDown)\n'
+          '@enduml\n');
+      expect(d.relations, hasLength(4));
+    });
+
+    test('package block with left to right direction', () {
+      final d = parseUseCase('@startuml\n'
+          'left to right direction\n'
+          'actor Guest as g\n'
+          'package Professional {\n'
+          '  actor Chef as c\n'
+          '  actor "Food Critic" as fc\n'
+          '}\n'
+          'package Restaurant {\n'
+          '  usecase "Eat Food" as UC1\n'
+          '  usecase "Pay for Food" as UC2\n'
+          '}\n'
+          'g --> UC1\n'
+          '@enduml\n');
+      expect(d.leftToRightDirection, isTrue);
+      expect(d.boundaries, hasLength(2));
+      // Professional contains Chef + fc.
+      expect(d.boundaries[0].label, 'Professional');
+      expect(d.boundaries[0].containedAliases, ['c', 'fc']);
+      // Restaurant contains UC1 + UC2.
+      expect(d.boundaries[1].label, 'Restaurant');
+      expect(d.boundaries[1].containedAliases, ['UC1', 'UC2']);
+    });
+
+    test('keyword-less "Name" as Alias declares actor implicitly', () {
+      final d = parseUseCase('@startuml\n'
+          'skinparam actorStyle Hollow\n'
+          ':User: --> (Use)\n'
+          '"Main Admin" as Admin\n'
+          '"Use the application" as (Use)\n'
+          '@enduml\n');
+      final admin = d.nodes.firstWhere((n) => n.alias == 'Admin');
+      expect(admin.kind, UseCaseNodeKind.actor);
+      expect(admin.label, 'Main Admin');
+      final use = d.nodes.firstWhere((n) => n.alias == 'Use');
+      expect(use.kind, UseCaseNodeKind.useCase);
+      expect(use.label, 'Use the application');
+    });
+
+    test('skinparam line is consumed without error in use case diagram', () {
+      // Two different actorStyle values must both parse.
+      parseUseCase('@startuml\n'
+          'skinparam actorStyle awesome\n'
+          ':User: --> (Use)\n'
+          '@enduml\n');
+      parseUseCase('@startuml\n'
+          'skinparam actorStyle Hollow\n'
+          ':User: --> (Use)\n'
+          '@enduml\n');
+    });
+
+    test('generalization arrow <|-- emits triangle head and reverses '
+        'direction', () {
+      final d = parseUseCase('@startuml\n'
+          'User <|-- Admin\n'
+          '(Start) <|-- (Use)\n'
+          '@enduml\n');
+      expect(d.relations, hasLength(2));
+      // `User <|-- Admin` means User is parent. After the reverse swap the
+      // relation flows child→parent so the triangle head sits at the parent.
+      expect(d.relations[0].from, 'Admin');
+      expect(d.relations[0].to, 'User');
+      expect(d.relations[0].head, ArrowHead.triangle);
+      expect(d.relations[1].from, 'Use');
+      expect(d.relations[1].to, 'Start');
+      expect(d.relations[1].head, ArrowHead.triangle);
+    });
+
+    test('parses trailing << Stereotype >> on all node declaration shapes',
+        () {
+      // Exercises the four declaration forms that need to accept an optional
+      // trailing `<< Stereotype >>` annotation:
+      //   - bare identifier actor:  `User << Human >>`
+      //   - colon-wrapped actor:    `:Display: as Alias << Application >>`
+      //   - bare paren use case:    `(Start) << One Shot >>`
+      //   - paren use case + alias: `(Display) as (Alias) << Main >>`
+      final d = parseUseCase('@startuml\n'
+          'User << Human >>\n'
+          ':Main Database: as MySql << Application >>\n'
+          '(Start) << One Shot >>\n'
+          '(Use the application) as (Use) << Main >>\n'
+          'User -> (Start)\n'
+          'User --> (Use)\n'
+          'MySql --> (Use)\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(4));
+      final byAlias = {for (final n in d.nodes) n.alias: n};
+      expect(byAlias['User']?.stereotype, 'Human');
+      expect(byAlias['User']?.kind, UseCaseNodeKind.actor);
+      expect(byAlias['MySql']?.stereotype, 'Application');
+      expect(byAlias['MySql']?.label, 'Main Database');
+      expect(byAlias['MySql']?.kind, UseCaseNodeKind.actor);
+      expect(byAlias['Start']?.stereotype, 'One Shot');
+      expect(byAlias['Start']?.kind, UseCaseNodeKind.useCase);
+      expect(byAlias['Use']?.stereotype, 'Main');
+      expect(byAlias['Use']?.label, 'Use the application');
+      expect(byAlias['Use']?.kind, UseCaseNodeKind.useCase);
+      expect(d.relations, hasLength(3));
+    });
+
+    test('parses << Stereotype >> on actor/usecase keyword declarations', () {
+      final d = parseUseCase('@startuml\n'
+          'actor User << Human >>\n'
+          'usecase Login << Auth >>\n'
+          '@enduml\n');
+      final byAlias = {for (final n in d.nodes) n.alias: n};
+      expect(byAlias['User']?.stereotype, 'Human');
+      expect(byAlias['Login']?.stereotype, 'Auth');
+    });
+
+    test('accepts !option directive and stereotype-keyed skinparam usecase',
+        () {
+      // Reproduces the PlantUML "use case skinparam block + !option" sample.
+      // `!option` is a global directive the preprocessor already drops, and a
+      // `skinparam usecase { ... }` block may carry per-stereotype overrides
+      // such as `BackgroundColor<< Main >> YellowGreen` that the parser
+      // currently has no model for — those lines should be consumed without
+      // error so the diagram parses cleanly.
+      final d = parseUseCase('@startuml\n'
+          '!option handwritten true\n'
+          'skinparam usecase {\n'
+          '  BackgroundColor DarkSeaGreen\n'
+          '  BorderColor DarkSlateGray\n'
+          '  BackgroundColor<< Main >> YellowGreen\n'
+          '  BorderColor<< Main >> YellowGreen\n'
+          '  ArrowColor Olive\n'
+          '  ActorBorderColor black\n'
+          '  ActorFontName Courier\n'
+          '  ActorBackgroundColor<< Human >> Gold\n'
+          '}\n'
+          'User << Human >>\n'
+          ':Main Database: as MySql << Application >>\n'
+          '(Start) << One Shot >>\n'
+          '(Use the application) as (Use) << Main >>\n'
+          'User -> (Start)\n'
+          'User --> (Use)\n'
+          'MySql --> (Use)\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(4));
+      final byAlias = {for (final n in d.nodes) n.alias: n};
+      expect(byAlias['User']?.stereotype, 'Human');
+      expect(byAlias['MySql']?.stereotype, 'Application');
+      expect(byAlias['Start']?.stereotype, 'One Shot');
+      expect(byAlias['Use']?.stereotype, 'Main');
+      expect(d.relations, hasLength(3));
+    });
+
+    test('accepts -- and .> relations inside a rectangle boundary', () {
+      // Reproduces the checkout/extends/include sample: undirected `--`
+      // relations between an actor and a use case, plus dashed `.>` arrows
+      // carrying `: include` / `: extends` labels, all nested inside a
+      // `rectangle checkout { ... }` boundary block.
+      final d = parseUseCase('@startuml\n'
+          'left to right direction\n'
+          'skinparam packageStyle rectangle\n'
+          'actor customer\n'
+          'actor clerk\n'
+          'rectangle checkout {\n'
+          '  customer -- (checkout)\n'
+          '  (checkout) .> (payment) : include\n'
+          '  (help) .> (checkout) : extends\n'
+          '  (checkout) -- clerk\n'
+          '}\n'
+          '@enduml\n');
+      final actors =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.actor).toList();
+      final useCases =
+          d.nodes.where((n) => n.kind == UseCaseNodeKind.useCase).toList();
+      expect(actors.map((n) => n.alias), containsAll(['customer', 'clerk']));
+      expect(useCases.map((n) => n.alias),
+          containsAll(['checkout', 'payment', 'help']));
+      expect(d.relations, hasLength(4));
+      // The `.>` arrow tokenizes as a dashed body with an open head; this
+      // mirrors the visual style PlantUML uses for include / extends edges.
+      final dashed =
+          d.relations.where((r) => r.lineStyle == LineStyle.dashed).toList();
+      expect(dashed, hasLength(2));
+      expect(dashed.map((r) => r.label),
+          containsAll(['include', 'extends']));
+    });
+
+    test('parses inline-style arrow modifiers on relations', () {
+      // PlantUML allows `#<color>;line:<c>;line.<style>;text:<c>` after the
+      // target of a relation. All four relations must materialize with their
+      // labels, line colors, line styles, and text colors recorded on the
+      // AST so the renderer can apply the inline style.
+      final d = parseUseCase('@startuml\n'
+          'actor foo\n'
+          'foo --> (bar) : normal\n'
+          'foo --> (bar1) #line:red;line.bold;text:red : red bold\n'
+          'foo --> (bar2) #green;line.dashed;text:green : green dashed\n'
+          'foo --> (bar3) #blue;line.dotted;text:blue : blue dotted\n'
+          '@enduml\n');
+      expect(d.relations, hasLength(4));
+      expect(d.relations.map((r) => r.label),
+          containsAll(['normal', 'red bold', 'green dashed', 'blue dotted']));
+      final byLabel = {for (final r in d.relations) r.label: r};
+      // Unstyled relation: no inline modifiers.
+      final plain = byLabel['normal']!;
+      expect(plain.lineColor, isNull);
+      expect(plain.textColor, isNull);
+      expect(plain.inlineLineStyle, isNull);
+      // `#line:red;line.bold;text:red`.
+      final red = byLabel['red bold']!;
+      expect(red.lineColor, const Color(0xFFFF0000));
+      expect(red.textColor, const Color(0xFFFF0000));
+      expect(red.inlineLineStyle, UseCaseLineStyle.bold);
+      // `#green;line.dashed;text:green` — head color carries the line color.
+      final green = byLabel['green dashed']!;
+      expect(green.lineColor, const Color(0xFF008000));
+      expect(green.textColor, const Color(0xFF008000));
+      expect(green.inlineLineStyle, UseCaseLineStyle.dashed);
+      // `#blue;line.dotted;text:blue`.
+      final blue = byLabel['blue dotted']!;
+      expect(blue.lineColor, const Color(0xFF0000FF));
+      expect(blue.textColor, const Color(0xFF0000FF));
+      expect(blue.inlineLineStyle, UseCaseLineStyle.dotted);
+    });
+
+    test('parses inline-style modifiers on node declarations', () {
+      // PlantUML allows `#<bg>;line:<c>;line.<style>;text:<c>` after an
+      // `actor` or `usecase` declaration. Visual styling is deferred — the
+      // parse must succeed and all four nodes must materialize.
+      final d = parseUseCase('@startuml\n'
+          'actor a\n'
+          'actor b #pink;line:red;line.bold;text:red\n'
+          'usecase c #palegreen;line:green;line.dashed;text:green\n'
+          'usecase d #aliceblue;line:blue;line.dotted;text:blue\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(4));
+      expect(d.nodes.where((n) => n.kind == UseCaseNodeKind.actor),
+          hasLength(2));
+      expect(d.nodes.where((n) => n.kind == UseCaseNodeKind.useCase),
+          hasLength(2));
     });
   });
 
@@ -2931,6 +5789,198 @@ void main() {
         throwsA(isA<ParserException>()),
       );
     });
+
+    test('accepts <style> block and #highlight directives (source 21)', () {
+      final d = parseJson('@startjson\n'
+          '<style>\n'
+          '.h1 {\n'
+          '  BackGroundColor green\n'
+          '  FontColor white\n'
+          '  FontStyle italic\n'
+          '}\n'
+          '.h2 {\n'
+          '  BackGroundColor red\n'
+          '  FontColor white\n'
+          '  FontStyle bold\n'
+          '}\n'
+          '</style>\n'
+          '#highlight "lastName"\n'
+          '#highlight "address" / "city" <<h1>>\n'
+          '#highlight "phoneNumbers" / "0" / "number" <<h2>>\n'
+          '{\n'
+          '  "firstName": "John",\n'
+          '  "lastName": "Smith",\n'
+          '  "address": {\n'
+          '    "city": "Seoul"\n'
+          '  },\n'
+          '  "phoneNumbers": [\n'
+          '    { "number": "555-1234" }\n'
+          '  ]\n'
+          '}\n'
+          '@endjson\n');
+      expect(d.format, DataFormat.json);
+      final root = d.root as DataObject;
+      expect(root.entries.map((e) => e.key),
+          ['firstName', 'lastName', 'address', 'phoneNumbers']);
+    });
+
+    test('accepts nested jsonDiagram <style> block and #highlight (source 22)',
+        () {
+      final d = parseJson('@startjson\n'
+          '<style>\n'
+          'jsonDiagram {\n'
+          '  node {\n'
+          '    BackGroundColor Khaki\n'
+          '    LineColor lightblue\n'
+          '    separator {\n'
+          '      LineThickness 0.5\n'
+          '    }\n'
+          '  }\n'
+          '  arrow {\n'
+          '    LineColor red\n'
+          '  }\n'
+          '  highlight {\n'
+          '    BackGroundColor red\n'
+          '  }\n'
+          '}\n'
+          '</style>\n'
+          '#highlight "1" / "hr"\n'
+          '[\n'
+          '  { "name": "Mark McGwire", "hr": 65 },\n'
+          '  { "name": "Sammy Sosa", "hr": 63 }\n'
+          ']\n'
+          '@endjson\n');
+      expect(d.format, DataFormat.json);
+      final root = d.root as DataArray;
+      expect(root.items, hasLength(2));
+    });
+  });
+
+  group('allowmixing + inline json regressions', () {
+    Diagram parseAny(String src) {
+      final tokens = Lexer().tokenize(src);
+      return Parser().parse(tokens);
+    }
+
+    test('use case + allowmixing + json (source 20)', () {
+      final d = parseAny('@startuml\n'
+          'allowmixing\n'
+          'actor Actor\n'
+          'usecase Usecase\n'
+          'json JSON {\n'
+          '  "fruit":"Apple",\n'
+          '  "size":"Large",\n'
+          '  "color": ["Red", "Green"]\n'
+          '}\n'
+          '@enduml\n') as UseCaseDiagram;
+      final aliases = d.nodes.map((n) => n.alias).toSet();
+      expect(aliases, containsAll(<String>{'Actor', 'Usecase'}));
+    });
+
+    test('class + object + json without allowmixing (source 23)', () {
+      final d = parseAny('@startuml\n'
+          'class Class\n'
+          'object Object\n'
+          'json JSON {\n'
+          '  "fruit":"Apple",\n'
+          '  "size":"Large",\n'
+          '  "color": ["Red", "Green"]\n'
+          '}\n'
+          '@enduml\n') as ClassDiagram;
+      final names = d.classes.map((c) => c.name).toSet();
+      expect(names, containsAll(<String>{'Class', 'Object'}));
+    });
+
+    test('inline json with title alias inside @startuml (source 24)', () {
+      final d = parseAny('@startuml\n'
+          'json "<b>JSON basic element" as J {\n'
+          '  "null": null,\n'
+          '  "true": true,\n'
+          '  "false": false,\n'
+          '  "JSON_Number": [-1, -1.1, "<color:green>TBC"],\n'
+          '  "JSON_String": "a\\nb\\rc\\td <color:green>TBC...",\n'
+          '  "JSON_Object": {\n'
+          '    "{}": {},\n'
+          '    "k_int": 123,\n'
+          '    "k_str": "abc",\n'
+          '    "k_obj": {"k": "v"}\n'
+          '  },\n'
+          '  "JSON_Array" : [\n'
+          '    [],\n'
+          '    [true, false],\n'
+          '    [-1, 1],\n'
+          '    ["a", "b", "c"],\n'
+          '    ["mix", null, true, 1, {"k": "v"}]\n'
+          '  ]\n'
+          '}\n'
+          '@enduml\n') as DataDiagram;
+      expect(d.format, DataFormat.json);
+      // Body structure is deferred — current implementation parses the
+      // header and swallows the brace-balanced body. We assert only that
+      // the diagram is recognised as JSON-shaped.
+      expect(d.root, isA<DataObject>());
+    });
+
+    test('allowmixing + many element types + json (source 25)', () {
+      final d = parseAny('@startuml\n'
+          'allowmixing\n'
+          'component Component\n'
+          'actor Actor\n'
+          'usecase Usecase\n'
+          '() Interface\n'
+          'node Node\n'
+          'cloud Cloud\n'
+          'json JSON {\n'
+          '  "fruit":"Apple",\n'
+          '  "size":"Large",\n'
+          '  "color": ["Red", "Green"]\n'
+          '}\n'
+          '@enduml\n') as UseCaseDiagram;
+      // Use case parser hosts because `usecase` appears at line start.
+      final aliases = d.nodes.map((n) => n.alias).toSet();
+      expect(aliases, contains('Actor'));
+      expect(aliases, contains('Usecase'));
+    });
+
+    test('allowmixing + agent + stack { json } + database (source 26)', () {
+      final d = parseAny('@startuml\n'
+          'allowmixing\n'
+          'agent Agent\n'
+          'stack {\n'
+          '  json "JSON_file.json" as J {\n'
+          '    "fruit":"Apple",\n'
+          '    "size":"Large",\n'
+          '    "color": ["Red", "Green"]\n'
+          '  }\n'
+          '}\n'
+          'database Database\n'
+          'Agent -> J\n'
+          'J -> Database\n'
+          '@enduml\n') as ComponentDiagram;
+      final aliases = d.nodes.map((n) => n.alias).toSet();
+      expect(aliases, contains('Agent'));
+      expect(aliases, contains('Database'));
+      // stack lowered to a package container in the AST.
+      expect(d.containers, isNotEmpty);
+    });
+
+    test('state + free brace block + json without allowmixing (source 27)',
+        () {
+      final d = parseAny('@startuml\n'
+          'state "A" as stateA\n'
+          'state "C" as stateC\n'
+          '{\n'
+          '  state B\n'
+          '}\n'
+          'json J {\n'
+          '  "fruit":"Apple",\n'
+          '  "size":"Large",\n'
+          '  "color": ["Red", "Green"]\n'
+          '}\n'
+          '@enduml\n') as StateDiagram;
+      final names = d.states.map((s) => s.name).toSet();
+      expect(names, containsAll(<String>{'stateA', 'stateC', 'B'}));
+    });
   });
 
   group('yaml diagram', () {
@@ -3244,6 +6294,81 @@ void main() {
           '@endnwdiag\n');
       expect(d.networks.single.nodes.single.name, 'web01');
       expect(d.networks.single.nodes.single.address, isNull);
+    });
+
+    test('parses nwdiag wrapper with network address', () {
+      final d = parseNwdiag('@startnwdiag\n'
+          'nwdiag {\n'
+          '  network dmz {\n'
+          '    address = "210.x.x.x/24"\n'
+          '  }\n'
+          '}\n'
+          '@endnwdiag\n');
+      expect(d.networks, hasLength(1));
+      expect(d.networks.single.name, 'dmz');
+      expect(d.networks.single.address, '210.x.x.x/24');
+    });
+
+    test('parses networks with nested groups, properties, and comments', () {
+      final d = parseNwdiag('@startnwdiag\n'
+          'network Sample_front {\n'
+          '  address = "192.168.10.0/24";\n'
+          '  // define group\n'
+          '  group web {\n'
+          '    web01 [address = ".1"];\n'
+          '    web02 [address = ".2"];\n'
+          '  }\n'
+          '}\n'
+          'network Sample_back {\n'
+          '  address = "192.168.20.0/24";\n'
+          '  web01 [address = ".1"];\n'
+          '  web02 [address = ".2"];\n'
+          '  db01 [address = ".101"];\n'
+          '  db02 [address = ".102"];\n'
+          '  // define network using defined nodes\n'
+          '  group db {\n'
+          '    db01;\n'
+          '    db02;\n'
+          '  }\n'
+          '}\n'
+          '@endnwdiag\n');
+      expect(d.networks, hasLength(2));
+      expect(d.networks[0].name, 'Sample_front');
+      expect(d.networks[0].address, '192.168.10.0/24');
+      expect(d.networks[0].nodes.map((n) => n.name),
+          containsAll(['web01', 'web02']));
+      expect(d.networks[1].name, 'Sample_back');
+      expect(d.networks[1].address, '192.168.20.0/24');
+      expect(d.networks[1].nodes.map((n) => n.name),
+          containsAll(['web01', 'web02', 'db01', 'db02']));
+    });
+
+    test('parses anonymous top-level group with color', () {
+      final d = parseNwdiag('@startnwdiag\n'
+          '// define group outside of network definitions\n'
+          'group {\n'
+          '  color = "#FFAAAA";\n'
+          '  web01;\n'
+          '  web02;\n'
+          '  db01;\n'
+          '}\n'
+          'network dmz {\n'
+          '  web01;\n'
+          '  web02;\n'
+          '}\n'
+          'network internal {\n'
+          '  web01;\n'
+          '  web02;\n'
+          '  db01;\n'
+          '  db02;\n'
+          '}\n'
+          '@endnwdiag\n');
+      expect(d.networks, hasLength(2));
+      expect(d.networks[0].name, 'dmz');
+      expect(d.networks[0].nodes.map((n) => n.name), ['web01', 'web02']);
+      expect(d.networks[1].name, 'internal');
+      expect(d.networks[1].nodes.map((n) => n.name),
+          ['web01', 'web02', 'db01', 'db02']);
     });
   });
 
@@ -3674,6 +6799,113 @@ note "Generic bound and record syntax are intentionally parser-hostile." as N1
 N1 .. Repository
 @enduml
 ''');
+  });
+
+  group('arrow duration annotation', () {
+    test('basic ->(N) trailing on forward and (N)<- leading on backward', () {
+      final d = parseSequence('@startuml\n'
+          'A ->(10) B: text 10\n'
+          'B ->(10) A: text 10\n'
+          '\n'
+          'A ->(10) B: text 10\n'
+          'A (10)<- B: text 10\n'
+          '@enduml\n');
+      final ms = d.events.whereType<Message>().toList();
+      expect(ms, hasLength(4));
+      expect(ms[0].from, 'A');
+      expect(ms[0].to, 'B');
+      expect(ms[0].duration, 10);
+      expect(ms[0].direction, MessageDirection.forward);
+      expect(ms[0].head, ArrowHead.filled);
+      expect(ms[0].synchronized, isFalse);
+      expect(ms[1].from, 'B');
+      expect(ms[1].to, 'A');
+      expect(ms[1].duration, 10);
+      expect(ms[1].direction, MessageDirection.forward);
+      // Backward `(10)<-` form: source is on the right ("B"), target on the
+      // left ("A"). Parser keeps `from = A, to = B` and flips direction.
+      expect(ms[3].from, 'A');
+      expect(ms[3].to, 'B');
+      expect(ms[3].duration, 10);
+      expect(ms[3].direction, MessageDirection.backward);
+      expect(ms[3].head, ArrowHead.filled);
+    });
+
+    test('->(N) combined with activation suffix', () {
+      final d = parseSequence('@startuml\n'
+          'A ->(40) B++: Rq\n'
+          'B -->(20) A--: Rs\n'
+          '@enduml\n');
+      final ms = d.events.whereType<Message>().toList();
+      expect(ms, hasLength(2));
+      expect(ms[0].from, 'A');
+      expect(ms[0].to, 'B');
+      expect(ms[0].duration, 40);
+      expect(ms[0].lineStyle, LineStyle.solid);
+      expect(ms[0].activation, ActivationSuffix.activateTarget);
+      expect(ms[1].from, 'B');
+      expect(ms[1].to, 'A');
+      expect(ms[1].duration, 20);
+      expect(ms[1].lineStyle, LineStyle.dashed);
+      expect(ms[1].activation, ActivationSuffix.deactivateSource);
+      // A subsequent Activate(B) event is emitted by the parser as a
+      // secondary event after the first message with `++`.
+      final activates = d.events.whereType<Activate>().toList();
+      expect(activates.any((a) => a.participant == 'B'), isTrue);
+      // Source-deactivate `--` emits Deactivate(from) = Deactivate(B) for
+      // the second message.
+      final deactivates = d.events.whereType<Deactivate>().toList();
+      expect(deactivates.any((da) => da.participant == 'B'), isTrue);
+    });
+
+    test('& parallel/sync marker combined with ->(N)', () {
+      final d = parseSequence('@startuml\n'
+          '!pragma teoz true\n'
+          'A ->(50) C: Starts\\nwhen \'B\' sends\n'
+          '& B ->(25) C: \\nBut B\'s message\\n arrives before A\'s\n'
+          '@enduml\n');
+      final ms = d.events.whereType<Message>().toList();
+      expect(ms, hasLength(2));
+      expect(ms[0].from, 'A');
+      expect(ms[0].to, 'C');
+      expect(ms[0].duration, 50);
+      expect(ms[0].synchronized, isFalse);
+      expect(ms[1].from, 'B');
+      expect(ms[1].to, 'C');
+      expect(ms[1].duration, 25);
+      expect(ms[1].synchronized, isTrue);
+    });
+
+    test('regression: arrow without (N) parses with duration == null', () {
+      final d = parseSequence('@startuml\nA -> B\n@enduml\n');
+      final m = d.events.single as Message;
+      expect(m.duration, isNull);
+      expect(m.synchronized, isFalse);
+    });
+  });
+
+  group('participant stereotype', () {
+    test('parses participant declarations with `<< Stereotype >>` trailers',
+        () {
+      final d = parseSequence(
+        '@startuml\n'
+        'skinparam guillemet false\n'
+        'participant "Famous Bob" as Bob << Generated >>\n'
+        'participant Alice << (C,#ADD1B2) Testable >>\n'
+        'Bob->Alice: First message\n'
+        '@enduml\n',
+      );
+      expect(d.participants, hasLength(2));
+      final byAlias = {for (final p in d.participants) p.alias: p};
+      expect(byAlias['Bob']!.displayName, 'Famous Bob');
+      expect(byAlias['Bob']!.stereotype, 'Generated');
+      expect(byAlias['Alice']!.stereotype, '(C,#ADD1B2) Testable');
+      // Message between the two declared participants still parses.
+      final messages = d.events.whereType<Message>().toList();
+      expect(messages, hasLength(1));
+      expect(messages.single.from, 'Bob');
+      expect(messages.single.to, 'Alice');
+    });
   });
 }
 

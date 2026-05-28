@@ -15,8 +15,20 @@ class SequenceLayout implements DiagramLayout {
   static const _actorMinWidth = 80.0;
   static const _actorGap = 32.0;
   static const _messageGap = 40.0;
+  // PlantUML "transmission duration" annotation (`->(N)` / `(N)<-`): each
+  // unit of N translates to this many vertical pixels between the message's
+  // tail Y and its head Y. The exact ratio doesn't have to match PlantUML's
+  // server output — small constant keeps the diagonal visible without
+  // ballooning the diagram height.
+  static const _durationPixelsPerUnit = 0.5;
   static const _selfMessageWidth = 30.0;
   static const _selfMessageHeight = 25.0;
+  // Horizontal stub length for "found" / "lost" short-form messages
+  // (`?->` / `->?`). The arrow extends this distance from the participant
+  // lifeline to a notional anonymous endpoint.
+  static const _externalShortOffset = 30.0;
+  // Padding from the diagram edge for full edge-form arrows (`[->` / `->]`).
+  static const _externalEdgePadding = 8.0;
   static const _notePaddingX = 8.0;
   static const _notePaddingY = 6.0;
   static const _noteHorizontalGap = 8.0;
@@ -93,6 +105,17 @@ class SequenceLayout implements DiagramLayout {
   static const _databaseCapHeight = 6.0;
   static const _collectionsOffset = 6.0;
   static const _queueCapWidth = 8.0;
+  // `mainframe <label>` directive — outer UML frame with a folded-corner
+  // label tab in the top-left. The tab is a small rectangle whose bottom-
+  // right corner is clipped diagonally so it reads as a folded-paper notch.
+  static const _mainframeOuterPadding = 12.0;
+  static const _mainframeTabPaddingX = 8.0;
+  static const _mainframeTabPaddingY = 4.0;
+  static const _mainframeTabFoldSize = 8.0;
+  static const _mainframeTabGap = 6.0;
+  static const _mainframeStroke = Color(0xFF000000);
+  static const _mainframeTabStyle =
+      TextStyle(color: Color(0xFF000000), fontSize: 12);
 
   const SequenceLayout();
 
@@ -102,7 +125,24 @@ class SequenceLayout implements DiagramLayout {
       throw ArgumentError('SequenceLayout expects SequenceDiagram');
     }
 
-    final participants = diagram.participantsInOrder();
+    final allParticipants = diagram.participantsInOrder();
+    // `hide unlinked`: drop participants that no Message references as
+    // source or target. Activate/Note/RefBox references do NOT count. Empty
+    // boxes (whose every member was filtered out) are also dropped so we
+    // don't render a phantom rectangle.
+    final List<Participant> participants;
+    final List<ParticipantBox> boxes;
+    if (diagram.hideUnlinked) {
+      final visible = diagram.linkedAliases();
+      participants = [
+        for (final p in allParticipants)
+          if (visible.contains(p.alias)) p,
+      ];
+      boxes = _filterBoxes(diagram.boxes, visible);
+    } else {
+      participants = allParticipants;
+      boxes = diagram.boxes;
+    }
     if (participants.isEmpty) {
       final emptyInner = Scene(
         size: Size.zero,
@@ -184,13 +224,29 @@ class SequenceLayout implements DiagramLayout {
 
     final shapes = <SceneShape>[];
     final eventShapes = <SceneShape>[];
+    final eventBackgrounds = <SceneShape>[];
 
-    final hasBoxes = diagram.boxes.isNotEmpty;
+    final hasBoxes = boxes.isNotEmpty;
+    int maxBoxDepth(ParticipantBox b) {
+      var d = 1;
+      for (final c in b.children) {
+        final cd = 1 + maxBoxDepth(c);
+        if (cd > d) d = cd;
+      }
+      return d;
+    }
+
+    var boxDepth = 0;
+    for (final b in boxes) {
+      final d = maxBoxDepth(b);
+      if (d > boxDepth) boxDepth = d;
+    }
     final boxLabelReserve = hasBoxes
-        ? measurer
-                .measure('Ag', _participantBoxLabelStyle)
-                .height +
-            _participantBoxLabelGap * 2
+        ? (measurer
+                    .measure('Ag', _participantBoxLabelStyle)
+                    .height +
+                _participantBoxLabelGap * 2) *
+            boxDepth
         : 0.0;
     final topActorY = _padding + boxLabelReserve;
     final messagesStartY = topActorY + actorBoxHeight + _messageGap;
@@ -198,6 +254,7 @@ class SequenceLayout implements DiagramLayout {
 
     final ctx = _Ctx(
       shapes: eventShapes,
+      backgrounds: eventBackgrounds,
       centers: actorCenters,
       measurer: measurer,
       diagramLeftX: diagramLeftX,
@@ -224,25 +281,44 @@ class SequenceLayout implements DiagramLayout {
       }
     }
 
-    for (final box in diagram.boxes) {
-      if (box.participants.isEmpty) continue;
+    final labelLineHeight =
+        measurer.measure('Ag', _participantBoxLabelStyle).height;
+    void emitBox(ParticipantBox box, int depth) {
+      final memberAliases = box.allParticipants().map((p) => p.alias).toList();
+      if (memberAliases.isEmpty) {
+        for (final child in box.children) {
+          emitBox(child, depth);
+        }
+        return;
+      }
       var minLeft = double.infinity;
       var maxRight = double.negativeInfinity;
-      for (final p in box.participants) {
-        final cx = actorCenters[p.alias];
-        final w = actorWidths[p.alias];
+      for (final alias in memberAliases) {
+        final cx = actorCenters[alias];
+        final w = actorWidths[alias];
         if (cx == null || w == null) continue;
         final left = cx - w / 2;
         final right = cx + w / 2;
         if (left < minLeft) minLeft = left;
         if (right > maxRight) maxRight = right;
       }
-      if (minLeft == double.infinity) continue;
-      final boxLeft = minLeft - _participantBoxPaddingX;
-      final boxRight = maxRight + _participantBoxPaddingX;
-      final boxTop = _padding;
+      if (minLeft == double.infinity) {
+        for (final child in box.children) {
+          emitBox(child, depth);
+        }
+        return;
+      }
+      // Each level shrinks the rectangle inward so nested boxes nest visually
+      // and each parent's label has room above the child's edge.
+      final inset = depth *
+          (_participantBoxPaddingX / 2);
+      final labelInsetTop = depth *
+          (labelLineHeight + _participantBoxLabelGap);
+      final boxLeft = minLeft - _participantBoxPaddingX + inset;
+      final boxRight = maxRight + _participantBoxPaddingX - inset;
+      final boxTop = _padding + labelInsetTop;
       final boxBottom =
-          topActorY + actorBoxHeight + _participantBoxPaddingBottom;
+          topActorY + actorBoxHeight + _participantBoxPaddingBottom - inset;
       final fill = box.color ?? _participantBoxDefaultFill;
       final stroke = box.color ?? _participantBoxDefaultStroke;
       shapes.add(SceneBox(
@@ -259,7 +335,19 @@ class SequenceLayout implements DiagramLayout {
         text: box.label,
         textStyle: _participantBoxLabelStyle,
       ));
+      for (final child in box.children) {
+        emitBox(child, depth + 1);
+      }
     }
+
+    for (final box in boxes) {
+      emitBox(box, 0);
+    }
+
+    // Coloured `alt`/`else` branch fills must sit behind lifelines and
+    // message arrows but above the participant frames, so insert them after
+    // the participant boxes and before the participants/lifelines.
+    shapes.addAll(eventBackgrounds);
 
     for (final p in participants) {
       final w = actorWidths[p.alias]!;
@@ -354,7 +442,84 @@ class SequenceLayout implements DiagramLayout {
 
     totalWidth = math.max(totalWidth, ctx.rightmost + _padding) + leftShift;
     final diagramBottomY = bottomActorY + actorBoxHeight;
-    final totalHeight = diagramBottomY + _padding;
+    var totalHeight = diagramBottomY + _padding;
+
+    final mainframeLabel = diagram.mainframeLabel;
+    if (mainframeLabel != null) {
+      // Measure the label as rich text (inline markup like `**bold**`).
+      final labelSize = measurer.measure(
+        mainframeLabel.isEmpty ? 'A' : mainframeLabel,
+        _mainframeTabStyle,
+      );
+      final hasLabel = mainframeLabel.isNotEmpty;
+      final tabHeight = (hasLabel ? labelSize.height : 0.0) +
+          _mainframeTabPaddingY * 2;
+      final tabWidth = (hasLabel ? labelSize.width : 0.0) +
+          _mainframeTabPaddingX * 2;
+      final dx = _mainframeOuterPadding;
+      final dy = _mainframeOuterPadding + tabHeight + _mainframeTabGap;
+      for (var i = 0; i < shapes.length; i++) {
+        shapes[i] = _translateShape(shapes[i], dx, dy);
+      }
+      totalWidth += dx + _mainframeOuterPadding;
+      totalHeight += dy + _mainframeOuterPadding;
+
+      final frameRect = Rect.fromLTWH(
+        _mainframeOuterPadding / 2,
+        _mainframeOuterPadding / 2,
+        totalWidth - _mainframeOuterPadding,
+        totalHeight - _mainframeOuterPadding,
+      );
+      final framed = <SceneShape>[
+        SceneBox(
+          rect: frameRect,
+          fill: const Color(0x00000000),
+          stroke: _mainframeStroke,
+          textStyle: _mainframeTabStyle,
+        ),
+        ...shapes,
+        // Tab rectangle (top-left, just inside the outer frame).
+        SceneBox(
+          rect: Rect.fromLTWH(
+            frameRect.left,
+            frameRect.top,
+            tabWidth,
+            tabHeight,
+          ),
+          fill: skin.backgroundColor ?? const Color(0xFFFFFFFF),
+          stroke: _mainframeStroke,
+          textStyle: _mainframeTabStyle,
+        ),
+        // Diagonal fold line clipping the bottom-right corner of the tab so
+        // the tab reads as a "folded paper" notch. Drawn as a stroke line on
+        // top of the (already drawn) tab fill+border.
+        SceneLine(
+          from: Offset(
+            frameRect.left + tabWidth - _mainframeTabFoldSize,
+            frameRect.top + tabHeight,
+          ),
+          to: Offset(
+            frameRect.left + tabWidth,
+            frameRect.top + tabHeight - _mainframeTabFoldSize,
+          ),
+          head: null,
+          stroke: _mainframeStroke,
+        ),
+      ];
+      if (hasLabel) {
+        framed.add(SceneText(
+          offset: Offset(
+            frameRect.left + _mainframeTabPaddingX,
+            frameRect.top + _mainframeTabPaddingY,
+          ),
+          text: mainframeLabel,
+          textStyle: _mainframeTabStyle,
+        ));
+      }
+      shapes
+        ..clear()
+        ..addAll(framed);
+    }
 
     final innerScene = Scene(
       size: Size(totalWidth, totalHeight),
@@ -362,6 +527,34 @@ class SequenceLayout implements DiagramLayout {
       background: skin.backgroundColor,
     );
     return wrapWithDecorations(innerScene, diagram.decorations, measurer);
+  }
+
+  /// Returns a copy of [boxes] with every participant whose alias is not in
+  /// [visible] dropped. A box whose `participants` list AND nested children
+  /// all become empty is omitted entirely so we don't render an empty
+  /// rectangle when `hide unlinked` filters out every box member.
+  List<ParticipantBox> _filterBoxes(
+    List<ParticipantBox> boxes,
+    Set<String> visible,
+  ) {
+    final out = <ParticipantBox>[];
+    for (final b in boxes) {
+      final filteredParticipants = [
+        for (final p in b.participants)
+          if (visible.contains(p.alias)) p,
+      ];
+      final filteredChildren = _filterBoxes(b.children, visible);
+      if (filteredParticipants.isEmpty && filteredChildren.isEmpty) {
+        continue;
+      }
+      out.add(ParticipantBox(
+        label: b.label,
+        color: b.color,
+        participants: filteredParticipants,
+        children: filteredChildren,
+      ));
+    }
+    return out;
   }
 
   SceneShape _translateShape(SceneShape s, double dx, double dy) {
@@ -507,7 +700,19 @@ class SequenceLayout implements DiagramLayout {
                   .height;
           return _messageGap + _selfMessageHeight + labelH;
         }
-        return _messageGap;
+        // Synchronized messages (`& A -> B`) share their start Y with the
+        // previous event, so their nominal vertical contribution is the
+        // INCREMENT over the previous message's advance. The actual layout
+        // pass handles the rewind precisely; for planning purposes we model
+        // a sync'd message as consuming only its duration delta so the
+        // overall height estimate stays conservative.
+        final durationPx = event.duration == null
+            ? 0.0
+            : event.duration! * _durationPixelsPerUnit;
+        if (event.synchronized) {
+          return durationPx;
+        }
+        return _messageGap + durationPx;
       case Note():
         final size = _measureNoteText(event.text, measurer, noteStyle);
         return size.height + _notePaddingY * 2 + _noteVerticalGap * 2;
@@ -569,7 +774,19 @@ class SequenceLayout implements DiagramLayout {
     for (final event in events) {
       switch (event) {
         case Message():
-          if (event.from == event.to) {
+          // `&` parallel/sync marker: rewind to the previous message's tail Y
+          // so this message shares the same start coordinate. The group's
+          // overall Y advance becomes `max(previousAdvance, thisAdvance)` so
+          // subsequent events clear the tallest slant in the group.
+          double rewoundBy = 0.0;
+          if (event.synchronized && ctx.previousMessageStartY != null) {
+            rewoundBy = y - ctx.previousMessageStartY!;
+            y = ctx.previousMessageStartY!;
+          }
+          final messageStartY = y;
+          if (event.fromExternal == null &&
+              event.toExternal == null &&
+              event.from == event.to) {
             final labelH = event.label == null || event.label!.isEmpty
                 ? 0.0
                 : _measureMultilineText(event.label!, ctx.measurer,
@@ -581,13 +798,57 @@ class SequenceLayout implements DiagramLayout {
               final loopRight = cx + _selfMessageWidth;
               if (loopRight > ctx.rightmost) ctx.rightmost = loopRight;
             }
-            y += _messageGap + _selfMessageHeight + labelH;
+            final advance = _messageGap + _selfMessageHeight + labelH;
+            y += advance;
+            ctx.previousMessageAdvance = advance;
           } else {
             if (!event.hidden) {
-              _emitStraightMessage(event, ctx.centers[event.from]!,
-                  ctx.centers[event.to]!, y, ctx);
+              // Resolve X coordinates, substituting computed values for any
+              // anonymous "found" / "lost" endpoints. The fixed-participant
+              // endpoint anchors the calculation for short-form arrows.
+              final double fx;
+              final double tx;
+              if (event.fromExternal != null) {
+                // Source is anonymous; target must be a real participant.
+                final targetX = ctx.centers[event.to]!;
+                fx = event.fromExternal == MessageExternal.fromEdge
+                    ? ctx.diagramLeftX - _externalEdgePadding
+                    : targetX - _externalShortOffset;
+                tx = targetX;
+              } else if (event.toExternal != null) {
+                // Target is anonymous; source must be a real participant.
+                final sourceX = ctx.centers[event.from]!;
+                fx = sourceX;
+                tx = event.toExternal == MessageExternal.toEdge
+                    ? ctx.diagramRightX + _externalEdgePadding
+                    : sourceX + _externalShortOffset;
+              } else {
+                fx = ctx.centers[event.from]!;
+                tx = ctx.centers[event.to]!;
+              }
+              _emitStraightMessage(event, fx, tx, y, ctx);
+              if (fx < ctx.leftmost) ctx.leftmost = fx;
+              if (tx > ctx.rightmost) ctx.rightmost = tx;
             }
-            y += _messageGap;
+            // Per-message duration adds extra vertical space so the slanted
+            // head endpoint doesn't overlap the next event.
+            final durationPx = event.duration == null
+                ? 0.0
+                : event.duration! * _durationPixelsPerUnit;
+            final advance = _messageGap + durationPx;
+            y += advance;
+            ctx.previousMessageAdvance = advance;
+          }
+          // When this message synchronized onto the previous one, the group's
+          // effective advance is the max of all member messages' advances.
+          if (event.synchronized) {
+            final groupAdvance = math.max(rewoundBy, ctx.previousMessageAdvance);
+            if (groupAdvance > ctx.previousMessageAdvance) {
+              y += groupAdvance - ctx.previousMessageAdvance;
+            }
+            ctx.previousMessageAdvance = groupAdvance;
+          } else {
+            ctx.previousMessageStartY = messageStartY;
           }
           ctx.lastMessageY = y - _messageGap;
         case Note():
@@ -755,10 +1016,20 @@ class SequenceLayout implements DiagramLayout {
     final groupTopY = startY + _groupPaddingTop;
     var contentY = groupTopY + _groupLabelTabHeight + _groupBranchTopPadding;
 
+    // Track each branch's vertical span so coloured fills can be emitted into
+    // `ctx.backgrounds` after layout completes. Spans extend from the bottom
+    // of the previous separator (or the group's top border for branch 0) to
+    // the top of the next separator (or the group's bottom border for the
+    // last branch).
+    final branchSpans = <(double, double, Color?)>[];
+    var branchSpanStart = groupTopY;
     for (var i = 0; i < group.branches.length; i++) {
       final branch = group.branches[i];
       if (i > 0) {
         final dividerY = contentY + _groupElseDividerGap;
+        // Close out the previous branch's span at the divider.
+        branchSpans
+            .add((branchSpanStart, dividerY, group.branches[i - 1].bodyColor));
         ctx.shapes.add(SceneLine(
           from: Offset(ctx.diagramLeftX, dividerY),
           to: Offset(ctx.diagramRightX, dividerY),
@@ -776,11 +1047,34 @@ class SequenceLayout implements DiagramLayout {
           textStyle: _groupBranchStyle,
         ));
         contentY = dividerY + _groupElseDividerGap;
+        branchSpanStart = dividerY;
       }
       contentY += _emitEvents(branch.events, contentY, ctx);
     }
 
     final groupBottomY = contentY + _groupPaddingBottom;
+    // Close out the last branch's span at the group's bottom border.
+    branchSpans
+        .add((branchSpanStart, groupBottomY, group.branches.last.bodyColor));
+
+    // Emit per-branch background fills behind lifelines. Skipping branches
+    // without a colour preserves the previous transparent default.
+    for (final span in branchSpans) {
+      final colour = span.$3;
+      if (colour == null) continue;
+      ctx.backgrounds.add(SceneBox(
+        rect: Rect.fromLTRB(
+          ctx.diagramLeftX,
+          span.$1,
+          ctx.diagramRightX,
+          span.$2,
+        ),
+        fill: colour,
+        stroke: const Color(0x00000000),
+        strokeWidth: 0,
+        textStyle: ctx.labelStyle,
+      ));
+    }
 
     ctx.shapes.add(SceneBox(
       rect: Rect.fromLTRB(
@@ -800,7 +1094,7 @@ class SequenceLayout implements DiagramLayout {
     ctx.shapes.add(SceneBox(
       rect: Rect.fromLTWH(
           ctx.diagramLeftX, groupTopY, tabWidth, _groupLabelTabHeight),
-      fill: _groupLabelTabFill,
+      fill: group.tabColor ?? _groupLabelTabFill,
       stroke: _groupBorder,
       label: kindText,
       textStyle: _groupKindStyle,
@@ -1034,26 +1328,74 @@ class SequenceLayout implements DiagramLayout {
       Message m, double fx, double tx, double y, _Ctx ctx) {
     final stroke = m.color ?? ctx.defaultArrowColor;
     final bidirectional = m.direction == MessageDirection.bidirectional;
+    // PlantUML `->(N)` / `(N)<-` transmission-duration annotation: the head
+    // endpoint sits BELOW the tail endpoint by `N * _durationPixelsPerUnit`,
+    // drawing the arrow as a slanted/diagonal line. The slant direction
+    // mirrors the arrow direction: forward arrows go down-and-right (head
+    // ends at the right), backward arrows go down-and-left (head ends at the
+    // left). Tail Y always stays at `y`; head Y is offset by `durationOffset`.
+    final isBackward = m.direction == MessageDirection.backward;
+    final durationOffset = m.duration == null
+        ? 0.0
+        : m.duration! * _durationPixelsPerUnit;
+    final fromY = isBackward ? y + durationOffset : y;
+    final toY = isBackward ? y : y + durationOffset;
     ctx.shapes.add(SceneLine(
-      from: Offset(fx, y),
-      to: Offset(tx, y),
+      from: Offset(fx, fromY),
+      to: Offset(tx, toY),
       dashed: m.lineStyle == LineStyle.dashed,
       head: m.head,
-      headAtFrom: m.direction == MessageDirection.backward,
+      headAtFrom: isBackward,
       label: m.label,
       labelStyle: ctx.labelStyle,
       stroke: stroke,
     ));
     if (bidirectional) {
       // Tail-only stub so the renderer draws an arrowhead at the FROM side
-      // without duplicating the body stroke.
+      // without duplicating the body stroke. The tail-side shape mirrors the
+      // explicit `tailDecoration` when present (`o<->o`, `x<->x`); otherwise
+      // it defaults to the filled triangle that matches plain `<->`. The
+      // asymmetric form `<->o` (no leading `o`) keeps a filled tail and an
+      // open-circle head.
+      final tailHead = m.tailDecoration == EndpointDecoration.openCircle
+          ? ArrowHead.openCircle
+          : m.tailDecoration == EndpointDecoration.cross
+              ? ArrowHead.cross
+              : ArrowHead.filled;
       final dx = (tx - fx).abs();
       final delta = dx > 0.01 ? (tx > fx ? 0.5 : -0.5) : 0.0;
       ctx.shapes.add(SceneLine(
-        from: Offset(fx + delta, y),
-        to: Offset(fx, y),
+        from: Offset(fx + delta, fromY),
+        to: Offset(fx, fromY),
         dashed: false,
-        head: ArrowHead.filled,
+        head: tailHead,
+        headAtFrom: false,
+        stroke: stroke,
+      ));
+    }
+    // Tail decoration (`o->`, `x->`, `x->o`, `o->o`). For bidirectional
+    // arrows the head shape is already mirrored above; the tail decoration
+    // would draw an identical shape on top, so skip it. We draw the
+    // decoration by emitting a tiny zero-stroke SceneLine whose "head" is
+    // the decoration shape — the line itself is collapsed so it doesn't
+    // double the main body stroke, but the head call still draws.
+    if (!bidirectional && m.tailDecoration != null) {
+      // Tail point: the endpoint OPPOSITE the head triangle.
+      final tailX = isBackward ? tx : fx;
+      final headX = isBackward ? fx : tx;
+      final tailPointY = isBackward ? toY : fromY;
+      // Tiny offset toward the head — the renderer computes the head angle
+      // from (from → to), so we need `from` slightly toward the head and
+      // `to` at the tail so the decoration sits exactly on the tail point.
+      final dir = headX >= tailX ? 1.0 : -1.0;
+      final decoHead = m.tailDecoration == EndpointDecoration.openCircle
+          ? ArrowHead.openCircle
+          : ArrowHead.cross;
+      ctx.shapes.add(SceneLine(
+        from: Offset(tailX + dir * 0.5, tailPointY),
+        to: Offset(tailX, tailPointY),
+        dashed: false,
+        head: decoHead,
         headAtFrom: false,
         stroke: stroke,
       ));
@@ -1137,6 +1479,10 @@ class SequenceLayout implements DiagramLayout {
 
 class _Ctx {
   final List<SceneShape> shapes;
+  // Background fills (e.g. coloured `alt`/`else` branch bodies) that must
+  // render behind lifelines and message arrows. Drained into `shapes` before
+  // participants/lifelines are added.
+  final List<SceneShape> backgrounds;
   final Map<String, double> centers;
   final TextMeasurer measurer;
   final double diagramLeftX;
@@ -1151,11 +1497,21 @@ class _Ctx {
   final Map<String, double> createY = {};
   final Map<String, double> destroyY = {};
   double? lastMessageY;
+  // Y coordinate of the most-recently-emitted message's TAIL endpoint. Used
+  // by the `&` parallel/sync marker so a `synchronized` message rewinds its
+  // start to share the same tail Y as the immediately preceding message.
+  double? previousMessageStartY;
+  // Y delta consumed by the most-recently-emitted message (`_messageGap` plus
+  // any diagonal duration offset). When a synchronized message rewinds, the
+  // group's overall Y advance must be `max(previousAdvance, currentAdvance)`
+  // so the next event clears the tallest slant in the group.
+  double previousMessageAdvance = 0.0;
   double rightmost;
   double leftmost;
 
   _Ctx({
     required this.shapes,
+    required this.backgrounds,
     required this.centers,
     required this.measurer,
     required this.diagramLeftX,

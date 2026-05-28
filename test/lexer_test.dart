@@ -500,8 +500,11 @@ void main() {
 
     group('hyphen in identifier', () {
       test('lexes Multi-region as a single identifier', () {
+        // `title` captures rest-of-line as a single text token (so embedded
+        // markup like `__bold__` and `\n` escapes survive), so use a context
+        // that lexes identifiers individually.
         final tokens = Lexer()
-            .tokenize('@startuml\ntitle Multi-region deployment\n@enduml\n');
+            .tokenize('@startuml\nMulti-region -> deployment\n@enduml\n');
         final identifiers = tokens
             .where((t) => t.type == TokenType.identifier)
             .map((t) => t.lexeme)

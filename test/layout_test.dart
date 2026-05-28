@@ -170,6 +170,112 @@ void main() {
       expect(topBoxes.map((b) => b.label), ['C', 'A', 'B']);
     });
 
+    test('default (hideUnlinked=false) keeps declared but unreferenced '
+        'participants — regression guard', () {
+      final scene = layout.layout(
+        const SequenceDiagram(
+          participants: [
+            Participant(alias: 'Alice'),
+            Participant(alias: 'Bob'),
+            Participant(alias: 'Carol'),
+          ],
+          events: [
+            Message(from: 'Alice', to: 'Bob'),
+          ],
+          // hideUnlinked defaults to false.
+        ),
+        measurer,
+      );
+      final labels = scene.shapes
+          .whereType<SceneBox>()
+          .map((b) => b.label)
+          .whereType<String>()
+          .toSet();
+      // All three header/footer boxes render.
+      expect(labels, containsAll(['Alice', 'Bob', 'Carol']));
+    });
+
+    test('hideUnlinked drops participants with no Message reference', () {
+      final scene = layout.layout(
+        const SequenceDiagram(
+          participants: [
+            Participant(alias: 'Alice'),
+            Participant(alias: 'Bob'),
+            Participant(alias: 'Carol'),
+          ],
+          events: [
+            Message(from: 'Alice', to: 'Bob'),
+          ],
+          hideUnlinked: true,
+        ),
+        measurer,
+      );
+      final labels = scene.shapes
+          .whereType<SceneBox>()
+          .map((b) => b.label)
+          .whereType<String>()
+          .toSet();
+      // Carol — unreferenced — must be gone. Alice and Bob remain.
+      expect(labels, containsAll(['Alice', 'Bob']));
+      expect(labels, isNot(contains('Carol')));
+    });
+
+    test('hideUnlinked: a created participant (Create event) is NOT hidden, '
+        'because the create message references it', () {
+      // The parser lowers `A -> B **` into a Message(from:A, to:B) plus a
+      // Create event. The Message reference is what makes B "linked".
+      final scene = layout.layout(
+        const SequenceDiagram(
+          participants: [
+            Participant(alias: 'Alice'),
+          ],
+          events: [
+            Create('Bob'),
+            Message(from: 'Alice', to: 'Bob'),
+          ],
+          hideUnlinked: true,
+        ),
+        measurer,
+      );
+      final labels = scene.shapes
+          .whereType<SceneBox>()
+          .map((b) => b.label)
+          .whereType<String>()
+          .toSet();
+      expect(labels, containsAll(['Alice', 'Bob']));
+    });
+
+    test('hideUnlinked: when filtering empties a box, the box is not rendered',
+        () {
+      final scene = layout.layout(
+        const SequenceDiagram(
+          participants: [
+            Participant(alias: 'Alice'),
+            Participant(alias: 'Bob'),
+          ],
+          boxes: [
+            ParticipantBox(
+              label: 'EmptyBox',
+              participants: [Participant(alias: 'Carol')],
+            ),
+          ],
+          events: [
+            Message(from: 'Alice', to: 'Bob'),
+          ],
+          hideUnlinked: true,
+        ),
+        measurer,
+      );
+      // No SceneBox label should match the now-empty box's label.
+      final labels = scene.shapes
+          .whereType<SceneBox>()
+          .map((b) => b.label)
+          .whereType<String>()
+          .toSet();
+      expect(labels, isNot(contains('EmptyBox')));
+      expect(labels, isNot(contains('Carol')));
+    });
+
     test('displayName is used as actor label when present', () {
       final scene = layout.layout(
         const SequenceDiagram(

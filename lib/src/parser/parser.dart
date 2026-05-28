@@ -43,6 +43,33 @@ class Parser {
   var _decorations = _DiagramDecorationBuilder();
   final _pendingMessageAliases = <String, String>{};
   Message? _lastForwardMessage;
+  // Monotonic counter used to mint unique placeholder aliases for anonymous
+  // "found" / "lost" message endpoints. Reset per parse() invocation.
+  int _externalEndpointCounter = 0;
+  bool _autoactivate = false;
+  // Set by `hide unlinked` at top-level sequence scope. Order-independent —
+  // applied as a filter on participantsInOrder() at render time.
+  bool _hideUnlinked = false;
+  // Set by `ignore newpage` at top-level sequence scope. When true,
+  // subsequent `newpage` / `newpage <title>` directives are consumed but
+  // produce no NewPage event — the diagram renders as a single page.
+  bool _ignoreNewpage = false;
+  // Set by the `mainframe <label>` directive at top-level sequence scope.
+  // Layout consumes this to wrap the diagram in a UML frame with a folded-
+  // corner tab in the top-left. Inline markup (e.g. `**bold**`) is honoured
+  // at render time via `parseInlineMarkup`.
+  String? _mainframeLabel;
+  // Stack of (caller, callee, callColor) frames used by `autoactivate on` to
+  // lower `return label` into a reverse dashed message + Deactivate. Only
+  // forward, non-self, non-destroy calls push a frame.
+  final List<(String, String, Color?)> _callStack = [];
+  // Insertion-ordered set of participant aliases seen so far during the
+  // current sequence-diagram parse. Populated by explicit participant
+  // declarations and by message endpoints (excluding the synthetic
+  // `__external_*` placeholders for found/lost arrows). Consumed by
+  // `_parseNote` to resolve `note across` / `hnote across` shorthand to the
+  // current first..last participant span.
+  final Set<String> _declaredAliases = <String>{};
 
   Diagram parse(List<Token> tokens) {
     _tokens = tokens;
@@ -51,6 +78,13 @@ class Parser {
     _decorations = _DiagramDecorationBuilder();
     _pendingMessageAliases.clear();
     _lastForwardMessage = null;
+    _externalEndpointCounter = 0;
+    _autoactivate = false;
+    _hideUnlinked = false;
+    _ignoreNewpage = false;
+    _mainframeLabel = null;
+    _callStack.clear();
+    _declaredAliases.clear();
 
     _skipNewlines();
     if (_check(TokenType.startMindmap)) {
@@ -107,14 +141,27 @@ class Parser {
     } else if (_looksLikeActivityDiagram()) {
       return _parseActivityDiagram();
     }
+    // An unambiguous class marker (`class`, `enum`, `abstract`, etc.) at line
+    // start wins over the use-case heuristic — use-case detection can fire on
+    // PlantUML class-diagram constructs that include parenthesized endpoints
+    // (e.g. association-class `(A, B) .. C`) which look use-case-like but are
+    // class-diagram syntax when a class header keyword is present.
+    if (_hasUnambiguousClassMarker()) {
+      return _parseClassDiagram();
+    }
     if (_looksLikeUseCaseDiagram()) {
       return _parseUseCaseDiagram();
     }
     if (_looksLikeStateDiagram()) {
       return _parseStateDiagram();
     }
-    if (_hasUnambiguousClassMarker()) {
-      return _parseClassDiagram();
+    // A bare `json` keyword inside `@startuml ... @enduml` declares an
+    // inline JSON-rendered block. Route to the JSON diagram parser before
+    // the component / class detectors so that JSON-body content (e.g.
+    // bracket tokens at line start inside arrays) doesn't accidentally
+    // trigger component-diagram routing.
+    if (_looksLikeInlineJsonDiagram()) {
+      return _parseInlineJsonAsDataDiagram();
     }
     if (_looksLikeComponentDiagram()) {
       return _parseComponentDiagram();
@@ -131,11 +178,24 @@ class Parser {
         _skipNewlines();
         continue;
       }
+      if (_tryConsumeAllowmixing()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_tryConsumeInlineJsonBlock()) {
+        _skipNewlines();
+        continue;
+      }
       final kind = _check(TokenType.identifier)
           ? _participantKinds[_peek().lexeme]
           : null;
       if (kind != null) {
         participants.add(_parseParticipant(kind));
+      } else if (_check(TokenType.colon)) {
+        // Implicit actor declaration: `:Display name: [as Alias]` at line
+        // start. The leading `:` and the trailing `:` form a colon-wrapped
+        // display name. Defaults the kind to actor.
+        participants.add(_parseInlineActorDeclaration());
       } else if (_isKeyword('create')) {
         _parseCreate(participants, events);
       } else if (_isKeyword('destroy')) {
@@ -145,9 +205,11 @@ class Parser {
       } else if (_isKeyword('autonumber')) {
         _parseAutonumber();
       } else if (_isKeyword('autoactivate')) {
-        _consumeRestOfLine();
+        _parseAutoactivate();
       } else if (_isKeyword('hide') || _isKeyword('show')) {
-        _consumeRestOfLine();
+        _parseHideShow();
+      } else if (_isKeyword('mainframe')) {
+        _parseMainframe();
       } else {
         _parseEvent(events);
       }
@@ -160,8 +222,44 @@ class Parser {
       events: List.unmodifiable(events),
       boxes: List.unmodifiable(boxes),
       aliasDisplayNames: Map.unmodifiable(_pendingMessageAliases),
+      autoactivate: _autoactivate,
+      hideUnlinked: _hideUnlinked,
+      mainframeLabel: _mainframeLabel,
       decorations: _decorations.build(),
     );
+  }
+
+  /// Parses a `mainframe <label>` directive at sequence-top-level scope.
+  ///
+  /// The lexer captures the rest of the line as a single text token so
+  /// inline markup (e.g. `**bold**`) survives intact. A bare `mainframe`
+  /// with no label is accepted and stored as an empty string so layout
+  /// still draws the wrapping frame.
+  void _parseMainframe() {
+    _advance(); // consume 'mainframe' identifier
+    String label = '';
+    if (_check(TokenType.text)) {
+      label = _advance().lexeme;
+    }
+    _mainframeLabel = label;
+  }
+
+  /// Parses a sequence-scope `hide` / `show` directive line.
+  ///
+  /// Only `hide unlinked` currently has an effect — it sets the
+  /// [_hideUnlinked] flag, which the layout uses to drop participants that
+  /// no message references. All other `hide`/`show` variants (e.g.
+  /// `hide footbox`, `show Alice`) are accepted but currently no-ops; we
+  /// consume the rest of the line so they parse without error.
+  void _parseHideShow() {
+    final keyword = _advance().lexeme; // 'hide' or 'show'
+    if (keyword == 'hide' &&
+        _check(TokenType.identifier) &&
+        _peek().lexeme == 'unlinked') {
+      _advance();
+      _hideUnlinked = true;
+    }
+    _consumeRestOfLine();
   }
 
   bool _tryParseDecoration() {
@@ -247,6 +345,21 @@ class Parser {
             t.column);
       }
       final key = _advance().lexeme;
+      // PlantUML lets per-stereotype overrides ride inside a skinparam block,
+      // e.g. `BackgroundColor<< Main >> YellowGreen`. The lexer emits the
+      // `<< ... >>` as a single [TokenType.stereotype] token. We don't yet
+      // model per-stereotype skin overrides, so consume the rest of the line
+      // and continue without applying anything.
+      if (_check(TokenType.stereotype)) {
+        while (!_check(TokenType.newline) &&
+            !_check(TokenType.rightBrace) &&
+            !_check(TokenType.eof) &&
+            !_check(TokenType.endUml)) {
+          _advance();
+        }
+        _skipNewlines();
+        continue;
+      }
       final value = _readSkinparamValue();
       _applySkinparam('$prefix$key', value);
       _skipNewlines();
@@ -322,7 +435,40 @@ class Parser {
       throw ParserException(
           "Expected text after '$keyword'", startToken.line, startToken.column);
     }
-    return text;
+    // PlantUML's block form `title <inline text>\n<body>\nend title` mixes an
+    // inline opener line with additional body lines. If we see body content
+    // followed by `end <keyword>`, treat the inline text as the first body
+    // line and append the remaining lines.
+    if (_check(TokenType.newline) && _peekHasMatchingEnd(keyword)) {
+      final rest = _consumeMultilineBody(keyword, startToken);
+      if (rest.isEmpty) {
+        return text.replaceAll(r'\n', '\n');
+      }
+      return '${text.replaceAll(r'\n', '\n')}\n$rest';
+    }
+    // PlantUML allows `\n` as a literal newline marker in single-line
+    // decoration text (title, caption, header, footer). Normalize it so the
+    // renderer sees a real newline character.
+    return text.replaceAll(r'\n', '\n');
+  }
+
+  /// Returns true if the token stream from the current position contains an
+  /// `end <keyword>` (e.g. `end title`) before EOF / `@enduml`. Used to detect
+  /// the mixed block form where the opener line carries inline text and
+  /// subsequent lines extend the body.
+  bool _peekHasMatchingEnd(String keyword) {
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.eof || t.type == TokenType.endUml) return false;
+      if (t.type == TokenType.identifier &&
+          t.lexeme == 'end' &&
+          k + 1 < _tokens.length &&
+          _tokens[k + 1].type == TokenType.identifier &&
+          _tokens[k + 1].lexeme == keyword) {
+        return true;
+      }
+    }
+    return false;
   }
 
   HeaderFooter _parseHeaderFooter(String keyword) {
@@ -477,6 +623,7 @@ class Parser {
     _skipNewlines();
 
     final inner = <Participant>[];
+    final children = <ParticipantBox>[];
     while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
       if (_isKeyword('end') &&
           _pos + 1 < _tokens.length &&
@@ -488,11 +635,13 @@ class Parser {
           label: label,
           color: color,
           participants: List.unmodifiable(inner),
+          children: List.unmodifiable(children),
         );
       }
       if (_isKeyword('box')) {
-        final t = _peek();
-        throw ParserException('Nested box is not allowed', t.line, t.column);
+        children.add(_parseBox(topLevelParticipants));
+        _skipNewlines();
+        continue;
       }
       final kind = _check(TokenType.identifier)
           ? _participantKinds[_peek().lexeme]
@@ -534,27 +683,41 @@ class Parser {
       return;
     }
     if (_isKeyword('autoactivate')) {
-      _consumeRestOfLine();
+      _parseAutoactivate();
       return;
     }
     if (_isKeyword('return')) {
       _advance();
       final label = _collectInlineText();
-      // PlantUML semantics: `return` is a reply from current callee back to
-      // the most recent caller. We approximate by reusing the last forward
-      // message's reverse direction.
-      final last = _lastForwardMessage;
-      if (last != null) {
+      // PlantUML semantics: `return` is a reply from the current callee back
+      // to its caller. Whenever the call stack has a frame (because
+      // `autoactivate on` was active OR the caller used an explicit `++`/`**`
+      // suffix) we pop it so chained returns unwind to the original caller.
+      // Otherwise fall back to the last forward message (legacy behaviour).
+      String? callee;
+      String? caller;
+      if (_callStack.isNotEmpty) {
+        final frame = _callStack.removeLast();
+        caller = frame.$1;
+        callee = frame.$2;
+      } else {
+        final last = _lastForwardMessage;
+        if (last != null) {
+          caller = last.from;
+          callee = last.to;
+        }
+      }
+      if (callee != null && caller != null) {
         out.add(Message(
-          from: last.to,
-          to: last.from,
+          from: callee,
+          to: caller,
           label: label == null ? null : _expandText(label),
           lineStyle: LineStyle.dashed,
           head: ArrowHead.open,
           direction: MessageDirection.backward,
           activation: ActivationSuffix.deactivateSource,
         ));
-        out.add(Deactivate(last.to));
+        out.add(Deactivate(callee));
       }
       return;
     }
@@ -615,9 +778,22 @@ class Parser {
       out.add(const Separator(kind: SeparatorKind.dash));
       return;
     }
+    if (_isKeyword('ignore') &&
+        _pos + 1 < _tokens.length &&
+        _tokens[_pos + 1].type == TokenType.identifier &&
+        _tokens[_pos + 1].lexeme == 'newpage') {
+      _advance();
+      _advance();
+      _collectLineRemainder();
+      _ignoreNewpage = true;
+      return;
+    }
     if (_isKeyword('newpage')) {
       _advance();
       final title = _collectLineRemainder();
+      if (_ignoreNewpage) {
+        return;
+      }
       out.add(NewPage(title));
       return;
     }
@@ -637,6 +813,45 @@ class Parser {
         out.add(_parseGroup(kind));
         return;
       }
+    }
+    // PlantUML sync directive: a standalone `/` line aligns the next event
+    // with the previous one at the same Y. Visual alignment is currently
+    // deferred — consume the token so the surrounding source still parses.
+    if (_check(TokenType.slash)) {
+      _advance();
+      return;
+    }
+    // PlantUML standalone `&` line (used with `!pragma teoz true`): the next
+    // event begins at the same Y as the previous one. Visual sync alignment
+    // is currently deferred — we just consume the `&` and re-dispatch.
+    //   * Bare `&` followed by a newline → no event.
+    //   * `& A -> B` (prefix message form) → handled inside `_parseMessage`,
+    //     which checks for a leading `&` itself; we fall through without
+    //     consuming.
+    //   * `& note ...` (prefix note form) → consume `&` and recurse into
+    //     `_parseNote`.
+    if (_check(TokenType.amp)) {
+      if (_pos + 1 >= _tokens.length) {
+        _advance();
+        return;
+      }
+      final next = _tokens[_pos + 1];
+      if (next.type == TokenType.newline ||
+          next.type == TokenType.eof ||
+          next.type == TokenType.endUml) {
+        _advance();
+        return;
+      }
+      if (next.type == TokenType.identifier &&
+          (next.lexeme == 'note' ||
+              next.lexeme == 'hnote' ||
+              next.lexeme == 'rnote')) {
+        _advance();
+        out.add(_parseNote());
+        return;
+      }
+      // Fall through: `_parseMessage` consumes the leading `&` for the
+      // prefix message form and records `synchronized: true`.
     }
     _parseMessage(out);
   }
@@ -696,6 +911,27 @@ class Parser {
           t.column);
     }
     events.add(Create(_advance().lexeme));
+  }
+
+  void _parseAutoactivate() {
+    _advance();
+    // Optional argument: `on` / `off`. Anything else (or nothing) defaults to
+    // turning autoactivate on, matching PlantUML's behaviour.
+    var enable = true;
+    if (_check(TokenType.identifier)) {
+      final word = _peek().lexeme.toLowerCase();
+      if (word == 'on') {
+        _advance();
+      } else if (word == 'off') {
+        _advance();
+        enable = false;
+      }
+    }
+    _consumeRestOfLine();
+    _autoactivate = enable;
+    if (!enable) {
+      _callStack.clear();
+    }
   }
 
   void _parseAutonumber() {
@@ -904,6 +1140,11 @@ class Parser {
       displayName = _advance().lexeme;
       _expectKeyword('as');
       alias = _expect(TokenType.identifier).lexeme;
+    } else if (_check(TokenType.colon)) {
+      // `<kind> :Display name: [as Alias]` — colon-wrapped display name.
+      final decl = _consumeColonWrappedDisplayName();
+      displayName = decl.displayName;
+      alias = decl.alias ?? _deriveAliasFromDisplayName(decl.displayName);
     } else if (_check(TokenType.identifier)) {
       final first = _advance().lexeme;
       if (_isKeyword('as')) {
@@ -922,9 +1163,16 @@ class Parser {
     int? order;
     Color? color;
     List<ParticipantLabelSection>? labelSections;
+    String? stereotype;
     // Consume optional trailing modifiers in any order: #color, order N,
-    // and multi-line `[ ... ]` rich label (kept as display name when given).
+    // `<< Stereotype >>`, and multi-line `[ ... ]` rich label (kept as
+    // display name when given).
     while (true) {
+      if (_check(TokenType.stereotype)) {
+        final lex = _advance().lexeme;
+        stereotype ??= lex.isEmpty ? null : lex;
+        continue;
+      }
       if (_check(TokenType.hashColor)) {
         final t = _advance();
         // Strip leading '#' before parsing.
@@ -1019,43 +1267,167 @@ class Parser {
       }
       break;
     }
+    _declaredAliases.add(alias);
     return Participant(
         alias: alias,
         displayName: displayName,
         kind: kind,
         order: order,
         labelSections: labelSections,
-        color: color);
+        color: color,
+        stereotype: stereotype);
+  }
+
+  /// Parses an implicit actor declaration of the form `:Display name: [as
+  /// Alias]` at sequence top-level. The current token must be the opening
+  /// [TokenType.colon]. The lifted display name and (optional) explicit alias
+  /// are wrapped into a [Participant] with [ParticipantKind.actor]; when no
+  /// `as` clause is given the alias is derived from the display name by
+  /// stripping internal whitespace and embedded `\n` markers.
+  Participant _parseInlineActorDeclaration() {
+    final decl = _consumeColonWrappedDisplayName();
+    final alias = decl.alias ?? _deriveAliasFromDisplayName(decl.displayName);
+    _declaredAliases.add(alias);
+    return Participant(
+      alias: alias,
+      displayName: decl.displayName,
+      kind: ParticipantKind.actor,
+    );
+  }
+
+  /// Consumes a `:Display name:` block (optionally followed by `as Alias`).
+  ///
+  /// The opening colon must be the current token. The lexer emits the rest
+  /// of the line as a single [TokenType.text] token immediately after the
+  /// colon — that text holds the display-name characters, the closing `:`,
+  /// and optionally a trailing ` as Alias`. The display name supports `\n`
+  /// (literal backslash + `n`) which is converted to a real newline so it
+  /// renders on multiple lines.
+  _ColonWrappedName _consumeColonWrappedDisplayName() {
+    final open = _expect(TokenType.colon);
+    if (!_check(TokenType.text)) {
+      throw ParserException(
+          "Expected display name after ':', got ${_peek().type}",
+          open.line,
+          open.column);
+    }
+    final textTok = _advance();
+    final raw = textTok.lexeme;
+    final closingColon = raw.indexOf(':');
+    if (closingColon < 0) {
+      throw ParserException(
+          "Expected closing ':' after display name", open.line, open.column);
+    }
+    final namePart = raw.substring(0, closingColon);
+    var remainder = raw.substring(closingColon + 1).trim();
+    final displayName = namePart.replaceAll(r'\n', '\n');
+
+    // PlantUML "phantom"/hidden-node marker: a trailing `/` immediately after
+    // the closing colon (e.g. `:Actor:/` or `:Actor:/ as Alias`). Consume the
+    // marker as a no-op so the rest of the line still parses normally. Visual
+    // hiding is currently deferred.
+    if (remainder.startsWith('/')) {
+      remainder = remainder.substring(1).trimLeft();
+    }
+
+    // Strip an optional trailing `<< Stereotype >>` so the leftover remainder
+    // still matches the legacy `as Alias` pattern. The lexer keeps the rest
+    // of the colon-actor line as a single text token, so we cannot rely on
+    // the standalone [TokenType.stereotype] token here.
+    String? stereotype;
+    final stereoEnd = remainder.lastIndexOf('>>');
+    if (stereoEnd >= 0 && stereoEnd == remainder.length - 2) {
+      final stereoStart = remainder.lastIndexOf('<<', stereoEnd);
+      if (stereoStart >= 0) {
+        stereotype =
+            remainder.substring(stereoStart + 2, stereoEnd).trim();
+        if (stereotype.isEmpty) stereotype = null;
+        remainder = remainder.substring(0, stereoStart).trim();
+      }
+    }
+
+    String? alias;
+    if (remainder.isNotEmpty) {
+      final asMatch = RegExp(r'^as\s+(\S+)\s*$').firstMatch(remainder);
+      if (asMatch == null) {
+        throw ParserException(
+            "Unexpected text after display name: '$remainder'",
+            textTok.line,
+            textTok.column + closingColon + 1);
+      }
+      alias = asMatch.group(1);
+    }
+    return _ColonWrappedName(displayName, alias, stereotype: stereotype);
+  }
+
+  /// Derives an alias from a display name by stripping all whitespace
+  /// (including embedded newlines from `\n` markers). Keeps the casing.
+  ///
+  /// Examples:
+  /// - `First Actor` -> `FirstActor`
+  /// - `Another\nactor` -> `Anotheractor` (after newline conversion)
+  ///
+  /// If the result is empty (e.g. all-whitespace display name) we fall
+  /// back to the raw display name so the participant still gets a
+  /// non-empty alias.
+  static String _deriveAliasFromDisplayName(String displayName) {
+    final stripped = displayName.replaceAll(RegExp(r'\s+'), '');
+    return stripped.isEmpty ? displayName : stripped;
   }
 
   Note _parseNote() {
-    _advance();
+    // Capture the keyword variant so we can attach the visible shape:
+    //   `note`  -> rectangle (default)
+    //   `rnote` -> rectangle (explicit)
+    //   `hnote` -> hexagon
+    final keywordTok = _advance();
+    final NoteShape shape = (keywordTok.lexeme == 'hnote')
+        ? NoteShape.hexagon
+        : NoteShape.rectangle;
 
     final NotePosition position;
     var requireTarget = true;
+    // PlantUML shorthand: `note across` / `hnote across` / `rnote across`
+    // attach the note to every participant currently declared, equivalent to
+    // `note over <first>, <last>`. Implemented as a synonym branch so the
+    // surviving Note carries the full participant list and downstream layout
+    // treats it identically to an over-multiple-participants note.
+    var across = false;
     if (_isKeyword('left')) {
       _advance();
       if (_isKeyword('of')) {
         _advance();
-      } else {
+      } else if (!_check(TokenType.identifier) &&
+          !_check(TokenType.stringLiteral)) {
+        // No `of` and no participant identifier → note attaches to the
+        // previous message's relevant participant. Layout currently treats
+        // this the same as a target-less note.
         requireTarget = false;
       }
+      // `note left <Id>` (without `of`) is accepted as PlantUML shorthand;
+      // the identifier is consumed below as the target participant.
       position = NotePosition.leftOf;
     } else if (_isKeyword('right')) {
       _advance();
       if (_isKeyword('of')) {
         _advance();
-      } else {
+      } else if (!_check(TokenType.identifier) &&
+          !_check(TokenType.stringLiteral)) {
         requireTarget = false;
       }
       position = NotePosition.rightOf;
     } else if (_isKeyword('over')) {
       _advance();
       position = NotePosition.over;
+    } else if (_isKeyword('across')) {
+      _advance();
+      position = NotePosition.over;
+      requireTarget = false;
+      across = true;
     } else {
       final t = _peek();
       throw ParserException(
-          "Expected 'left of', 'right of', or 'over', got '${t.lexeme}'",
+          "Expected 'left of', 'right of', 'over', or 'across', got '${t.lexeme}'",
           t.line,
           t.column);
     }
@@ -1069,6 +1441,11 @@ class Parser {
           participants.add(_expect(TokenType.identifier).lexeme);
         }
       }
+    } else if (across) {
+      // Snapshot the participant set at the point the `across` note is
+      // encountered. Forward references would yield an empty list, which the
+      // layout already handles as "spans all" via the over-multiple path.
+      participants.addAll(_declaredAliases);
     }
     Color? color;
     if (_check(TokenType.hashColor)) {
@@ -1089,11 +1466,21 @@ class Parser {
     } else if (_check(TokenType.newline)) {
       text = _expandText(_consumeMultilineNoteBody());
     } else {
-      final t = _peek();
-      throw ParserException(
-          "Expected ':' or newline after note header, got ${t.type}",
-          t.line,
-          t.column);
+      // Trailing content on the same line as the header (PlantUML allows
+      // e.g. `rnote over server "r" as rectangle` where the trailing
+      // tokens are the first body line). Collect lexemes until the
+      // newline, then continue consuming the multi-line body.
+      final firstLine = _collectHeaderTrailingAsBodyLine();
+      if (_check(TokenType.newline)) {
+        final rest = _consumeMultilineNoteBody();
+        text = _expandText(rest.isEmpty ? firstLine : '$firstLine\n$rest');
+      } else {
+        final t = _peek();
+        throw ParserException(
+            "Expected ':' or newline after note header, got ${t.type}",
+            t.line,
+            t.column);
+      }
     }
 
     return Note(
@@ -1101,7 +1488,36 @@ class Parser {
       participants: List.unmodifiable(participants),
       text: text,
       color: color,
+      shape: shape,
     );
+  }
+
+  /// Collects tokens on the remainder of the current line into a single
+  /// body line string. Used when a `note`/`rnote`/`hnote` header has
+  /// arbitrary trailing content (not introduced by `:`) on the same line
+  /// as the header, which PlantUML treats as the first body line.
+  ///
+  /// String literals had their surrounding quotes stripped by the lexer;
+  /// we re-add them here so the original quoted-token shape is preserved
+  /// in the body text.
+  String _collectHeaderTrailingAsBodyLine() {
+    final buf = StringBuffer();
+    var first = true;
+    while (!_check(TokenType.newline) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      final t = _advance();
+      if (!first) buf.write(' ');
+      first = false;
+      if (t.type == TokenType.stringLiteral) {
+        buf.write('"');
+        buf.write(t.lexeme);
+        buf.write('"');
+      } else {
+        buf.write(t.lexeme);
+      }
+    }
+    return buf.toString();
   }
 
   String _consumeMultilineNoteBody() {
@@ -1121,6 +1537,17 @@ class Parser {
           _tokens[_pos + 1].type == TokenType.identifier &&
           _tokens[_pos + 1].lexeme == 'note') {
         _advance();
+        _advance();
+        return lines.join('\n');
+      }
+      // Lexer emits `endnote`, `endrnote`, `endhnote` as single identifier
+      // tokens. Accept any of them as terminators for the multi-line body
+      // of `note` / `rnote` / `hnote` (PlantUML is lenient about cross
+      // pairing).
+      if (atLineStart &&
+          (_isKeyword('endnote') ||
+              _isKeyword('endrnote') ||
+              _isKeyword('endhnote'))) {
         _advance();
         return lines.join('\n');
       }
@@ -1146,13 +1573,24 @@ class Parser {
       participants.add(_expect(TokenType.identifier).lexeme);
     }
 
-    _expect(TokenType.colon);
-    if (!_check(TokenType.text)) {
+    final String text;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected ref text, got ${t.type}', t.line, t.column);
+      }
+      text = _advance().lexeme;
+    } else if (_check(TokenType.newline)) {
+      text = _consumeMultilineRefBody();
+    } else {
       final t = _peek();
       throw ParserException(
-          'Expected ref text, got ${t.type}', t.line, t.column);
+          "Expected ':' or newline after ref header, got ${t.type}",
+          t.line,
+          t.column);
     }
-    final text = _advance().lexeme;
 
     return RefBox(
       participants: List.unmodifiable(participants),
@@ -1160,8 +1598,54 @@ class Parser {
     );
   }
 
+  String _consumeMultilineRefBody() {
+    _advance();
+    final lines = <String>[];
+    while (true) {
+      if (_check(TokenType.eof) || _check(TokenType.endUml)) {
+        final t = _peek();
+        throw ParserException(
+            "Expected 'end ref' to close multi-line ref", t.line, t.column);
+      }
+      final atLineStart =
+          _pos == 0 || _tokens[_pos - 1].type == TokenType.newline;
+      if (atLineStart &&
+          _isKeyword('end') &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          _tokens[_pos + 1].lexeme == 'ref') {
+        _advance();
+        _advance();
+        return lines.join('\n');
+      }
+      if (atLineStart && _isKeyword('endref')) {
+        _advance();
+        return lines.join('\n');
+      }
+      if (_check(TokenType.text)) {
+        lines.add(_advance().lexeme);
+      }
+      if (_check(TokenType.newline)) _advance();
+    }
+  }
+
   Group _parseGroup(GroupKind kind) {
     _advance();
+    // PlantUML allows `alt#TabColor #BodyColor label` where the first colour
+    // (attached to the keyword without whitespace) tints the small kind tab
+    // and the second colour (with whitespace) fills the first branch body.
+    // The lexer already emits these as separate `hashColor` tokens regardless
+    // of attachment, so peek for up to two consecutive hashColor tokens.
+    Color? tabColor;
+    if (_check(TokenType.hashColor)) {
+      final tok = _advance();
+      tabColor = _parseColor(tok.lexeme, tok);
+    }
+    Color? firstBodyColor;
+    if (_check(TokenType.hashColor)) {
+      final tok = _advance();
+      firstBodyColor = _parseColor(tok.lexeme, tok);
+    }
     final firstLabel = _collectLineRemainder();
     _skipNewlines();
 
@@ -1174,11 +1658,19 @@ class Parser {
       _parseEvent(firstEvents);
       _skipNewlines();
     }
-    branches.add(
-        GroupBranch(label: firstLabel, events: List.unmodifiable(firstEvents)));
+    branches.add(GroupBranch(
+      label: firstLabel,
+      events: List.unmodifiable(firstEvents),
+      bodyColor: firstBodyColor,
+    ));
 
     while (_isKeyword('else')) {
       _advance();
+      Color? bodyColor;
+      if (_check(TokenType.hashColor)) {
+        final tok = _advance();
+        bodyColor = _parseColor(tok.lexeme, tok);
+      }
       final label = _collectLineRemainder();
       _skipNewlines();
       final inner = <SequenceEvent>[];
@@ -1189,11 +1681,19 @@ class Parser {
         _parseEvent(inner);
         _skipNewlines();
       }
-      branches.add(GroupBranch(label: label, events: List.unmodifiable(inner)));
+      branches.add(GroupBranch(
+        label: label,
+        events: List.unmodifiable(inner),
+        bodyColor: bodyColor,
+      ));
     }
 
     _expectKeyword('end');
-    return Group(kind: kind, branches: List.unmodifiable(branches));
+    return Group(
+      kind: kind,
+      branches: List.unmodifiable(branches),
+      tabColor: tabColor,
+    );
   }
 
   String? _collectLineRemainder() {
@@ -1210,12 +1710,27 @@ class Parser {
   }
 
   void _parseMessage(List<SequenceEvent> out) {
-    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
+    // PlantUML allows "found" messages where the source is anonymous and the
+    // arrow itself begins the line (`[-> Target` or `?-> Target`). In that
+    // case the lexer absorbs the `[` / `?` sigil into the arrow token, so we
+    // don't see a preceding identifier.
+    //
+    // PlantUML `& Source -> Target` (parallel/sync marker, used together with
+    // `!pragma teoz true`) means this message shares its START Y coordinate
+    // with the previous message. Consume the leading `&` token if present.
+    var synchronized = false;
+    if (_check(TokenType.amp)) {
+      _advance();
+      synchronized = true;
+    }
+    String? from;
+    if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+      from = _advance().lexeme;
+    } else if (!_check(TokenType.arrow)) {
       final t = _peek();
       throw ParserException(
           'Expected participant, got ${t.type}', t.line, t.column);
     }
-    final from = _advance().lexeme;
 
     if (!_check(TokenType.arrow)) {
       final t = _peek();
@@ -1225,26 +1740,73 @@ class Parser {
     final arrowToken = _advance();
     final decoded = _decodeArrow(arrowToken);
 
-    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
+    // If the arrow encoded a found-marker (`[->` / `?->`) the source must be
+    // external and there must not have been a preceding identifier.
+    if (decoded.leftExternal != null && from != null) {
+      throw ParserException(
+          "Unexpected source identifier '$from' before found-message arrow",
+          arrowToken.line, arrowToken.column);
+    }
+    if (decoded.leftExternal == null && from == null) {
+      throw ParserException(
+          'Expected participant before arrow', arrowToken.line, arrowToken.column);
+    }
+
+    String? to;
+    if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+      if (decoded.rightExternal != null) {
+        final t = _peek();
+        throw ParserException(
+            "Unexpected target identifier '${t.lexeme}' after lost-message arrow",
+            t.line, t.column);
+      }
+      to = _advance().lexeme;
+    } else if (decoded.rightExternal == null) {
       final t = _peek();
       throw ParserException(
           'Expected participant, got ${t.type}', t.line, t.column);
     }
-    var to = _advance().lexeme;
+    // Synthesize placeholder aliases for external endpoints. They must never
+    // be touched by participantsInOrder (the AST's `Message.fromExternal` /
+    // `toExternal` fields gate that) but layout still keys per-event maps by
+    // the alias string, so we need a deterministic placeholder.
+    String resolveExternalAlias(MessageExternal kind, int seq) =>
+        '__external_${kind.name}_$seq';
+    if (decoded.leftExternal != null) {
+      from = resolveExternalAlias(
+          decoded.leftExternal!, _externalEndpointCounter++);
+    }
+    if (decoded.rightExternal != null) {
+      to = resolveExternalAlias(
+          decoded.rightExternal!, _externalEndpointCounter++);
+    }
     // `"display" as Alias` rebinds the target's alias; remember the display
-    // name so the auto-declared participant still shows it.
+    // name so the auto-declared participant still shows it. Anonymous
+    // endpoints (`->]` / `->?`) never carry an `as` rebinding.
     String? toDisplay;
-    if (_isKeyword('as')) {
+    if (decoded.rightExternal == null && _isKeyword('as')) {
       _advance();
       if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
         toDisplay = to;
         to = _advance().lexeme;
         if (!_pendingMessageAliases.containsKey(to)) {
-          _pendingMessageAliases[to] = toDisplay;
+          _pendingMessageAliases[to] = toDisplay!;
         }
       }
     }
-    // Optional per-message color spec `#RRGGBB` between target and `:`.
+    // Track participants implicitly declared by this message so `note across`
+    // / `hnote across` can later span the full participant set. Synthetic
+    // external placeholders (`__external_*`) are excluded — they never appear
+    // as participants in the rendered diagram.
+    if (decoded.leftExternal == null && from != null) {
+      _declaredAliases.add(from);
+    }
+    if (decoded.rightExternal == null && to != null) {
+      _declaredAliases.add(to);
+    }
+    // Optional per-message color spec `#RRGGBB` between target and `:`. The
+    // color may appear either before or after the activation suffix (PlantUML
+    // tolerates `A -> B ++ #color` and `A -> B #color ++`).
     Color? messageColor;
     if (_check(TokenType.hashColor)) {
       final t = _advance();
@@ -1252,19 +1814,95 @@ class Parser {
       messageColor = text_colors.tryParseColor(raw);
     }
 
-    ActivationSuffix? activation;
-    if (_check(TokenType.plusPlus)) {
-      _advance();
-      activation = ActivationSuffix.activateTarget;
-    } else if (_check(TokenType.minusMinus)) {
-      _advance();
-      activation = ActivationSuffix.deactivateSource;
-    } else if (_check(TokenType.starStar)) {
-      _advance();
-      activation = ActivationSuffix.createTarget;
-    } else if (_check(TokenType.bangBang)) {
-      _advance();
-      activation = ActivationSuffix.destroyTarget;
+    // PlantUML allows up to two chained activation suffixes after a forward
+    // message: a source-deactivate (`--`) combined with a target-side effect
+    // (`++`, `**`, or `!!`), in either order (`--++` or `++--`). We collect
+    // them into `deactivateSource` + `targetEffect`. The legacy single-slot
+    // `Message.activation` field below is set from whichever suffix is
+    // present so existing consumers keep working.
+    bool deactivateSource = false;
+    ActivationSuffix? targetEffect;
+
+    ActivationSuffix? consumeSuffix() {
+      if (_check(TokenType.plusPlus)) {
+        _advance();
+        return ActivationSuffix.activateTarget;
+      }
+      if (_check(TokenType.minusMinus)) {
+        _advance();
+        return ActivationSuffix.deactivateSource;
+      }
+      if (_check(TokenType.starStar)) {
+        _advance();
+        return ActivationSuffix.createTarget;
+      }
+      if (_check(TokenType.bangBang)) {
+        _advance();
+        return ActivationSuffix.destroyTarget;
+      }
+      return null;
+    }
+
+    void applySuffix(ActivationSuffix s, Token token) {
+      switch (s) {
+        case ActivationSuffix.deactivateSource:
+          if (deactivateSource) {
+            throw ParserException(
+                "Duplicate '--' activation suffix",
+                token.line, token.column);
+          }
+          deactivateSource = true;
+        case ActivationSuffix.activateTarget:
+        case ActivationSuffix.createTarget:
+        case ActivationSuffix.destroyTarget:
+          if (targetEffect != null) {
+            throw ParserException(
+                "Conflicting activation suffix '${token.lexeme}'",
+                token.line, token.column);
+          }
+          targetEffect = s;
+      }
+    }
+
+    // First suffix.
+    Token? firstSuffixToken;
+    if (_check(TokenType.plusPlus) ||
+        _check(TokenType.minusMinus) ||
+        _check(TokenType.starStar) ||
+        _check(TokenType.bangBang)) {
+      firstSuffixToken = _peek();
+    }
+    final firstSuffix = consumeSuffix();
+    if (firstSuffix != null) {
+      applySuffix(firstSuffix, firstSuffixToken!);
+    }
+    // Optional chained second suffix (e.g. `--++` or `++--`). Whitespace
+    // between them is tolerated by the lexer because `--` and `++` are
+    // emitted as separate tokens; PlantUML accepts both contiguous and
+    // space-separated forms.
+    Token? secondSuffixToken;
+    if (_check(TokenType.plusPlus) ||
+        _check(TokenType.minusMinus) ||
+        _check(TokenType.starStar) ||
+        _check(TokenType.bangBang)) {
+      secondSuffixToken = _peek();
+    }
+    final secondSuffix = consumeSuffix();
+    if (secondSuffix != null) {
+      applySuffix(secondSuffix, secondSuffixToken!);
+    }
+
+    // Legacy single-slot encoding kept on the Message for backward
+    // compatibility. Prefer the target-side effect; otherwise fall back to
+    // the source-deactivate marker.
+    final activation = targetEffect ??
+        (deactivateSource ? ActivationSuffix.deactivateSource : null);
+
+    // Accept `#color` AFTER the activation suffix too (e.g. `A -> B ++ #red`).
+    if (messageColor == null && _check(TokenType.hashColor)) {
+      final t = _advance();
+      final raw = t.lexeme.startsWith('#') ? t.lexeme.substring(1) : t.lexeme;
+      messageColor = text_colors.tryParseColor(raw);
     }
 
     String? label;
@@ -1311,8 +1949,8 @@ class Parser {
     }
 
     final message = Message(
-      from: from,
-      to: to,
+      from: from!,
+      to: to!,
       label: finalLabel,
       lineStyle: decoded.lineStyle,
       head: decoded.head,
@@ -1320,54 +1958,215 @@ class Parser {
       hidden: decoded.hidden,
       color: messageColor ?? decoded.color,
       activation: activation,
+      fromExternal: decoded.leftExternal,
+      toExternal: decoded.rightExternal,
+      tailDecoration: decoded.tailDecoration,
+      duration: decoded.duration,
+      synchronized: synchronized,
     );
     out.add(message);
     if (message.direction == MessageDirection.forward) {
       _lastForwardMessage = message;
     }
-    switch (activation) {
+    // Emit secondary events. Order matters: a chained `--++` first
+    // deactivates the source (closing the caller's frame) and then activates
+    // the target (opening a new frame). Layout consumes these as independent
+    // per-participant stack operations, so emitting them sequentially is
+    // sufficient — there is no AST-level "two suffixes on one message" type.
+    if (deactivateSource) {
+      out.add(Deactivate(from));
+      // Pop the matching call-stack frame so a later `return` (or chained
+      // `--`) still unwinds to the correct earlier caller. We pop the
+      // topmost frame whose callee is `from`; if there is no match (e.g. a
+      // stray `--`), the stack is left untouched.
+      for (var k = _callStack.length - 1; k >= 0; k--) {
+        if (_callStack[k].$2 == from) {
+          _callStack.removeAt(k);
+          break;
+        }
+      }
+    }
+    switch (targetEffect) {
       case ActivationSuffix.activateTarget:
-        out.add(Activate(to));
-      case ActivationSuffix.deactivateSource:
-        out.add(Deactivate(from));
+        // Carry the per-message color into the activation bar so explicit
+        // `A -> B ++ #color` (and the reversed `++ ... #color` ordering)
+        // both colour the bar consistently with `autoactivate on`.
+        out.add(Activate(to, color: message.color));
       case ActivationSuffix.createTarget:
         out.add(Create(to));
       case ActivationSuffix.destroyTarget:
         out.add(Destroy(to));
+      case ActivationSuffix.deactivateSource:
       case null:
         break;
+    }
+    // Maintain a call stack of (caller, callee, color) frames so a later
+    // `return` can unwind to the correct earlier caller. Two cases push:
+    //
+    //  1. `autoactivate on` is active — every forward, non-self, non-destroy,
+    //     non-deactivate call pushes (and gets an implicit Activate(to) if
+    //     not already activated by an explicit `++`).
+    //  2. The call has an explicit `++` or `**` target-side suffix — the
+    //     user opted into activation/creation, so a `return` should be able
+    //     to unwind it regardless of the autoactivate setting. Self-calls
+    //     only push when the explicit suffix is present (matching the
+    //     existing `autoactivate skips push for self calls` test).
+    //
+    // `!!` (destroyTarget) never pushes, and a backward / hidden message
+    // never pushes. A standalone `--` (deactivate-only) doesn't push either;
+    // a chained `--++` / `--**` DOES push because the target side opens a
+    // new frame.
+    final isForward = message.direction == MessageDirection.forward;
+    final pushable = !message.hidden &&
+        targetEffect != ActivationSuffix.destroyTarget;
+    final explicitOpenSuffix = targetEffect == ActivationSuffix.activateTarget ||
+        targetEffect == ActivationSuffix.createTarget;
+    final autoactivateAppliesHere = _autoactivate && from != to;
+    if (isForward && pushable && (autoactivateAppliesHere || explicitOpenSuffix)) {
+      final implicitColor = message.color;
+      // Under `autoactivate on`, emit an implicit Activate(to) unless the
+      // explicit `++` already did so. Explicit-only pushes do NOT add an
+      // implicit Activate — `++` already emitted one and `**` deliberately
+      // creates without activating.
+      if (autoactivateAppliesHere &&
+          targetEffect != ActivationSuffix.activateTarget &&
+          targetEffect != ActivationSuffix.createTarget) {
+        out.add(Activate(to, color: implicitColor));
+      }
+      _callStack.add((from, to, implicitColor));
     }
   }
 
   _DecodedArrow _decodeArrow(Token token) {
     final lexeme = token.lexeme;
-    final openBracket = lexeme.indexOf('[');
-    var stripped = lexeme;
+    // Extract external-endpoint markers FIRST so they don't confuse the
+    // bracket-modifier extraction below. `[` is overloaded: at the very
+    // start it's a found-message marker, but inside the arrow body it's the
+    // opening delimiter of a `[#color]` / `[hidden]` modifier. We detect the
+    // found-marker by checking whether the next char is a body/head glyph.
+    var working = lexeme;
+    // PlantUML "transmission duration" annotation `(<digits>)` embedded in
+    // the arrow. Two acceptable positions:
+    //   `->(N)`  / `-->(N)`     trailing on a forward arrow
+    //   `(N)<-`  / `(N)<--`     leading on a backward arrow
+    // Extract the integer N (if any) and STRIP the `(...)` from the working
+    // lexeme so the existing head/body decode logic runs unchanged.
+    int? duration;
+    final durationMatch =
+        RegExp(r'\((\d+)\)').firstMatch(working);
+    if (durationMatch != null) {
+      duration = int.parse(durationMatch.group(1)!);
+      working = working.substring(0, durationMatch.start) +
+          working.substring(durationMatch.end);
+    }
+    MessageExternal? leftExternal;
+    MessageExternal? rightExternal;
+    if (working.isNotEmpty && working[0] == '?') {
+      leftExternal = MessageExternal.fromShort;
+      working = working.substring(1);
+    } else if (working.length >= 2 &&
+        working[0] == '[' &&
+        _isArrowHeadOrBodyChar(working[1])) {
+      leftExternal = MessageExternal.fromEdge;
+      working = working.substring(1);
+    }
+    if (working.isNotEmpty) {
+      final lastCh = working[working.length - 1];
+      if (lastCh == '?') {
+        rightExternal = MessageExternal.toShort;
+        working = working.substring(0, working.length - 1);
+      } else if (lastCh == ']' &&
+          // Only when not the closing of a bracket modifier. A modifier
+          // takes the form `...[X]...` where `]` is followed by `-`/`.`
+          // body characters. By the time we're inspecting the LAST char of
+          // the arrow lexeme, any modifier-bracket must already have body
+          // chars after it; so a trailing `]` is unambiguously a
+          // lost-message marker.
+          !working.contains('[')) {
+        rightExternal = MessageExternal.toEdge;
+        working = working.substring(0, working.length - 1);
+      } else if (lastCh == ']' && working.contains('[')) {
+        // Distinguish lost-marker from modifier-close: the modifier-close
+        // is followed by body chars, so by the time it's the LAST char of
+        // the lexeme it can only be a lost-marker. We still guard with an
+        // additional check: the matching `[` must be the FIRST char (the
+        // found-marker case is already handled above) OR there must be no
+        // arrow head (`>` / `<`) after the `[`...`]` span. Practically the
+        // outer scanner only ever lets a trailing `]` survive when it's a
+        // lost-marker, so we treat it as such.
+        rightExternal = MessageExternal.toEdge;
+        working = working.substring(0, working.length - 1);
+      }
+    }
+
+    final openBracket = working.indexOf('[');
+    var stripped = working;
     var hidden = false;
     Color? color;
     if (openBracket >= 0) {
-      final closeBracket = lexeme.indexOf(']', openBracket + 1);
-      final modifier = lexeme.substring(openBracket + 1, closeBracket);
-      var afterClose = closeBracket + 1;
-      while (afterClose < lexeme.length && lexeme[afterClose] == '-') {
-        afterClose++;
-      }
-      stripped =
-          lexeme.substring(0, openBracket) + lexeme.substring(afterClose);
-      if (modifier == 'hidden') {
-        hidden = true;
-      } else {
-        color = _parseColor(modifier, token);
+      final closeBracket = working.indexOf(']', openBracket + 1);
+      if (closeBracket >= 0) {
+        final modifier = working.substring(openBracket + 1, closeBracket);
+        var afterClose = closeBracket + 1;
+        while (afterClose < working.length && working[afterClose] == '-') {
+          afterClose++;
+        }
+        stripped = working.substring(0, openBracket) +
+            working.substring(afterClose);
+        if (modifier == 'hidden') {
+          hidden = true;
+        } else {
+          color = _parseColor(modifier, token);
+        }
       }
     }
     final base = _decodeBareArrow(stripped, token);
+    // Pragmatic normalization: a bidirectional arrow that ends at an anonymous
+    // ("found" / "lost") endpoint can't actually be bidirectional — there is
+    // no participant on the anonymous side to receive a return triangle. We
+    // collapse it to a directed arrow that flows from the external endpoint
+    // toward the real participant on the OTHER side: `A <-> ?` becomes
+    // forward (away from A, toward the stub), and `? <-> B` also becomes
+    // forward (from the stub on the left, toward B on the right). This
+    // matches the PlantUML convention where found messages point at the
+    // real participant and lost messages point away from it.
+    var direction = base.direction;
+    if (direction == MessageDirection.bidirectional) {
+      if (rightExternal != null && leftExternal == null) {
+        direction = MessageDirection.forward;
+      } else if (leftExternal != null && rightExternal == null) {
+        // Left-external found message: collapse bidirectional to forward so
+        // the arrow flows from the anonymous source (left) to the real
+        // target (right). The head/tail decorations from `_decodeBareArrow`
+        // are preserved.
+        direction = MessageDirection.forward;
+      }
+    }
     return _DecodedArrow(
       base.lineStyle,
       base.head,
-      base.direction,
+      direction,
       hidden: hidden,
       color: color,
+      leftExternal: leftExternal,
+      rightExternal: rightExternal,
+      tailDecoration: base.tailDecoration,
+      duration: duration,
     );
+  }
+
+  static bool _isArrowHeadOrBodyChar(String c) {
+    // `o` / `x` are legitimate first chars after a found-marker `[` when used
+    // as a tail decoration on the left side (e.g. `[o->`, `[x<->x`). They are
+    // NOT the start of a bracket-modifier (those are `[#color]` / `[hidden]`
+    // which always start with `#` or a known modifier word).
+    return c == '-' ||
+        c == '.' ||
+        c == '<' ||
+        c == '\\' ||
+        c == '/' ||
+        c == 'o' ||
+        c == 'x';
   }
 
   _DecodedArrow _decodeBareArrow(String lexeme, Token token) {
@@ -1392,6 +2191,31 @@ class Parser {
           "Unknown arrow form '${token.lexeme}'", token.line, token.column);
     }
     final dashed = body.contains('..') || body.contains('--');
+
+    // Peel a TAIL decoration (`o` / `x`) from the leading glyphs when it sits
+    // BEFORE a head glyph. `o->` / `x->` are forward arrows with a tail
+    // decoration; `o<->o` / `x<->x` are bidirectional. The peeled decoration
+    // travels in the Message's `tailDecoration` field, not as a head.
+    EndpointDecoration? tailDecoration;
+    if (leftGlyphs.length >= 2 &&
+        (leftGlyphs.first == 'o' || leftGlyphs.first == 'x') &&
+        (leftGlyphs[1] == '<')) {
+      tailDecoration = leftGlyphs.first == 'o'
+          ? EndpointDecoration.openCircle
+          : EndpointDecoration.cross;
+      leftGlyphs.removeAt(0);
+    } else if (leftGlyphs.length == 1 &&
+        (leftGlyphs.first == 'o' || leftGlyphs.first == 'x') &&
+        rightGlyphs.isNotEmpty &&
+        rightGlyphs.first == '>') {
+      // `o->` / `x->` / `o->o` / `x->o`: leading char is the tail decoration
+      // of a FORWARD arrow (no `<` head on the left). The actual head sits in
+      // the right-glyph cluster.
+      tailDecoration = leftGlyphs.first == 'o'
+          ? EndpointDecoration.openCircle
+          : EndpointDecoration.cross;
+      leftGlyphs.removeAt(0);
+    }
 
     ArrowHead? leftHead;
     var leftIsHead = false;
@@ -1429,16 +2253,20 @@ class Parser {
           rightHead = ArrowHead.filled;
         }
       }
-      // `>>` or `>o`/`>x` after `>` → open thin head with optional terminator.
-      if (rightGlyphs.length >= 2 && rightGlyphs[0] == '>' &&
-          (rightGlyphs[1] == '>' || rightGlyphs[1] == 'o' ||
-              rightGlyphs[1] == 'x')) {
-        if (rightGlyphs[1] == '>') {
-          rightHead = ArrowHead.open;
-        } else if (rightGlyphs[1] == 'o') {
+      // `>>` after `>` → thin/open head; trailing `o`/`x` after `>` or `>>`
+      // is the visible cap shape (PlantUML stacks the cap over the V-tip;
+      // we approximate by using the cap as the head, since the body has no
+      // V drawn separately).
+      if (rightGlyphs.length >= 2 && rightGlyphs[0] == '>') {
+        // Trailing `o` / `x` wins as the visible head shape (matches `->o`
+        // semantics). Otherwise `>>` is a thin/open head.
+        final last = rightGlyphs.last;
+        if (last == 'o') {
           rightHead = ArrowHead.openCircle;
-        } else {
+        } else if (last == 'x') {
           rightHead = ArrowHead.cross;
+        } else if (rightGlyphs[1] == '>') {
+          rightHead = ArrowHead.open;
         }
       }
     }
@@ -1464,25 +2292,36 @@ class Parser {
     if (leftIsHead && rightIsHead) {
       // Prefer the right head as the carried head; renderer will mirror it.
       return _DecodedArrow(
-          lineStyle, rightHead!, MessageDirection.bidirectional);
+          lineStyle, rightHead!, MessageDirection.bidirectional,
+          tailDecoration: tailDecoration);
     }
     if (leftIsHead) {
       return _DecodedArrow(
-          lineStyle, leftHead!, MessageDirection.backward);
+          lineStyle, leftHead!, MessageDirection.backward,
+          tailDecoration: tailDecoration);
     }
     if (rightIsHead) {
       return _DecodedArrow(
-          lineStyle, rightHead!, MessageDirection.forward);
+          lineStyle, rightHead!, MessageDirection.forward,
+          tailDecoration: tailDecoration);
     }
     // No head glyphs at all — fallback forward filled.
     return _DecodedArrow(
-        lineStyle, ArrowHead.filled, MessageDirection.forward);
+        lineStyle, ArrowHead.filled, MessageDirection.forward,
+        tailDecoration: tailDecoration);
   }
 
   Color _parseColor(String spec, Token token) {
-    final color = text_colors.tryParseColor(spec);
+    // The lexer may absorb a PlantUML inline-style suffix into the hashColor
+    // lexeme (e.g. `#red;line.bold;text:red`). Only the leading color is used
+    // for fill/border resolution today — trailing style clauses are tolerated
+    // but ignored. Visual styling for `line:`, `line.bold`, `text:` is
+    // deferred.
+    final semi = spec.indexOf(';');
+    final head = semi < 0 ? spec : spec.substring(0, semi);
+    final color = text_colors.tryParseColor(head);
     if (color == null) {
-      throw ParserException("Unknown color '$spec'", token.line, token.column);
+      throw ParserException("Unknown color '$head'", token.line, token.column);
     }
     return color;
   }
@@ -1962,6 +2801,40 @@ class Parser {
         _skipNewlines();
         continue;
       }
+      if (_tryConsumeAllowmixing()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_tryConsumeInlineJsonBlock()) {
+        _skipNewlines();
+        continue;
+      }
+      // Anonymous brace block at top level (e.g. `{ state B }`). PlantUML
+      // accepts this as a free-standing nested-state region declaration. We
+      // recurse into the body so any contained `state X` declarations are
+      // captured. This keeps weakly-structured state sources parseable.
+      if (_check(TokenType.leftBrace)) {
+        _advance();
+        _skipNewlines();
+        while (!_check(TokenType.rightBrace) &&
+            !_check(TokenType.eof) &&
+            !_check(TokenType.endUml)) {
+          if (_isKeyword('state')) {
+            addState(_parseStateDecl());
+          } else if (_isKeyword('note')) {
+            _skipUntilNewline();
+          } else if (_check(TokenType.leftBrace)) {
+            _consumeBraceBlock();
+          } else {
+            final t = _parseStateTransitionOrRef(addState);
+            if (t != null) transitions.add(t);
+          }
+          _skipNewlines();
+        }
+        if (_check(TokenType.rightBrace)) _advance();
+        _skipNewlines();
+        continue;
+      }
       if (_isKeyword('state')) {
         addState(_parseStateDecl());
       } else if (_isKeyword('note')) {
@@ -2153,10 +3026,118 @@ class Parser {
           (t.lexeme == 'usecase' || t.lexeme == 'rectangle')) {
         return true;
       }
+      // Direction-hint arrow (`-left->`, `-up->`, `..down..>`, etc.) on a
+      // relation line is a strong use-case-/class-diagram indicator since
+      // sequence diagrams never use directional hint arrows. Route to use
+      // case so the existing direction-aware layout handles the source.
+      if (t.type == TokenType.arrow && _isDirectionHintArrow(t.lexeme)) {
+        return true;
+      }
+      // `left to right direction` / `top to bottom direction` at the start
+      // of a line is a use-case-/component-diagram directive. Route to use
+      // case so the directive is consumed cleanly and any inline relations
+      // (including direction-hint arrows) parse without error.
+      if (atLineStart &&
+          t.type == TokenType.identifier &&
+          (t.lexeme == 'left' || t.lexeme == 'top') &&
+          k + 3 < _tokens.length &&
+          _tokens[k + 1].type == TokenType.identifier &&
+          _tokens[k + 1].lexeme == 'to' &&
+          _tokens[k + 2].type == TokenType.identifier &&
+          (_tokens[k + 2].lexeme == 'right' ||
+              _tokens[k + 2].lexeme == 'bottom') &&
+          _tokens[k + 3].type == TokenType.identifier &&
+          _tokens[k + 3].lexeme == 'direction') {
+        return true;
+      }
+      // PlantUML "phantom" / hidden-node marker: a trailing `/` immediately
+      // after the `usecase`/`actor` keyword (e.g. `usecase/ UC3`,
+      // `actor/ Woman3`) is use-case-specific syntax. Detecting it here
+      // routes such declarations to the use-case parser even when no other
+      // use-case indicator appears on the line.
+      if (atLineStart &&
+          t.type == TokenType.identifier &&
+          (t.lexeme == 'usecase' || t.lexeme == 'actor') &&
+          k + 1 < _tokens.length &&
+          _tokens[k + 1].type == TokenType.slash) {
+        return true;
+      }
+      // A parenthesized use-case ellipse `(Name)` appearing as the source or
+      // target of an arrow is a use-case-specific construct. We scan each
+      // arrow line and treat the presence of such an ellipse alongside an
+      // arrow (in either direction) as a strong indicator. This lets
+      // PlantUML's minimal use-case syntax (`User -> (Start)`,
+      // `:user: --> (Use case 1)`) route to the use-case parser without
+      // requiring an explicit `usecase`/`rectangle` keyword.
+      if (t.type == TokenType.leftParen) {
+        var j = k + 1;
+        if (j < _tokens.length && _tokens[j].type == TokenType.text) j++;
+        if (j < _tokens.length && _tokens[j].type == TokenType.rightParen) {
+          // Walk forwards/backwards on this logical line to confirm an arrow
+          // sits adjacent to this ellipse.
+          for (var b = k - 1; b >= 0; b--) {
+            final tb = _tokens[b];
+            if (tb.type == TokenType.newline) break;
+            if (tb.type == TokenType.arrow ||
+                tb.type == TokenType.minusMinus) {
+              return true;
+            }
+          }
+          for (var f = j + 1; f < _tokens.length; f++) {
+            final tf = _tokens[f];
+            if (tf.type == TokenType.newline ||
+                tf.type == TokenType.eof ||
+                tf.type == TokenType.endUml) {
+              break;
+            }
+            if (tf.type == TokenType.arrow ||
+                tf.type == TokenType.minusMinus) {
+              return true;
+            }
+          }
+        }
+      }
+      // `:Display name:` colon-wrapped actor at the head of a relation. The
+      // lexer flattens the rest of the line (after the leading `:`) into a
+      // single text token; that text contains the second `:` followed by an
+      // arrow and an ellipse target. Detecting this lets us route minimal
+      // syntaxes like `:user: --> (Use case 1)` to the use-case parser
+      // instead of the default sequence-diagram path.
+      if (atLineStart && t.type == TokenType.colon) {
+        final next = k + 1 < _tokens.length ? _tokens[k + 1] : null;
+        if (next != null && next.type == TokenType.text) {
+          final raw = next.lexeme;
+          final closing = raw.indexOf(':');
+          if (closing >= 0) {
+            final tail = raw.substring(closing + 1);
+            if (_useCaseColonTailIndicator.hasMatch(tail)) {
+              return true;
+            }
+            // PlantUML "phantom" / hidden-node marker: a trailing `/`
+            // immediately after the closing colon of `:Display:` (e.g.
+            // `:First Actor:/` or `:Actor:/ as Alias`) is use-case-specific
+            // syntax. Detecting it here routes the colon-wrapped declaration
+            // to the use-case parser instead of the default sequence path.
+            if (tail.trimLeft().startsWith('/')) {
+              return true;
+            }
+          }
+        }
+      }
       atLineStart = false;
     }
     return false;
   }
+
+  // Matches the residual text after the closing `:` of a colon-wrapped actor
+  // when the rest of the line is an arrow + parenthesized use-case target.
+  // Examples that should match (note: the leading `:user:` has already been
+  // stripped, we only see the tail):
+  //   ' --> (Use case 1)'
+  //   ' ---> (Use the application) : A label'
+  //   ' -> (Start)'
+  static final RegExp _useCaseColonTailIndicator =
+      RegExp(r'\s*-+>?\s*\(');
 
   bool _hasUnambiguousClassMarker() {
     const classOnly = {
@@ -2227,6 +3208,25 @@ class Parser {
     return false;
   }
 
+  static bool _isDirectionHintArrow(String lexeme) {
+    // Direction-hint arrows embed the words `left` / `right` / `up` / `down`
+    // inside the arrow body between dash runs, e.g. `-left->`, `-right->`,
+    // `-up->`, `-down->`. Only treat as a hint when the directional word
+    // sits between dashes/dots (so plain text containing these substrings
+    // doesn't accidentally classify).
+    for (final w in const ['left', 'right', 'up', 'down']) {
+      final idx = lexeme.indexOf(w);
+      if (idx <= 0) continue;
+      final before = lexeme[idx - 1];
+      final afterIdx = idx + w.length;
+      if (afterIdx >= lexeme.length) continue;
+      final after = lexeme[afterIdx];
+      const sep = {'-', '.'};
+      if (sep.contains(before) && sep.contains(after)) return true;
+    }
+    return false;
+  }
+
   static bool _isUnambiguousClassArrow(String lexeme) {
     // Arrows that cannot appear in sequence diagrams: any arrow involving '|'
     // (inheritance triangle), filled/hollow diamond ends, '..' dependency,
@@ -2238,10 +3238,12 @@ class Parser {
     if (lexeme.endsWith('*')) return true;
     if (lexeme.contains('..')) return true;
     // Sequence diagrams now allow `o`/`x` prefixes when paired with a head
-    // marker (`<`) or half-arrow marker (`\`, `/`). Otherwise it's class.
+    // marker (`<` / `>`) or half-arrow marker (`\`, `/`). Otherwise it's a
+    // class arrow (composition / cross / aggregation tail).
     if (lexeme.startsWith('o') || lexeme.startsWith('x')) {
       final tail = lexeme.substring(1);
       final sequenceLike = tail.contains('<') ||
+          tail.contains('>') ||
           tail.contains('\\') ||
           tail.contains('/');
       if (!sequenceLike) return true;
@@ -2264,7 +3266,15 @@ class Parser {
     var attachedNoteCounter = 0;
 
     void parseEntry() {
-      if (_isKeyword('hide')) {
+      // `hide`, `show`, `remove`, `restore` are visual / semantic directives
+      // (filter members by selector, drop a class, etc.). Visual rendering is
+      // deferred — accept-and-skip the rest of the line so they don't break
+      // parsing. Multi-line `note ... end note` blocks are NOT introduced by
+      // these keywords so a flat consume is safe.
+      if (_isKeyword('hide') ||
+          _isKeyword('show') ||
+          _isKeyword('remove') ||
+          _isKeyword('restore')) {
         _consumeRestOfLine();
         return;
       }
@@ -2279,11 +3289,33 @@ class Parser {
           freeNotes.add(note);
           return;
         }
+        // Unrecognised note form (e.g. `note on link …`, `note left:` without
+        // a target). Consume gracefully so the rest of the diagram parses.
+        _skipNoteBlock();
+        return;
       }
       if (_isClassHeaderKeyword()) {
         classes.add(_parseClassDecl());
+      } else if (_check(TokenType.leftParen) &&
+          _tryParseAssociationClassRelation(
+              relationships, classes,
+              {for (final c in classes) c.name})) {
+        // Association class form `(A, B) <arrow> C` — consumed above.
       } else {
-        _parseClassRelationship(relationships, freeNotes);
+        // PlantUML allows inline member declarations of the form
+        // `ClassName : member`. If the line starts with an identifier
+        // followed by `:`, treat the colon-trailing text as a no-op member
+        // declaration on an (implicit) class. Visual member rendering for
+        // this shorthand is deferred — we just accept the syntax so the
+        // diagram parses. Same applies to `Name $tag` (tag-suffixed bare
+        // class declaration) which is handled by `_parseClassRelationship`'s
+        // missing-arrow recovery path.
+        _parseClassRelationship(
+          relationships,
+          freeNotes,
+          classes,
+          {for (final c in classes) c.name},
+        );
       }
     }
 
@@ -2291,6 +3323,14 @@ class Parser {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
       if (_tryParseDecoration()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_tryConsumeAllowmixing()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_tryConsumeInlineJsonBlock()) {
         _skipNewlines();
         continue;
       }
@@ -2320,12 +3360,25 @@ class Parser {
   void _skipNoteBlock() {
     final headerEnd = _findNextNewline();
     final sawNewlineInHeader = headerEnd != null;
+    // A note header that contains an inline `:` is a single-line declaration
+    // (e.g. `note left: text`). Don't scan onward for `end note`, otherwise
+    // the next multi-line note block on a subsequent line would be swallowed.
+    var headerHasInlineColon = false;
+    if (headerEnd != null) {
+      for (var k = _pos; k < headerEnd; k++) {
+        if (_tokens[k].type == TokenType.colon) {
+          headerHasInlineColon = true;
+          break;
+        }
+      }
+    }
     while (!_check(TokenType.newline) &&
         !_check(TokenType.eof) &&
         !_check(TokenType.endUml)) {
       _advance();
     }
     if (!sawNewlineInHeader) return;
+    if (headerHasInlineColon) return;
     if (_check(TokenType.newline)) _advance();
     while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
       if (_check(TokenType.identifier) && _peek().lexeme == 'end') {
@@ -2359,6 +3412,124 @@ class Parser {
         !_check(TokenType.endUml)) {
       _advance();
     }
+  }
+
+  /// Consumes a mixed-element top-level declaration inside a host parser
+  /// that doesn't natively model the element kind (e.g. `node`, `cloud`,
+  /// `agent`, `database` inside a use case diagram under `allowmixing`).
+  /// The form is `<keyword> <identifier-or-string> [as <alias>]`. If the
+  /// declaration opens a brace-balanced container body, it is consumed too.
+  /// A coerced [UseCaseNode] is added so downstream relations resolve.
+  void _consumeMixedTopLevelDecl(void Function(UseCaseNode) addNode) {
+    _advance(); // consume keyword
+    String? label;
+    String? alias;
+    if (_check(TokenType.stringLiteral)) {
+      label = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier)) alias = _advance().lexeme;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier)) {
+          alias = _advance().lexeme;
+          label = first;
+        }
+      } else {
+        alias = first;
+      }
+    }
+    if (_check(TokenType.hashColor)) _advance();
+    _skipNewlines();
+    if (_check(TokenType.leftBrace)) {
+      _consumeBraceBlock();
+    }
+    if (alias != null) {
+      addNode(UseCaseNode(
+        alias: alias,
+        label: label ?? alias,
+        kind: UseCaseNodeKind.actor,
+      ));
+    }
+  }
+
+  /// Consumes the `allowmixing` directive line as a no-op. PlantUML uses it to
+  /// permit mixing element types (e.g. actor + json + class) in one diagram.
+  /// Our parsers accept the directive but currently rely on the caller's host
+  /// parser to also accept the mixed elements as best-effort no-op declarations.
+  bool _tryConsumeAllowmixing() {
+    if (_isKeyword('allowmixing')) {
+      _advance();
+      _consumeRestOfLine();
+      return true;
+    }
+    return false;
+  }
+
+  /// Consumes a balanced `{ ... }` block at the current position, respecting
+  /// nested braces. Stops at EOF/@enduml even if the block is unbalanced.
+  /// Returns true if a block was consumed. String literals are already
+  /// tokenized by the lexer so braces inside strings never reach this layer.
+  bool _consumeBraceBlock() {
+    if (!_check(TokenType.leftBrace)) return false;
+    var depth = 0;
+    while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
+      final t = _peek();
+      if (t.type == TokenType.leftBrace) {
+        depth++;
+        _advance();
+        continue;
+      }
+      if (t.type == TokenType.rightBrace) {
+        depth--;
+        _advance();
+        if (depth == 0) return true;
+        continue;
+      }
+      _advance();
+    }
+    return true;
+  }
+
+  /// Consumes a `json <name> { ... }` or `json "Display" as <alias> { ... }`
+  /// declaration at the current position as a no-op (no AST node is produced).
+  /// Used by host parsers (use case / class / state / component / sequence /
+  /// allowmixing-style) to swallow embedded JSON blocks gracefully.
+  ///
+  /// Returns true when consumption happened. Both the `json` keyword and the
+  /// trailing brace-balanced body are consumed.
+  bool _tryConsumeInlineJsonBlock() {
+    if (!_isKeyword('json')) return false;
+    _advance(); // consume 'json'
+    // Optional display name as string literal, optionally followed by `as <alias>`.
+    if (_check(TokenType.stringLiteral)) {
+      _advance();
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier)) {
+          _advance();
+        }
+      }
+    } else if (_check(TokenType.identifier)) {
+      _advance();
+      // Allow optional `as <alias>` for safety.
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier)) {
+          _advance();
+        }
+      }
+    }
+    _skipNewlines();
+    if (_check(TokenType.leftBrace)) {
+      _consumeBraceBlock();
+    } else {
+      _consumeRestOfLine();
+    }
+    return true;
   }
 
   void _parseClassPackage(
@@ -2430,6 +3601,21 @@ class Parser {
       _pos = saved;
       return null;
     }
+    // `note as N1` ... body ... `end note` — free-standing multi-line note.
+    if (_isKeyword('as')) {
+      _advance();
+      if (!_check(TokenType.identifier)) {
+        _pos = saved;
+        return null;
+      }
+      final alias = _advance().lexeme;
+      if (!_check(TokenType.newline)) {
+        _pos = saved;
+        return null;
+      }
+      final text = _consumeMultilineNoteBody();
+      return FreeNote(alias: alias, text: text);
+    }
     NotePosition? position;
     if (_isKeyword('left')) {
       _advance();
@@ -2442,6 +3628,18 @@ class Parser {
       if (_isKeyword('of')) {
         _advance();
         position = NotePosition.rightOf;
+      }
+    } else if (_isKeyword('top')) {
+      _advance();
+      if (_isKeyword('of')) {
+        _advance();
+        position = NotePosition.over;
+      }
+    } else if (_isKeyword('bottom')) {
+      _advance();
+      if (_isKeyword('of')) {
+        _advance();
+        position = NotePosition.over;
       }
     } else if (_isKeyword('over')) {
       _advance();
@@ -2563,6 +3761,29 @@ class Parser {
           'Expected class name, got ${t.type}', t.line, t.column);
     }
     final name = _advance().lexeme;
+    // PlantUML 'as' alias: `class "This is my class" as class1` or
+    // `class class2 as "It works this way too"`. Both forms are accepted; the
+    // alias replaces the display name internally so downstream relationships
+    // can resolve. Visual rendering of the alias-vs-name distinction is
+    // deferred.
+    String resolvedName = name;
+    if (_isKeyword('as')) {
+      _advance();
+      if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+        resolvedName = _advance().lexeme;
+      }
+    }
+    // PlantUML shape hints after the class name: `circle Foo ()`,
+    // `diamond Bar <>`. Consume and ignore — the kind already encodes the
+    // shape; the trailing glyph is purely a visual decoration.
+    if (_check(TokenType.leftParen) &&
+        _pos + 1 < _tokens.length &&
+        _tokens[_pos + 1].type == TokenType.rightParen) {
+      _advance();
+      _advance();
+    } else if (_check(TokenType.generics) && _peek().lexeme.isEmpty) {
+      _advance();
+    }
     String? generics;
     String? stereotype;
     for (var k = 0; k < 2; k++) {
@@ -2573,6 +3794,11 @@ class Parser {
       } else {
         break;
       }
+    }
+    // Consume optional `$tag` suffix on the class declaration (e.g.
+    // `class C1 $tag13`). Visual / semantic tag handling is deferred.
+    while (_check(TokenType.identifier) && _peek().lexeme.startsWith('\$')) {
+      _advance();
     }
 
     String? instanceOf;
@@ -2630,7 +3856,7 @@ class Parser {
       }
     }
     return ClassDecl(
-      name: name,
+      name: resolvedName,
       kind: kind,
       members: List.unmodifiable(members),
       instanceOf: instanceOf,
@@ -2772,7 +3998,11 @@ class Parser {
   }
 
   void _parseClassRelationship(
-      List<Relationship> out, [List<FreeNote>? freeNotes]) {
+      List<Relationship> out, [
+    List<FreeNote>? freeNotes,
+    List<ClassDecl>? classes,
+    Set<String>? declaredNames,
+  ]) {
     String? fromMult;
     final from = _readRelationshipEnd();
     if (_check(TokenType.generics)) {
@@ -2786,6 +4016,37 @@ class Parser {
       arrowToken = _advance();
     } else if (_check(TokenType.minusMinus)) {
       arrowToken = _advance();
+    } else if (_check(TokenType.colon)) {
+      // Inline member declaration: `ClassName : member`. Consume the colon
+      // and the text token (if any) — visual member rendering for this
+      // shorthand is deferred. We still register the implicit class so it
+      // shows up in the AST.
+      _advance();
+      if (_check(TokenType.text)) _advance();
+      if (classes != null && declaredNames != null) {
+        if (!declaredNames.contains(from)) {
+          classes.add(ClassDecl(name: from));
+          declaredNames.add(from);
+        }
+      }
+      return;
+    } else if (_check(TokenType.newline) ||
+        _check(TokenType.eof) ||
+        _check(TokenType.endUml) ||
+        _check(TokenType.identifier)) {
+      // Bare identifier on a line with no arrow — likely a tag-suffixed
+      // class shorthand (e.g. `class C1 $tag13` parsed; here we recover from
+      // the trailing tag token which the lexer emitted as a separate
+      // identifier). Consume to end of line as a no-op so the implicit class
+      // is still picked up by the auto-declaration sweep.
+      if (classes != null && declaredNames != null) {
+        if (!declaredNames.contains(from)) {
+          classes.add(ClassDecl(name: from));
+          declaredNames.add(from);
+        }
+      }
+      _consumeRestOfLine();
+      return;
     } else {
       final t = _peek();
       throw ParserException(
@@ -2795,7 +4056,17 @@ class Parser {
     }
     String? toMult;
     if (_check(TokenType.stringLiteral)) {
-      toMult = _advance().lexeme;
+      // A leading string literal here is ambiguous: it may be the to-end
+      // multiplicity (e.g. `*-- "*" Leg`) or the quoted target class name
+      // (e.g. `*-- "foo/dummy" : use`). Disambiguate by looking ahead — if
+      // the next token is another identifier or string literal it was a
+      // multiplicity; otherwise it's the target.
+      final lookahead = _pos + 1 < _tokens.length ? _tokens[_pos + 1] : null;
+      if (lookahead != null &&
+          (lookahead.type == TokenType.identifier ||
+              lookahead.type == TokenType.stringLiteral)) {
+        toMult = _advance().lexeme;
+      }
     }
     final to = _readRelationshipEnd();
     if (_check(TokenType.generics)) {
@@ -2845,6 +4116,98 @@ class Parser {
     final t = _peek();
     throw ParserException(
         'Expected class name, got ${t.type}', t.line, t.column);
+  }
+
+  /// Attempts to consume a PlantUML association-class line of the form
+  /// `(A, B) <arrow> C` — a dotted/dashed connector linking the relation
+  /// between two classes to a third "association" class. Returns `true` if
+  /// the line was successfully recognised and consumed.
+  ///
+  /// The two member endpoints are accepted as either identifiers or string
+  /// literals (the lexer collapses everything between the parens into a
+  /// single `text` token when it sees `(` followed by non-arrow content, so
+  /// this handler also accepts the `leftParen text rightParen` shape and
+  /// splits the comma-separated members from the text payload).
+  ///
+  /// Visual rendering of the dotted association-class connector is deferred;
+  /// here we just register the relationship endpoints as classes (auto-decl)
+  /// and emit a plain `link` relation from the first member to the
+  /// association class so the diagram still parses cleanly.
+  bool _tryParseAssociationClassRelation(
+    List<Relationship> out,
+    List<ClassDecl> classes,
+    Set<String> declaredNames,
+  ) {
+    final savedPos = _pos;
+    if (!_check(TokenType.leftParen)) return false;
+    _advance(); // consume '('
+    final members = <String>[];
+    if (_check(TokenType.text)) {
+      // The greedy `(` lexer path collapses `Student, Course` into a single
+      // text token. Split on commas (whitespace-trimmed) to recover the
+      // member endpoint names.
+      final raw = _advance().lexeme;
+      for (final part in raw.split(',')) {
+        final trimmed = part.trim();
+        if (trimmed.isNotEmpty) members.add(trimmed);
+      }
+    } else {
+      while (
+          _check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+        members.add(_advance().lexeme);
+        if (_check(TokenType.comma)) {
+          _advance();
+          continue;
+        }
+        break;
+      }
+    }
+    if (!_check(TokenType.rightParen)) {
+      _pos = savedPos;
+      return false;
+    }
+    _advance(); // consume ')'
+    Token arrowToken;
+    if (_check(TokenType.arrow)) {
+      arrowToken = _advance();
+    } else if (_check(TokenType.minusMinus)) {
+      arrowToken = _advance();
+    } else {
+      _pos = savedPos;
+      return false;
+    }
+    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
+      _pos = savedPos;
+      return false;
+    }
+    final assocClass = _advance().lexeme;
+    String? label;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        label = _advance().lexeme;
+      }
+    }
+    final decoded = _decodeRelationshipArrow(arrowToken);
+    // Auto-declare any referenced class so it shows up in the AST.
+    for (final ref in [...members, assocClass]) {
+      if (!declaredNames.contains(ref)) {
+        classes.add(ClassDecl(name: ref));
+        declaredNames.add(ref);
+      }
+    }
+    // Emit a single connector from the first member to the association class
+    // as a stand-in. Full association-class semantics (a midpoint anchor
+    // between the two members linked to the class) is deferred.
+    if (members.isNotEmpty) {
+      out.add(Relationship(
+        from: members.first,
+        to: assocClass,
+        kind: decoded.kind,
+        label: label,
+      ));
+    }
+    return true;
   }
 
   _DecodedRelArrow _decodeRelationshipArrow(Token token) {
@@ -2997,6 +4360,11 @@ class Parser {
       if (atLineStart && t.type == TokenType.identifier) {
         if (t.lexeme == 'component') return true;
         if (t.lexeme == 'artifact') return true;
+        // Mixed-element keywords introduced via `allowmixing`. Their presence
+        // at line start is a strong component-diagram indicator since this is
+        // the most lenient host parser for mixed contents.
+        if (t.lexeme == 'agent') return true;
+        if (t.lexeme == 'stack') return true;
         if (containerKeywords.contains(t.lexeme)) return true;
         if (ambiguousContainerKeywords.contains(t.lexeme)) {
           for (var j = k + 1; j < _tokens.length; j++) {
@@ -3070,6 +4438,14 @@ class Parser {
         _skipNewlines();
         continue;
       }
+      if (_tryConsumeAllowmixing()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_tryConsumeInlineJsonBlock()) {
+        _skipNewlines();
+        continue;
+      }
       if (_isKeyword('hide') || _isKeyword('show')) {
         _consumeRestOfLine();
         _skipNewlines();
@@ -3077,6 +4453,26 @@ class Parser {
       }
       if (_isKeyword('note')) {
         _skipNoteBlock();
+        _skipNewlines();
+        continue;
+      }
+      // `agent <name>` declares a node in mixed/component-style diagrams.
+      // Treat it as a generic component for AST purposes.
+      if (_isKeyword('agent')) {
+        addNode(_parseAgentDecl());
+        _skipNewlines();
+        continue;
+      }
+      // `stack { ... }` container — when followed by `{`, recurse using the
+      // existing component-container helper (with the kind mapped to package
+      // as a best-effort fallback since there's no dedicated stack kind).
+      // When followed by an identifier (no brace), treat as a generic node.
+      if (_isKeyword('stack')) {
+        if (_stackKeywordIsContainer()) {
+          containers.add(_parseStackContainer(addNode));
+        } else {
+          addNode(_parseAgentDecl(asKind: ComponentNodeKind.component));
+        }
         _skipNewlines();
         continue;
       }
@@ -3183,6 +4579,125 @@ class Parser {
       k++;
     }
     return false;
+  }
+
+  /// Parses an `agent <Name>` or `agent "Display" as Alias` declaration.
+  /// Used in mixed/component-style diagrams where PlantUML allows the
+  /// `agent` element. Modelled as a generic component for now (no dedicated
+  /// AST kind yet).
+  ComponentNode _parseAgentDecl(
+      {ComponentNodeKind asKind = ComponentNodeKind.component}) {
+    _advance(); // consume keyword
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = first;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected element name, got ${t.type}', t.line, t.column);
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: asKind,
+    );
+  }
+
+  /// True if the `stack` keyword at the current position is followed by a
+  /// `{` on the same logical line — meaning it opens a container body.
+  bool _stackKeywordIsContainer() {
+    for (var k = _pos + 1; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.leftBrace) return true;
+      if (t.type == TokenType.newline ||
+          t.type == TokenType.eof ||
+          t.type == TokenType.endUml) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /// Parses a `stack { ... }` container. PlantUML's stack has no dedicated
+  /// AST kind in this codebase yet, so we lower it to a package container
+  /// for rendering. Embedded `json` blocks and unknown identifier-only
+  /// declarations inside the body are accepted as no-ops so mixed contents
+  /// don't break parsing.
+  ComponentContainer _parseStackContainer(
+      void Function(ComponentNode) addNode) {
+    final kwToken = _advance(); // consume 'stack'
+    String? label;
+    if (_check(TokenType.stringLiteral)) {
+      label = _advance().lexeme;
+    } else if (_check(TokenType.identifier) && _peek().lexeme != 'as') {
+      label = _advance().lexeme;
+    }
+    String? alias;
+    if (_isKeyword('as')) {
+      _advance();
+      alias = _expect(TokenType.identifier).lexeme;
+    }
+    final contained = <String>[];
+    final nested = <ComponentContainer>[];
+    if (_check(TokenType.leftBrace)) {
+      _advance();
+      _skipNewlines();
+      while (!_check(TokenType.rightBrace) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        if (_tryConsumeInlineJsonBlock()) {
+          _skipNewlines();
+          continue;
+        }
+        if (_isKeyword('component')) {
+          final node = _parseComponentDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('artifact')) {
+          final node = _parseArtifactDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('interface')) {
+          final node = _parseInterfaceDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isKeyword('agent')) {
+          final node = _parseAgentDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isComponentContainerKeyword()) {
+          nested.add(_parseComponentContainer(addNode));
+        } else {
+          // Unknown line — consume it so the container body parses.
+          _consumeRestOfLine();
+        }
+        _skipNewlines();
+      }
+      if (_check(TokenType.rightBrace)) _advance();
+    }
+    return ComponentContainer(
+      kind: ContainerKind.package,
+      label: label ?? alias ?? kwToken.lexeme,
+      alias: alias ?? label ?? kwToken.lexeme,
+      nodeAliases: List.unmodifiable(contained),
+      nestedContainers: List.unmodifiable(nested),
+    );
   }
 
   ContainerKind _containerKindFor(String keyword) {
@@ -3446,6 +4961,18 @@ class Parser {
       _advance();
       alias = _expect(TokenType.identifier).lexeme;
     }
+    // Optional stereotype `<<Stereo>>` and/or background `#color` on the
+    // container header line, in any order (e.g.
+    // `package "Name" #DDDDDD { ... }`, `package foo <<Node>> { ... }`).
+    for (var k = 0; k < 2; k++) {
+      if (_check(TokenType.stereotype)) {
+        _advance();
+      } else if (_check(TokenType.hashColor)) {
+        _advance();
+      } else {
+        break;
+      }
+    }
     final contained = <String>[];
     final nested = <ComponentContainer>[];
     if (_check(TokenType.leftBrace)) {
@@ -3500,6 +5027,34 @@ class Parser {
           contained.add(node.alias);
         } else if (_isComponentContainerKeyword()) {
           nested.add(_parseComponentContainer(addNode));
+        } else if (_check(TokenType.identifier) &&
+            _peek().lexeme.startsWith('\$')) {
+          // PlantUML preprocessor procedure / variable expansion at runtime
+          // (`$service("Gateway", #LightBlue)`, `$tag`). The static parser
+          // doesn't evaluate the preprocessor — accept the line as a no-op
+          // so containers with macro-call children parse cleanly.
+          _consumeRestOfLine();
+        } else if (_check(TokenType.identifier)) {
+          // Class-style relation inside a component package (e.g.
+          // `Object <|-- ArrayList` or `Demo1 *- Demo2`). Component
+          // diagrams routed here from a `package` parent may carry
+          // class-diagram relations. Accept any identifier-starting
+          // line as a generic component relation; if no arrow follows,
+          // register it as a bare contained node.
+          final save = _pos;
+          final name = _advance().lexeme;
+          if (_check(TokenType.arrow) || _check(TokenType.minusMinus)) {
+            _pos = save;
+            _parseComponentRelation(<ComponentRelation>[], addNode);
+          } else {
+            addNode(ComponentNode(
+              alias: name,
+              label: name,
+              kind: ComponentNodeKind.component,
+            ));
+            contained.add(name);
+            _consumeRestOfLine();
+          }
         } else {
           final t = _peek();
           throw ParserException(
@@ -3592,13 +5147,30 @@ class Parser {
     final nodes = <UseCaseNode>[];
     final relations = <UseCaseRelation>[];
     final boundaries = <UseCaseBoundary>[];
+    final notes = <UseCaseNote>[];
+    final noteConnections = <UseCaseNoteConnection>[];
+    final noteAliases = <String>{};
     final seenAliases = <String>{};
     var leftToRight = false;
+    var attachedNoteCounter = 0;
 
     void addNode(UseCaseNode node) {
       if (seenAliases.add(node.alias)) {
         nodes.add(node);
+        return;
       }
+      // Already seen — only replace if the new declaration carries a real
+      // label (different from the alias, signalling explicit declaration vs.
+      // implicit auto-inference).
+      if (node.label != node.alias) {
+        final idx = nodes.indexWhere((n) => n.alias == node.alias);
+        if (idx >= 0) nodes[idx] = node;
+      }
+    }
+
+    void addNote(UseCaseNote note) {
+      notes.add(note);
+      noteAliases.add(note.alias);
     }
 
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
@@ -3614,14 +5186,218 @@ class Parser {
         _skipNewlines();
         continue;
       }
+      if (_tryConsumeAllowmixing()) {
+        _skipNewlines();
+        continue;
+      }
+      if (_tryConsumeInlineJsonBlock()) {
+        _skipNewlines();
+        continue;
+      }
+      // Mixed-element declarations introduced via `allowmixing` inside a use
+      // case diagram. The use-case AST doesn't model these element types
+      // directly; we coerce them to actor-kind UseCaseNodes so the alias
+      // appears in the node list and downstream relations resolve. Layout
+      // currently treats them as actors.
+      if (_isKeyword('component') ||
+          _isKeyword('node') ||
+          _isKeyword('cloud') ||
+          _isKeyword('frame') ||
+          _isKeyword('agent') ||
+          _isKeyword('stack') ||
+          _isKeyword('database') ||
+          _isKeyword('queue') ||
+          _isKeyword('storage') ||
+          _isKeyword('artifact')) {
+        _consumeMixedTopLevelDecl(addNode);
+        _skipNewlines();
+        continue;
+      }
+      if (_check(TokenType.leftParen) &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.rightParen) {
+        // `() Interface` shorthand introduced by allowmixing.
+        _advance();
+        _advance();
+        if (_check(TokenType.identifier)) {
+          final alias = _advance().lexeme;
+          addNode(UseCaseNode(
+            alias: alias,
+            label: alias,
+            kind: UseCaseNodeKind.actor,
+          ));
+        }
+        _skipNewlines();
+        continue;
+      }
+      // `ignore newpage` and `newpage [<title>]` are accepted as no-ops in
+      // use case diagrams so multi-page sources parse without error. Layout
+      // does not currently honour page breaks for this diagram type.
+      if (_isKeyword('ignore') &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          _tokens[_pos + 1].lexeme == 'newpage') {
+        _advance();
+        _advance();
+        _collectLineRemainder();
+        _skipNewlines();
+        continue;
+      }
+      if (_isKeyword('newpage')) {
+        _advance();
+        _collectLineRemainder();
+        _skipNewlines();
+        continue;
+      }
       if (_isKeyword('actor')) {
         addNode(_parseUseCaseNode(UseCaseNodeKind.actor));
       } else if (_isKeyword('usecase')) {
         addNode(_parseUseCaseNode(UseCaseNodeKind.useCase));
-      } else if (_isKeyword('rectangle')) {
-        boundaries.add(_parseRectangleBoundary(addNode));
+      } else if (_isKeyword('rectangle') || _isKeyword('package')) {
+        boundaries.add(_parseRectangleBoundary(addNode,
+            relations: relations,
+            noteAliases: noteAliases,
+            noteConnections: noteConnections));
+      } else if (_isKeyword('note')) {
+        _parseUseCaseNote(addNote, () => attachedNoteCounter++);
+      } else if (_check(TokenType.colon)) {
+        // `:Display name: [as Alias]` line at use-case scope declares an
+        // actor inline — mirrors the sequence-diagram convenience syntax.
+        // Two tokenizations of the leading `:Name:` appear depending on what
+        // follows on the same line:
+        //   - `:Display Name: as Alias`       -> colon, text("Display Name: as Alias")
+        //   - `:Display Name: --> (Target)`   -> colon, text("Display Name"), colon
+        // Detect both, declare the actor, and (if this is a relation line)
+        // hand off to the relation parser with the resolved alias.
+        final _ColonWrappedName decl;
+        if (_pos + 2 < _tokens.length &&
+            _tokens[_pos + 1].type == TokenType.text &&
+            _tokens[_pos + 2].type == TokenType.colon) {
+          _advance(); // open `:`
+          final textTok = _advance();
+          _advance(); // close `:`
+          final displayName = textTok.lexeme.replaceAll(r'\n', '\n');
+          decl = _ColonWrappedName(displayName, null);
+        } else {
+          decl = _consumeColonWrappedDisplayName();
+        }
+        final alias = decl.alias ?? _deriveAliasFromDisplayName(decl.displayName);
+        // The stereotype may live either inside the trailing text token (when
+        // the colon-actor and its `<< … >>` annotation share a line and the
+        // lexer absorbed everything into one text run) or as a separate
+        // [TokenType.stereotype] token consumed here. Accept whichever fired.
+        final stereotype =
+            decl.stereotype ?? _tryConsumeUseCaseStereotype();
+        addNode(UseCaseNode(
+          alias: alias,
+          label: decl.displayName,
+          kind: UseCaseNodeKind.actor,
+          stereotype: stereotype,
+        ));
+        // If the colon-actor is the LEFT side of a relation, fall through to
+        // the relation parser by re-anchoring through a synthetic source.
+        if (_check(TokenType.arrow) || _check(TokenType.minusMinus)) {
+          _parseUseCaseRelation(relations, addNode,
+              noteAliases: noteAliases,
+              noteConnections: noteConnections,
+              leadingAlias: alias);
+        }
+      } else if (_check(TokenType.stringLiteral) &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          _tokens[_pos + 1].lexeme == 'as') {
+        // `"Display" as Alias` — implicit actor.
+        // `"Display" as (Alias)` — implicit use case (paren alias = use case).
+        final displayName = _advance().lexeme;
+        _advance(); // consume `as`
+        UseCaseNodeKind kind;
+        String alias;
+        if (_check(TokenType.leftParen)) {
+          _advance();
+          alias = _advance().lexeme;
+          _expect(TokenType.rightParen);
+          kind = UseCaseNodeKind.useCase;
+        } else if (_check(TokenType.identifier)) {
+          alias = _advance().lexeme;
+          kind = UseCaseNodeKind.actor;
+        } else {
+          final t = _peek();
+          throw ParserException(
+              "Expected alias after 'as', got ${t.type}", t.line, t.column);
+        }
+        final stereotype = _tryConsumeUseCaseStereotype();
+        addNode(UseCaseNode(
+          alias: alias,
+          label: displayName,
+          kind: kind,
+          stereotype: stereotype,
+        ));
+      } else if (_check(TokenType.leftParen)) {
+        // `(Name)` at line start is a free-standing use-case ellipse. The
+        // canonical form is `(Display Name)`; an optional trailing
+        // `as Alias` or `as (Alias)` clause overrides the alias used to
+        // reference this ellipse from later relations.
+        final displayName = _consumeUseCaseEllipseName();
+        // PlantUML "phantom"/hidden-node marker: an optional `/` immediately
+        // after `(Name)` (e.g. `(Foo)/` or `(Foo)/ as (Alias)`). Consume as
+        // a no-op so the rest of the declaration parses normally. Visual
+        // hiding is currently deferred.
+        if (_check(TokenType.slash)) {
+          _advance();
+        }
+        String alias = displayName;
+        if (_isKeyword('as')) {
+          _advance();
+          if (_check(TokenType.leftParen)) {
+            alias = _consumeUseCaseEllipseName();
+          } else if (_check(TokenType.identifier)) {
+            alias = _advance().lexeme;
+          } else {
+            final t = _peek();
+            throw ParserException(
+                "Expected alias after 'as', got ${t.type}",
+                t.line,
+                t.column);
+          }
+        }
+        final stereotype = _tryConsumeUseCaseStereotype();
+        addNode(UseCaseNode(
+          alias: alias,
+          label: displayName,
+          kind: UseCaseNodeKind.useCase,
+          stereotype: stereotype,
+        ));
+        if (_check(TokenType.arrow) || _check(TokenType.minusMinus)) {
+          _parseUseCaseRelation(relations, addNode,
+              noteAliases: noteAliases,
+              noteConnections: noteConnections,
+              leadingAlias: alias);
+        }
+      } else if (_check(TokenType.identifier) &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.stereotype) {
+        // `Identifier << Stereotype >>` at line start declares a bare actor
+        // with a stereotype annotation. The lexer collapses `<< … >>` into a
+        // single [TokenType.stereotype] token, so we can disambiguate this
+        // from a relation purely by lookahead.
+        final alias = _advance().lexeme;
+        final stereotype = _tryConsumeUseCaseStereotype();
+        addNode(UseCaseNode(
+          alias: alias,
+          label: alias,
+          kind: UseCaseNodeKind.actor,
+          stereotype: stereotype,
+        ));
+        if (_check(TokenType.arrow) || _check(TokenType.minusMinus)) {
+          _parseUseCaseRelation(relations, addNode,
+              noteAliases: noteAliases,
+              noteConnections: noteConnections,
+              leadingAlias: alias);
+        }
       } else {
-        _parseUseCaseRelation(relations, addNode);
+        _parseUseCaseRelation(relations, addNode,
+            noteAliases: noteAliases,
+            noteConnections: noteConnections);
       }
       _skipNewlines();
     }
@@ -3630,9 +5406,155 @@ class Parser {
       nodes: List.unmodifiable(nodes),
       relations: List.unmodifiable(relations),
       boundaries: List.unmodifiable(boundaries),
+      notes: List.unmodifiable(notes),
+      noteConnections: List.unmodifiable(noteConnections),
       leftToRightDirection: leftToRight,
       decorations: _decorations.build(),
     );
+  }
+
+  /// Parses a `note ...` line within a use case diagram. Supports:
+  ///
+  /// - `note right of X : inline text`
+  /// - `note right of (X) : inline text`
+  /// - `note right of X` ... body ... `end note`
+  /// - `note "free standing text" as N`
+  ///
+  /// The `position` keyword can be `right`, `left`, `top`, or `bottom`.
+  /// Free-standing notes (with an `as N` alias) can later be referenced by
+  /// dotted (`..`) connection lines.
+  void _parseUseCaseNote(
+    void Function(UseCaseNote) addNote,
+    int Function() nextAttachedId,
+  ) {
+    _advance(); // `note`
+    // Free-standing: `note "text" as Alias`.
+    if (_check(TokenType.stringLiteral)) {
+      final textTok = _advance();
+      final text = textTok.lexeme.replaceAll(r'\n', '\n');
+      if (!_isKeyword('as')) {
+        final t = _peek();
+        throw ParserException(
+            "Expected 'as' after note text, got ${t.type}",
+            t.line,
+            t.column);
+      }
+      _advance();
+      final aliasTok = _expect(TokenType.identifier);
+      addNote(UseCaseNote(alias: aliasTok.lexeme, text: text));
+      return;
+    }
+    // Positioned attached note.
+    NotePosition position;
+    if (_isKeyword('right')) {
+      _advance();
+      position = NotePosition.rightOf;
+    } else if (_isKeyword('left')) {
+      _advance();
+      position = NotePosition.leftOf;
+    } else if (_isKeyword('top') || _isKeyword('bottom')) {
+      // We only model leftOf/rightOf/over today; map top/bottom to
+      // rightOf as a graceful fallback so parsing succeeds and the note
+      // is still rendered next to its target.
+      _advance();
+      position = NotePosition.rightOf;
+    } else if (_isKeyword('over')) {
+      _advance();
+      position = NotePosition.over;
+    } else {
+      final t = _peek();
+      throw ParserException(
+          "Expected position keyword after 'note', got '${t.lexeme}'",
+          t.line,
+          t.column);
+    }
+    if (_isKeyword('of')) {
+      _advance();
+    }
+    final String target;
+    if (_check(TokenType.leftParen)) {
+      target = _consumeUseCaseEllipseName();
+    } else if (_check(TokenType.identifier)) {
+      target = _advance().lexeme;
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected note target name, got ${t.type}', t.line, t.column);
+    }
+    final String text;
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (!_check(TokenType.text)) {
+        final t = _peek();
+        throw ParserException(
+            'Expected note text, got ${t.type}', t.line, t.column);
+      }
+      text = _advance().lexeme.replaceAll(r'\n', '\n');
+    } else if (_check(TokenType.newline)) {
+      text = _consumeUseCaseMultilineNoteBody();
+    } else {
+      final t = _peek();
+      throw ParserException(
+          "Expected ':' or newline after note header, got ${t.type}",
+          t.line,
+          t.column);
+    }
+    final alias = '__usecase_note_${nextAttachedId()}__';
+    addNote(UseCaseNote(
+      alias: alias,
+      text: text,
+      position: position,
+      attachedTo: target,
+    ));
+  }
+
+  /// Consumes the body of a `note ... end note` block in a use case
+  /// diagram. Body lines may be tokenized either as a single `text` token
+  /// per line (when the lexer's note-body mode is active) or as a sequence
+  /// of identifiers/punctuation — both are joined with the original spaces
+  /// reconstructed.
+  String _consumeUseCaseMultilineNoteBody() {
+    _advance(); // consume the newline that opened the block
+    final lines = <String>[];
+    final currentLine = StringBuffer();
+    int? currentLineNo;
+    while (true) {
+      if (_check(TokenType.eof) || _check(TokenType.endUml)) {
+        final t = _peek();
+        throw ParserException(
+            "Expected 'end note' to close multi-line note",
+            t.line,
+            t.column);
+      }
+      if (_isKeyword('end') &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          _tokens[_pos + 1].lexeme == 'note') {
+        if (currentLine.isNotEmpty) {
+          lines.add(currentLine.toString());
+        }
+        _advance();
+        _advance();
+        return lines.join('\n');
+      }
+      if (_check(TokenType.newline)) {
+        if (currentLine.isNotEmpty || lines.isNotEmpty) {
+          lines.add(currentLine.toString());
+          currentLine.clear();
+        }
+        currentLineNo = null;
+        _advance();
+        continue;
+      }
+      final t = _advance();
+      if (currentLineNo != null && t.line != currentLineNo) {
+        lines.add(currentLine.toString());
+        currentLine.clear();
+      }
+      if (currentLine.isNotEmpty) currentLine.write(' ');
+      currentLine.write(t.lexeme);
+      currentLineNo = t.line;
+    }
   }
 
   bool _tryParseDirectionDirective({required void Function() setLeftToRight}) {
@@ -3669,9 +5591,17 @@ class Parser {
 
   UseCaseNode _parseUseCaseNode(UseCaseNodeKind kind) {
     _advance();
+    // PlantUML "phantom"/hidden-node marker: an optional `/` immediately
+    // after the `usecase`/`actor` keyword (e.g. `usecase/ UC3`,
+    // `actor/ Woman3`). Consume as a no-op so the rest of the declaration
+    // parses normally. Visual hiding is currently deferred.
+    if (_check(TokenType.slash)) {
+      _advance();
+    }
     String? displayName;
     final String alias;
     if (_check(TokenType.stringLiteral)) {
+      // `usecase "Label" [as Alias]`.
       displayName = _advance().lexeme;
       if (_isKeyword('as')) {
         _advance();
@@ -3679,28 +5609,149 @@ class Parser {
       } else {
         alias = displayName;
       }
+    } else if (_check(TokenType.leftParen)) {
+      // `usecase (Display Name) [as Alias|as (Alias)]` — parenthesized
+      // display name following the keyword. Mirrors the bare `(Name)`
+      // line-start form. The optional trailing `as` clause overrides the
+      // alias used to reference this ellipse from later relations.
+      displayName = _consumeUseCaseEllipseName();
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.leftParen)) {
+          alias = _consumeUseCaseEllipseName();
+        } else if (_check(TokenType.identifier)) {
+          alias = _advance().lexeme;
+        } else {
+          final t = _peek();
+          throw ParserException(
+              "Expected alias after 'as', got ${t.type}", t.line, t.column);
+        }
+      } else {
+        alias = displayName;
+      }
     } else if (_check(TokenType.identifier)) {
       final first = _advance().lexeme;
       if (_isKeyword('as')) {
         _advance();
-        displayName = first;
-        alias = _expect(TokenType.identifier).lexeme;
+        // `usecase Alias as <name>` — two shapes are valid here:
+        //   1. `usecase UC1 as Login` (legacy)         -> identifier
+        //   2. `usecase UC1 as "Multi\nline label"`    -> string literal
+        // Shape (2) is the canonical PlantUML form for multi-line labels
+        // and overrides the legacy shape: the FIRST token becomes the
+        // alias and the quoted string becomes the display label. Shape (1)
+        // is preserved by treating the first identifier as the label and
+        // the second identifier as the alias.
+        if (_check(TokenType.stringLiteral)) {
+          alias = first;
+          displayName = _advance().lexeme;
+        } else {
+          displayName = first;
+          alias = _expect(TokenType.identifier).lexeme;
+        }
       } else {
         alias = first;
       }
+    } else if (_check(TokenType.colon)) {
+      // `actor :Display Name: [as Alias]` — colon-wrapped display name
+      // following the `actor`/`usecase` keyword. This shape is most useful
+      // after a trailing `/` hidden-node marker (e.g.
+      // `actor/ :Last actor: as Person1`) where the colon-wrapped name was
+      // emitted mid-line by the greedy `:text...` lexer path.
+      final decl = _consumeColonWrappedDisplayName();
+      displayName = decl.displayName;
+      alias = decl.alias ?? _deriveAliasFromDisplayName(decl.displayName);
     } else {
       final t = _peek();
       throw ParserException(
           'Expected use case name, got ${t.type}', t.line, t.column);
     }
+    final label = displayName ?? alias;
+    final spans = _parseUseCaseLabelSpans(label);
+    final stereotype = _tryConsumeUseCaseStereotype();
+    // Optional PlantUML inline-style suffix: `#<bg-color>[;line:<c>][;line.X][;text:<c>]`.
+    // The lexer absorbs the full run into a single hashColor token; visual
+    // styling is deferred — we just consume it so the parse succeeds.
+    if (_check(TokenType.hashColor)) {
+      _advance();
+    }
     return UseCaseNode(
       alias: alias,
-      label: displayName ?? alias,
+      label: label,
       kind: kind,
+      labelSpans: spans,
+      stereotype: stereotype,
     );
   }
 
-  UseCaseBoundary _parseRectangleBoundary(void Function(UseCaseNode) addNode) {
+  /// Consumes an optional `<< Stereotype >>` token following a use-case node
+  /// declaration. Returns the trimmed inner text (or `null` if absent /
+  /// empty). The lexer already collapses `<< … >>` into a single
+  /// [TokenType.stereotype] token whose lexeme is the trimmed inner text.
+  String? _tryConsumeUseCaseStereotype() {
+    if (!_check(TokenType.stereotype)) return null;
+    final lex = _advance().lexeme;
+    return lex.isEmpty ? null : lex;
+  }
+
+  /// Splits a use-case label into text + separator spans.
+  ///
+  /// PlantUML supports embedded section dividers inside the quoted label of
+  /// a `usecase` shape:
+  ///   `--`         on its own line  -> thin horizontal separator
+  ///   `==`         on its own line  -> thick horizontal separator
+  ///   `..text..`   on its own line  -> thin separator with centered text
+  ///
+  /// If the label contains none of these markers we return `null` and the
+  /// layout falls back to rendering [label] verbatim. Otherwise we return a
+  /// list of alternating [UseCaseLabelText] (joined adjacent lines) and
+  /// [UseCaseLabelSeparatorSpan] entries.
+  List<UseCaseLabelSpan>? _parseUseCaseLabelSpans(String label) {
+    if (!label.contains('\n')) return null;
+    final lines = label.split('\n');
+    final spans = <UseCaseLabelSpan>[];
+    final buf = StringBuffer();
+    void flushText() {
+      if (buf.isEmpty) return;
+      spans.add(UseCaseLabelText(buf.toString()));
+      buf.clear();
+    }
+
+    var sawSeparator = false;
+    for (final raw in lines) {
+      final trimmed = raw.trim();
+      if (trimmed == '--') {
+        flushText();
+        spans.add(const UseCaseLabelSeparatorSpan(
+            UseCaseLabelSeparator.thin));
+        sawSeparator = true;
+      } else if (trimmed == '==') {
+        flushText();
+        spans.add(const UseCaseLabelSeparatorSpan(
+            UseCaseLabelSeparator.thick));
+        sawSeparator = true;
+      } else if (trimmed.length >= 4 &&
+          trimmed.startsWith('..') &&
+          trimmed.endsWith('..')) {
+        flushText();
+        final inner = trimmed.substring(2, trimmed.length - 2).trim();
+        spans.add(UseCaseLabelSeparatorSpan(
+            UseCaseLabelSeparator.labeled,
+            text: inner.isEmpty ? null : inner));
+        sawSeparator = true;
+      } else {
+        if (buf.isNotEmpty) buf.write('\n');
+        buf.write(raw);
+      }
+    }
+    flushText();
+    if (!sawSeparator) return null;
+    return List.unmodifiable(spans);
+  }
+
+  UseCaseBoundary _parseRectangleBoundary(void Function(UseCaseNode) addNode,
+      {List<UseCaseRelation>? relations,
+      Set<String>? noteAliases,
+      List<UseCaseNoteConnection>? noteConnections}) {
     final rectToken = _advance();
     String? label;
     if (_check(TokenType.stringLiteral)) {
@@ -3729,6 +5780,26 @@ class Parser {
           final node = _parseUseCaseNode(UseCaseNodeKind.actor);
           addNode(node);
           contained.add(node.alias);
+        } else if (_isKeyword('package') || _isKeyword('rectangle')) {
+          // Nested package/rectangle: recurse and absorb its participants into
+          // this outer container's contained list (flat membership).
+          final inner = _parseRectangleBoundary(addNode,
+              relations: relations,
+              noteAliases: noteAliases,
+              noteConnections: noteConnections);
+          contained.addAll(inner.containedAliases);
+        } else if (relations != null &&
+            (_check(TokenType.leftParen) ||
+                _check(TokenType.colon) ||
+                _check(TokenType.identifier) ||
+                _check(TokenType.stringLiteral))) {
+          // Relations nested inside a rectangle (e.g. `customer -- (checkout)`
+          // or `(help) .> (checkout) : extends`). These don't add membership
+          // entries themselves, but the endpoints may implicitly declare nodes
+          // that should still resolve cleanly against the surrounding diagram.
+          _parseUseCaseRelation(relations, addNode,
+              noteAliases: noteAliases,
+              noteConnections: noteConnections);
         } else {
           final t = _peek();
           throw ParserException(
@@ -3751,64 +5822,265 @@ class Parser {
   }
 
   void _parseUseCaseRelation(
-      List<UseCaseRelation> out, void Function(UseCaseNode) addNode) {
-    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
-      final t = _peek();
-      throw ParserException(
-          'Expected use case or actor name, got ${t.type}', t.line, t.column);
+      List<UseCaseRelation> out, void Function(UseCaseNode) addNode,
+      {String? leadingAlias,
+      _UseCaseEnd? leadingEnd,
+      Set<String>? noteAliases,
+      List<UseCaseNoteConnection>? noteConnections}) {
+    final _UseCaseEnd fromEnd;
+    if (leadingEnd != null) {
+      fromEnd = leadingEnd;
+    } else if (leadingAlias != null) {
+      fromEnd = _UseCaseEnd(alias: leadingAlias, declaredKind: null);
+    } else {
+      fromEnd = _readUseCaseRelationEnd();
     }
-    final from = _advance().lexeme;
     if (!_check(TokenType.arrow) && !_check(TokenType.minusMinus)) {
       final t = _peek();
       throw ParserException(
-          "Expected relationship arrow after '$from', got ${t.type}",
+          "Expected relationship arrow after '${fromEnd.alias}', got ${t.type}",
           t.line,
           t.column);
     }
     final arrowToken = _advance();
-    if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
-      final t = _peek();
-      throw ParserException(
-          'Expected use case or actor name, got ${t.type}', t.line, t.column);
+    final toEnd = _readUseCaseRelationEnd();
+    // Optional PlantUML inline-style suffix on the relation:
+    // `--> (bar) #color;line:red;line.bold;text:red : label`.
+    // The lexer absorbs the full run into a single hashColor token. Split it
+    // on `;` and apply each clause to the relation so the line color, line
+    // style (bold/dashed/dotted), and label text color reach the renderer.
+    Color? inlineLineColor;
+    Color? inlineTextColor;
+    UseCaseLineStyle? inlineLineStyle;
+    if (_check(TokenType.hashColor)) {
+      final tok = _advance();
+      final parsed = _parseUseCaseInlineStyle(tok.lexeme);
+      inlineLineColor = parsed.lineColor;
+      inlineTextColor = parsed.textColor;
+      inlineLineStyle = parsed.lineStyle;
     }
-    final to = _advance().lexeme;
     String? label;
     if (_check(TokenType.colon)) {
       _advance();
       if (_check(TokenType.text)) {
-        label = _advance().lexeme;
+        // Relation labels follow PlantUML's `\n` -> newline convention so
+        // multi-line edge captions like `This is\nyet another\nlabel`
+        // render across multiple lines.
+        label = _advance().lexeme.replaceAll(r'\n', '\n');
       }
     }
     final decoded = _decodeUseCaseArrow(arrowToken);
-    final resolvedFrom =
-        decoded.direction == MessageDirection.backward ? to : from;
-    final resolvedTo =
-        decoded.direction == MessageDirection.backward ? from : to;
+    final resolvedFromEnd =
+        decoded.direction == MessageDirection.backward ? toEnd : fromEnd;
+    final resolvedToEnd =
+        decoded.direction == MessageDirection.backward ? fromEnd : toEnd;
+
+    // A relation that touches a free-standing note alias is rendered as a
+    // dotted connector line rather than a node-to-node relation. Routing it
+    // to [noteConnections] also keeps the endpoint from being auto-classified
+    // as an actor or use case.
+    final fromIsNote =
+        noteAliases != null && noteAliases.contains(resolvedFromEnd.alias);
+    final toIsNote =
+        noteAliases != null && noteAliases.contains(resolvedToEnd.alias);
+    if (fromIsNote || toIsNote) {
+      if (!fromIsNote) {
+        addNode(UseCaseNode(
+          alias: resolvedFromEnd.alias,
+          label: resolvedFromEnd.label ?? resolvedFromEnd.alias,
+          kind: resolvedFromEnd.declaredKind ?? UseCaseNodeKind.useCase,
+        ));
+      }
+      if (!toIsNote) {
+        addNode(UseCaseNode(
+          alias: resolvedToEnd.alias,
+          label: resolvedToEnd.label ?? resolvedToEnd.alias,
+          kind: resolvedToEnd.declaredKind ?? UseCaseNodeKind.useCase,
+        ));
+      }
+      noteConnections!.add(UseCaseNoteConnection(
+        from: resolvedFromEnd.alias,
+        to: resolvedToEnd.alias,
+      ));
+      return;
+    }
+
     addNode(UseCaseNode(
-      alias: resolvedFrom,
-      label: resolvedFrom,
-      kind: UseCaseNodeKind.useCase,
+      alias: resolvedFromEnd.alias,
+      label: resolvedFromEnd.label ?? resolvedFromEnd.alias,
+      kind: resolvedFromEnd.declaredKind ?? UseCaseNodeKind.actor,
     ));
     addNode(UseCaseNode(
-      alias: resolvedTo,
-      label: resolvedTo,
-      kind: UseCaseNodeKind.useCase,
+      alias: resolvedToEnd.alias,
+      label: resolvedToEnd.label ?? resolvedToEnd.alias,
+      kind: resolvedToEnd.declaredKind ?? UseCaseNodeKind.useCase,
     ));
+    final relFrom =
+        decoded.reverse ? resolvedToEnd.alias : resolvedFromEnd.alias;
+    final relTo =
+        decoded.reverse ? resolvedFromEnd.alias : resolvedToEnd.alias;
     out.add(UseCaseRelation(
-      from: resolvedFrom,
-      to: resolvedTo,
+      from: relFrom,
+      to: relTo,
       lineStyle: decoded.lineStyle,
       head: decoded.head,
       direction: MessageDirection.forward,
       label: label,
+      lineColor: inlineLineColor,
+      inlineLineStyle: inlineLineStyle,
+      textColor: inlineTextColor,
     ));
+  }
+
+  /// Splits a PlantUML inline-style lexeme such as
+  /// `#line:red;line.bold;text:red` or `#green;line.dashed;text:green` into
+  /// the constituent line color, line style, and text color. Returns nulls
+  /// for any clause that is absent or unrecognized.
+  _UseCaseInlineStyle _parseUseCaseInlineStyle(String lexeme) {
+    final body = lexeme.startsWith('#') ? lexeme.substring(1) : lexeme;
+    Color? lineColor;
+    Color? textColor;
+    UseCaseLineStyle? lineStyle;
+    final segments = body.split(';');
+    for (var idx = 0; idx < segments.length; idx++) {
+      final seg = segments[idx].trim();
+      if (seg.isEmpty) continue;
+      // `text:<color>` — label color.
+      if (seg.startsWith('text:')) {
+        textColor = text_colors.tryParseColor(seg.substring(5)) ?? textColor;
+        continue;
+      }
+      // `line.bold|dashed|dotted` — line pattern.
+      if (seg.startsWith('line.')) {
+        switch (seg.substring(5)) {
+          case 'bold':
+            lineStyle = UseCaseLineStyle.bold;
+            break;
+          case 'dashed':
+            lineStyle = UseCaseLineStyle.dashed;
+            break;
+          case 'dotted':
+            lineStyle = UseCaseLineStyle.dotted;
+            break;
+        }
+        continue;
+      }
+      // `line:<color>` — explicit line color.
+      if (seg.startsWith('line:')) {
+        lineColor = text_colors.tryParseColor(seg.substring(5)) ?? lineColor;
+        continue;
+      }
+      // Bare `<color>` or `#<color>` — only the first segment is treated as a
+      // head color. PlantUML uses this as the line color when no `line:`
+      // clause is given.
+      if (idx == 0) {
+        final headSpec = seg.startsWith('#') ? seg : '#$seg';
+        final parsed = text_colors.tryParseColor(headSpec);
+        if (parsed != null) {
+          lineColor ??= parsed;
+        }
+      }
+    }
+    return _UseCaseInlineStyle(
+      lineColor: lineColor,
+      textColor: textColor,
+      lineStyle: lineStyle,
+    );
+  }
+
+  /// Reads a single endpoint of a use-case relation. Accepts:
+  /// - `Name` / `"Display"` — bare identifier, auto-classified by caller
+  ///   (left side defaults to actor, right side defaults to use case).
+  /// - `:Display Name:` — colon-wrapped actor declaration.
+  /// - `(Name with spaces)` — parenthesized use-case ellipse.
+  _UseCaseEnd _readUseCaseRelationEnd() {
+    if (_check(TokenType.colon)) {
+      // Two tokenizations are possible (see `_parseUseCaseDiagram`):
+      //   - `:Display Name:`               -> colon, text("Display Name"), colon
+      //   - `:Display Name: as Alias`      -> colon, text("Display Name: as Alias")
+      // Both forms declare an actor on this end of the relation.
+      final String displayName;
+      if (_pos + 2 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.text &&
+          _tokens[_pos + 2].type == TokenType.colon) {
+        _advance();
+        final textTok = _advance();
+        _advance();
+        displayName = textTok.lexeme.replaceAll(r'\n', '\n');
+        final alias = _deriveAliasFromDisplayName(displayName);
+        return _UseCaseEnd(
+          alias: alias,
+          label: displayName,
+          declaredKind: UseCaseNodeKind.actor,
+        );
+      }
+      final decl = _consumeColonWrappedDisplayName();
+      final alias = decl.alias ?? _deriveAliasFromDisplayName(decl.displayName);
+      return _UseCaseEnd(
+        alias: alias,
+        label: decl.displayName,
+        declaredKind: UseCaseNodeKind.actor,
+      );
+    }
+    if (_check(TokenType.leftParen)) {
+      final alias = _consumeUseCaseEllipseName();
+      return _UseCaseEnd(
+        alias: alias,
+        label: alias,
+        declaredKind: UseCaseNodeKind.useCase,
+      );
+    }
+    if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+      final alias = _advance().lexeme;
+      return _UseCaseEnd(alias: alias, declaredKind: null);
+    }
+    final t = _peek();
+    throw ParserException(
+        'Expected use case or actor name, got ${t.type}', t.line, t.column);
+  }
+
+  /// Consumes `(Name with spaces)` and returns the inner name. The lexer
+  /// already tokenizes the inside as a single `text` token (or omits it for
+  /// `()`); we just stitch the pieces together.
+  String _consumeUseCaseEllipseName() {
+    _expect(TokenType.leftParen);
+    String name = '';
+    if (_check(TokenType.text)) {
+      name = _advance().lexeme;
+    } else if (_check(TokenType.identifier)) {
+      // Defensive: if the lexer emitted an identifier instead of text inside
+      // the parens, accept that too.
+      name = _advance().lexeme;
+    }
+    _expect(TokenType.rightParen);
+    // Convert escaped newlines (`\n`) to literal newlines so multi-line
+    // ellipse labels render as multiple lines, mirroring the convention
+    // used for colon-wrapped names, note bodies, and quoted labels.
+    return name.replaceAll(r'\n', '\n');
   }
 
   _UseCaseArrow _decodeUseCaseArrow(Token token) {
     final lexeme = token.lexeme;
     final dashed = lexeme.contains('.');
-    final hasRightArrow = lexeme.endsWith('>');
-    final hasLeftArrow = lexeme.startsWith('<');
+    final hasLeftTriangle = lexeme.startsWith('<|');
+    final hasRightTriangle = lexeme.endsWith('|>');
+    final hasRightArrow = lexeme.endsWith('>') && !hasRightTriangle;
+    final hasLeftArrow = lexeme.startsWith('<') && !hasLeftTriangle;
+    if (hasLeftTriangle) {
+      return _UseCaseArrow(
+        dashed ? LineStyle.dashed : LineStyle.solid,
+        ArrowHead.triangle,
+        MessageDirection.forward,
+        reverse: true,
+      );
+    }
+    if (hasRightTriangle) {
+      return _UseCaseArrow(
+        dashed ? LineStyle.dashed : LineStyle.solid,
+        ArrowHead.triangle,
+        MessageDirection.forward,
+      );
+    }
     if (lexeme == '--' || lexeme == '..') {
       return _UseCaseArrow(
         dashed ? LineStyle.dashed : LineStyle.solid,
@@ -4136,10 +6408,71 @@ class Parser {
     return rootBuilder?.build();
   }
 
+  /// True when the first significant line inside `@startuml ... @enduml`
+  /// starts with the `json` keyword. Used to route sources like
+  /// `@startuml\njson J { ... }\n@enduml` to the JSON diagram parser.
+  bool _looksLikeInlineJsonDiagram() {
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.newline) continue;
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) return false;
+      if (t.type == TokenType.identifier && t.lexeme == 'json') {
+        return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /// Parses a top-level `json [display] [as alias] { ... }` block inside
+  /// `@startuml ... @enduml` and returns a stub [DataDiagram].
+  ///
+  /// The current lexer is sequence-diagram-oriented: a `:` token greedily
+  /// consumes the rest of the line as a text token, so the JSON body cannot
+  /// be losslessly reconstructed from the token stream. As a first step we
+  /// accept the block (brace-balanced consume) and return an empty
+  /// DataDiagram so the diagram parses without error. Full visual rendering
+  /// of inline JSON is deferred — sources that need the structured body
+  /// should use the dedicated `@startjson` form.
+  Diagram _parseInlineJsonAsDataDiagram() {
+    _expectKeyword('json');
+    if (_check(TokenType.stringLiteral)) {
+      _advance();
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier)) _advance();
+      }
+    } else if (_check(TokenType.identifier)) {
+      _advance();
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier)) _advance();
+      }
+    }
+    _skipNewlines();
+    // Consume everything up to (but not including) the closing `@enduml`.
+    // Brace-counting isn't reliable for inline JSON because the existing
+    // lexer eats the rest of a line after a `:` into a single text token,
+    // which hides interior `{`/`}` from the brace counter. Greedy consume
+    // is correct here because the inline JSON block is the only content
+    // inside the `@startuml ... @enduml` wrapper (gated by
+    // `_looksLikeInlineJsonDiagram`).
+    while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
+      _advance();
+    }
+    _expect(TokenType.endUml);
+    return DataDiagram(
+      root: const DataObject([]),
+      format: DataFormat.json,
+      decorations: _decorations.build(),
+    );
+  }
+
   DataDiagram _parseJsonDiagram() {
     final buf = StringBuffer();
     int? firstLine;
     int? firstCol;
+    var inStyleBlock = false;
     while (!_check(TokenType.endJson) && !_check(TokenType.eof)) {
       if (_check(TokenType.newline)) {
         _advance();
@@ -4152,8 +6485,28 @@ class Parser {
       }
       final t = _advance();
       final raw = t.lexeme;
-      final trimmed = raw.trimLeft();
-      if (trimmed.startsWith('#')) {
+      final trimmed = raw.trim();
+      final trimmedLeft = raw.trimLeft();
+      // Consume `<style> ... </style>` blocks as no-ops. PlantUML allows a
+      // CSS-like style declaration inside `@startjson`/`@endjson`; rendering
+      // is deferred so we just skip the block here.
+      if (inStyleBlock) {
+        if (trimmed.toLowerCase().contains('</style>')) {
+          inStyleBlock = false;
+        }
+        continue;
+      }
+      final lowerTrimmed = trimmed.toLowerCase();
+      if (lowerTrimmed.startsWith('<style>') ||
+          lowerTrimmed.startsWith('<style ')) {
+        if (!lowerTrimmed.contains('</style>')) {
+          inStyleBlock = true;
+        }
+        continue;
+      }
+      // `#highlight "path" [/ "key"] [<<class>>]` and other `#` directives
+      // are accepted as no-ops; rendering of highlight is deferred.
+      if (trimmedLeft.startsWith('#')) {
         continue;
       }
       firstLine ??= t.line;
@@ -4866,11 +7219,18 @@ class Parser {
 
   NetworkDiagram _buildNetworkDiagram(List<_NwdiagSourceLine> rawLines) {
     final segments = <NetworkSegment>[];
-    final networkOpenRe = RegExp(r'^network\s+([A-Za-z0-9_]+)\s*\{?\s*$');
-    final segmentAddressRe = RegExp(r'^address\s*=\s*"([^"]*)"\s*;?\s*$');
+    final networkOpenRe =
+        RegExp(r'^network(?:\s+([A-Za-z0-9_]+))?\s*\{?\s*$');
+    final groupOpenRe = RegExp(r'^group(?:\s+([A-Za-z0-9_]+))?\s*\{?\s*$');
+    final nwdiagWrapperRe = RegExp(r'^nwdiag\s*\{?\s*$');
+    final propertyRe =
+        RegExp(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"\s*;?\s*$');
     final nodeWithAttrsRe = RegExp(r'^([A-Za-z0-9_]+)\s*\[(.*)\]\s*;?\s*$');
     final bareNodeRe = RegExp(r'^([A-Za-z0-9_]+)\s*;?\s*$');
     final addressAttrRe = RegExp(r'address\s*=\s*"([^"]*)"');
+
+    // Context stack: 'root', 'wrapper', 'network', 'group'.
+    final contextStack = <String>['root'];
 
     String? currentName;
     String? currentAddress;
@@ -4890,53 +7250,117 @@ class Parser {
       inSegment = false;
     }
 
-    for (final src in rawLines) {
-      final s = src.raw.trim();
-      if (s.isEmpty) continue;
-      if (s == '{') continue;
-      if (s == '}') {
-        closeSegment();
-        continue;
-      }
-      final openMatch = networkOpenRe.firstMatch(s);
-      if (openMatch != null) {
-        closeSegment();
-        currentName = openMatch.group(1);
-        currentAddress = null;
-        currentNodes = [];
-        inSegment = true;
-        continue;
-      }
-      if (!inSegment) {
-        throw ParserException(
-            'Unexpected nwdiag line outside network block: "$s"',
-            src.line,
-            src.column);
-      }
-      final segAddr = segmentAddressRe.firstMatch(s);
-      if (segAddr != null) {
-        currentAddress = segAddr.group(1);
-        continue;
-      }
-      final nodeAttrs = nodeWithAttrsRe.firstMatch(s);
-      if (nodeAttrs != null) {
-        final name = nodeAttrs.group(1)!;
-        final attrs = nodeAttrs.group(2)!;
-        String? address;
-        final addrMatch = addressAttrRe.firstMatch(attrs);
-        if (addrMatch != null) {
-          address = addrMatch.group(1);
+    // Split a raw line on top-level statement separators, stripping `//`
+    // comments. Returns a list of individual statements (no semicolons).
+    List<String> normalize(String raw) {
+      // Strip `//` line comment (outside quotes).
+      final commentIdx = _findNwdiagCommentStart(raw);
+      final stripped =
+          commentIdx >= 0 ? raw.substring(0, commentIdx) : raw;
+      final out = <String>[];
+      final sb = StringBuffer();
+      var inString = false;
+      for (var k = 0; k < stripped.length; k++) {
+        final ch = stripped[k];
+        if (ch == '"') {
+          inString = !inString;
+          sb.write(ch);
+          continue;
         }
-        currentNodes.add(NetworkNode(name: name, address: address));
-        continue;
+        if (!inString && ch == ';') {
+          final piece = sb.toString().trim();
+          if (piece.isNotEmpty) out.add(piece);
+          sb.clear();
+          continue;
+        }
+        sb.write(ch);
       }
-      final bare = bareNodeRe.firstMatch(s);
-      if (bare != null) {
-        currentNodes.add(NetworkNode(name: bare.group(1)!));
-        continue;
+      final tail = sb.toString().trim();
+      if (tail.isNotEmpty) out.add(tail);
+      return out;
+    }
+
+    for (final src in rawLines) {
+      for (final s in normalize(src.raw)) {
+        if (s.isEmpty) continue;
+        if (s == '{') continue;
+        if (s == '}') {
+          final ctx = contextStack.isNotEmpty ? contextStack.last : 'root';
+          if (ctx == 'network') {
+            closeSegment();
+          }
+          if (contextStack.length > 1) {
+            contextStack.removeLast();
+          }
+          continue;
+        }
+        // Wrapper: `nwdiag {`
+        final wrapperMatch = nwdiagWrapperRe.firstMatch(s);
+        if (wrapperMatch != null) {
+          contextStack.add('wrapper');
+          continue;
+        }
+        // Network opener: `network NAME {`
+        final openMatch = networkOpenRe.firstMatch(s);
+        if (openMatch != null && openMatch.group(1) != null) {
+          // Implicitly close any prior network when we see a sibling network
+          // declaration without an explicit `}` (common in the test suite).
+          if (inSegment && contextStack.last == 'network') {
+            closeSegment();
+            contextStack.removeLast();
+          }
+          contextStack.add('network');
+          currentName = openMatch.group(1);
+          currentAddress = null;
+          currentNodes = [];
+          inSegment = true;
+          continue;
+        }
+        // Group opener: `group [NAME] {` — consumed as no-op container.
+        final groupMatch = groupOpenRe.firstMatch(s);
+        if (groupMatch != null) {
+          contextStack.add('group');
+          continue;
+        }
+        // Property: `key = "value"`
+        final propMatch = propertyRe.firstMatch(s);
+        if (propMatch != null) {
+          final key = propMatch.group(1)!;
+          final value = propMatch.group(2)!;
+          if (key == 'address' && inSegment &&
+              contextStack.last == 'network') {
+            currentAddress = value;
+          }
+          // Other properties (color, etc.) are accepted but not rendered.
+          continue;
+        }
+        // Node with attrs: `name [address = ".1"]`
+        final nodeAttrs = nodeWithAttrsRe.firstMatch(s);
+        if (nodeAttrs != null) {
+          final name = nodeAttrs.group(1)!;
+          final attrs = nodeAttrs.group(2)!;
+          String? address;
+          final addrMatch = addressAttrRe.firstMatch(attrs);
+          if (addrMatch != null) {
+            address = addrMatch.group(1);
+          }
+          if (inSegment) {
+            currentNodes.add(NetworkNode(name: name, address: address));
+          }
+          continue;
+        }
+        // Bare node: `name`
+        final bare = bareNodeRe.firstMatch(s);
+        if (bare != null) {
+          if (inSegment) {
+            currentNodes.add(NetworkNode(name: bare.group(1)!));
+          }
+          // Bare node outside a network (e.g. inside a top-level group) is
+          // accepted as a member reference without producing a segment node.
+          continue;
+        }
+        // Unknown line — accept silently to keep parsing resilient.
       }
-      throw ParserException(
-          'Unrecognized nwdiag line: "$s"', src.line, src.column);
     }
     closeSegment();
 
@@ -4944,6 +7368,22 @@ class Parser {
       networks: List.unmodifiable(segments),
       decorations: _decorations.build(),
     );
+  }
+
+  // Find start index of a `//` line comment, ignoring quoted regions.
+  int _findNwdiagCommentStart(String s) {
+    var inString = false;
+    for (var k = 0; k < s.length; k++) {
+      final ch = s[k];
+      if (ch == '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString && ch == '/' && k + 1 < s.length && s[k + 1] == '/') {
+        return k;
+      }
+    }
+    return -1;
   }
 
   SaltCell _parseSaltCell(String text) {
@@ -5094,7 +7534,41 @@ class _UseCaseArrow {
   final LineStyle lineStyle;
   final ArrowHead? head;
   final MessageDirection direction;
-  const _UseCaseArrow(this.lineStyle, this.head, this.direction);
+  final bool reverse;
+  const _UseCaseArrow(this.lineStyle, this.head, this.direction,
+      {this.reverse = false});
+}
+
+/// One side of a use-case relation as resolved by [_readUseCaseRelationEnd].
+///
+/// [declaredKind] is non-null when the syntax unambiguously identifies the
+/// node — `:Display:` is always an actor, `(Name)` is always a use case. A
+/// bare identifier has [declaredKind] = null so the caller can default it
+/// (left endpoint -> actor, right endpoint -> use case) without overriding
+/// any earlier declaration of the same alias.
+class _UseCaseEnd {
+  final String alias;
+  final String? label;
+  final UseCaseNodeKind? declaredKind;
+  const _UseCaseEnd({
+    required this.alias,
+    this.label,
+    required this.declaredKind,
+  });
+}
+
+/// Parsed result of a PlantUML inline-style suffix (`#color;line.bold;text:c`)
+/// on a use-case relation. Any field is null when the corresponding clause is
+/// absent or unrecognized.
+class _UseCaseInlineStyle {
+  final Color? lineColor;
+  final Color? textColor;
+  final UseCaseLineStyle? lineStyle;
+  const _UseCaseInlineStyle({
+    required this.lineColor,
+    required this.textColor,
+    required this.lineStyle,
+  });
 }
 
 class _ComponentRelEnd {
@@ -5127,6 +7601,17 @@ class _AutonumberState {
   }
 }
 
+/// Result of parsing a `:Display name: [as Alias]` block. The
+/// [displayName] has already been normalized (literal `\n` markers turned
+/// into newlines); [alias] is null when no `as` clause was present so the
+/// caller can derive a default.
+class _ColonWrappedName {
+  final String displayName;
+  final String? alias;
+  final String? stereotype;
+  const _ColonWrappedName(this.displayName, this.alias, {this.stereotype});
+}
+
 class _DiagramDecorationBuilder {
   String? title;
   String? caption;
@@ -5153,11 +7638,30 @@ class _DecodedArrow {
   final MessageDirection direction;
   final bool hidden;
   final Color? color;
+  // Sequence "found" / "lost" message markers. Non-null when the arrow's
+  // SOURCE or TARGET endpoint is anonymous (`[->`, `?->`, `->]`, `->?` and
+  // their dashed / reverse variants).
+  final MessageExternal? leftExternal;
+  final MessageExternal? rightExternal;
+  // Tail-end decoration peeled from a leading `o` / `x` glyph in the arrow
+  // lexeme (`o->`, `x->`, `o<->o`, `x<->x`, `x->o`). For bidirectional
+  // arrows the same shape is mirrored on both ends; for forward/backward
+  // arrows it sits at the non-triangle endpoint.
+  final EndpointDecoration? tailDecoration;
+  // PlantUML "transmission duration" annotation embedded in the arrow
+  // (`->(N)` / `(N)<-`). When non-null, layout renders the arrow as a
+  // diagonal line with the head endpoint offset below the tail endpoint by
+  // an amount proportional to N.
+  final int? duration;
   const _DecodedArrow(
     this.lineStyle,
     this.head,
     this.direction, {
     this.hidden = false,
     this.color,
+    this.leftExternal,
+    this.rightExternal,
+    this.tailDecoration,
+    this.duration,
   });
 }

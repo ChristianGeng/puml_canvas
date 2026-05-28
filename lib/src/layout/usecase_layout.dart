@@ -49,6 +49,18 @@ class UseCaseLayout implements DiagramLayout {
   static const _boundaryFill = Color(0x00000000);
   static const _boundaryStroke = Color(0xFF606060);
 
+  static const _noteFill = Color(0xFFFEF9C3);
+  static const _noteStroke = Color(0xFF000000);
+  static const _notePaddingX = 8.0;
+  static const _notePaddingY = 6.0;
+  static const _noteMinWidth = 60.0;
+  static const _noteMinHeight = 24.0;
+  static const _noteGap = 16.0;
+  static const _noteStyle = TextStyle(
+    color: Color(0xFF000000),
+    fontSize: 11,
+  );
+
   const UseCaseLayout();
 
   @override
@@ -173,8 +185,65 @@ class UseCaseLayout implements DiagramLayout {
       blockY += layoutResult.height + _useCaseVGap;
     }
 
-    final height = math.max(actorsBottom, blockY) + _padding;
-    final width = math.max(diagramRight, actorsRight) + _padding;
+    // Lay out notes. Attached notes (`note right of X`) sit immediately
+    // adjacent to their target on the chosen side; free-standing notes
+    // (`note "..." as N`) are placed in a column to the right of the rest
+    // of the diagram so the dotted connector lines can reach them cleanly.
+    final noteRects = <String, Rect>{};
+    final noteSizes = <String, Size>{};
+    for (final n in diagram.notes) {
+      noteSizes[n.alias] = _measureNote(n.text, measurer);
+    }
+
+    var notesRight = math.max(diagramRight, actorsRight);
+    for (final n in diagram.notes) {
+      if (n.position == null || n.attachedTo == null) continue;
+      final targetRect =
+          actorRects[n.attachedTo] ?? useCaseRects[n.attachedTo];
+      if (targetRect == null) continue;
+      final size = noteSizes[n.alias]!;
+      double left;
+      double top;
+      switch (n.position!) {
+        case NotePosition.leftOf:
+          left = targetRect.left - _noteGap - size.width;
+          top = targetRect.top + (targetRect.height - size.height) / 2;
+          break;
+        case NotePosition.rightOf:
+          left = targetRect.right + _noteGap;
+          top = targetRect.top + (targetRect.height - size.height) / 2;
+          break;
+        case NotePosition.over:
+          left = targetRect.center.dx - size.width / 2;
+          top = targetRect.top - _noteGap - size.height;
+          break;
+      }
+      final rect = Rect.fromLTWH(left, top, size.width, size.height);
+      noteRects[n.alias] = rect;
+      if (rect.right > notesRight) notesRight = rect.right;
+    }
+
+    // Free-standing notes: stack them vertically in a column placed to the
+    // right of the diagram. The column anchors at the actor padding so the
+    // notes sit in a predictable spot regardless of the use-case layout.
+    final freeNotesX = notesRight + _noteGap;
+    var freeNotesY = _padding;
+    for (final n in diagram.notes) {
+      if (n.position != null || n.attachedTo != null) continue;
+      final size = noteSizes[n.alias]!;
+      final rect = Rect.fromLTWH(freeNotesX, freeNotesY, size.width, size.height);
+      noteRects[n.alias] = rect;
+      freeNotesY = rect.bottom + _noteGap;
+      if (rect.right > notesRight) notesRight = rect.right;
+    }
+
+    final notesBottom = noteRects.values.fold<double>(
+        0, (acc, r) => math.max(acc, r.bottom));
+
+    final height =
+        math.max(math.max(actorsBottom, blockY), notesBottom) + _padding;
+    final width = math.max(notesRight, math.max(diagramRight, actorsRight)) +
+        _padding;
 
     final shapes = <SceneShape>[];
 
@@ -215,13 +284,18 @@ class UseCaseLayout implements DiagramLayout {
       if (n.kind != UseCaseNodeKind.useCase) continue;
       final rect = useCaseRects[n.alias];
       if (rect == null) continue;
-      shapes.add(SceneEllipse(
-        rect: rect,
-        label: n.label,
-        textStyle: _useCaseStyle,
-        fill: _useCaseFill,
-        stroke: _useCaseStroke,
-      ));
+      final spans = n.labelSpans;
+      if (spans == null || spans.isEmpty) {
+        shapes.add(SceneEllipse(
+          rect: rect,
+          label: n.label,
+          textStyle: _useCaseStyle,
+          fill: _useCaseFill,
+          stroke: _useCaseStroke,
+        ));
+      } else {
+        _emitSectionedUseCase(shapes, rect, spans, measurer);
+      }
     }
 
     for (final r in diagram.relations) {
@@ -240,14 +314,60 @@ class UseCaseLayout implements DiagramLayout {
         useCaseRects,
         fromCenter,
       );
+      // Inline `#color;line.bold|dashed|dotted;text:color` modifiers (parsed
+      // off `--> (target) #...`) override the arrow's default visuals. We
+      // approximate `dotted` with the same dashed stroke as `dashed` because
+      // SceneLine does not yet distinguish dot from dash patterns.
+      final inline = r.inlineLineStyle;
+      final dashed = inline == UseCaseLineStyle.dashed ||
+          inline == UseCaseLineStyle.dotted ||
+          (inline == null && r.lineStyle == LineStyle.dashed);
+      final strokeWidth = inline == UseCaseLineStyle.bold ? 2.0 : 1.0;
+      final stroke = r.lineColor ?? const Color(0xFF000000);
+      final labelStyle = r.label == null
+          ? null
+          : (r.textColor == null
+              ? _relationLabelStyle
+              : _relationLabelStyle.copyWith(color: r.textColor));
       shapes.add(SceneLine(
         from: fromPoint,
         to: toPoint,
-        dashed: r.lineStyle == LineStyle.dashed,
+        dashed: dashed,
         head: r.head,
         headAtFrom: false,
         label: r.label,
-        labelStyle: r.label == null ? null : _relationLabelStyle,
+        labelStyle: labelStyle,
+        stroke: stroke,
+        strokeWidth: strokeWidth,
+      ));
+    }
+
+    // Note boxes (drawn on top of relation lines but under their text).
+    for (final n in diagram.notes) {
+      final rect = noteRects[n.alias];
+      if (rect == null) continue;
+      shapes.add(SceneNote(
+        rect: rect,
+        text: n.text,
+        textStyle: _noteStyle,
+        fill: _noteFill,
+        stroke: _noteStroke,
+      ));
+    }
+
+    // Dotted connector lines between free-standing notes and their
+    // associated nodes / notes. PlantUML draws these without arrowheads.
+    for (final c in diagram.noteConnections) {
+      final from = _edgeOfAny(c.from, actorRects, useCaseRects, noteRects,
+          _centerOfAny(c.to, actorRects, useCaseRects, noteRects));
+      final to = _edgeOfAny(c.to, actorRects, useCaseRects, noteRects,
+          _centerOfAny(c.from, actorRects, useCaseRects, noteRects));
+      if (from == null || to == null) continue;
+      shapes.add(SceneLine(
+        from: from,
+        to: to,
+        dashed: true,
+        head: null,
         stroke: const Color(0xFF000000),
         strokeWidth: 1.0,
       ));
@@ -273,6 +393,47 @@ class UseCaseLayout implements DiagramLayout {
     Map<String, Rect> useCaseRects,
   ) {
     return actorRects[alias]?.center ?? useCaseRects[alias]?.center;
+  }
+
+  /// Centre lookup that also considers note rectangles. Used when routing
+  /// dotted connector lines between use-case nodes and free-standing notes.
+  Offset? _centerOfAny(
+    String alias,
+    Map<String, Rect> actorRects,
+    Map<String, Rect> useCaseRects,
+    Map<String, Rect> noteRects,
+  ) {
+    return actorRects[alias]?.center ??
+        useCaseRects[alias]?.center ??
+        noteRects[alias]?.center;
+  }
+
+  /// Edge-point lookup that resolves a connection endpoint to either an
+  /// actor symbol, a use-case ellipse, or a note rectangle. Falls back to
+  /// the rectangle edge for unknown shapes.
+  Offset? _edgeOfAny(
+    String alias,
+    Map<String, Rect> actorRects,
+    Map<String, Rect> useCaseRects,
+    Map<String, Rect> noteRects,
+    Offset? toward,
+  ) {
+    if (toward == null) return null;
+    final actorRect = actorRects[alias];
+    if (actorRect != null) return _rectEdge(actorRect, toward);
+    final ucRect = useCaseRects[alias];
+    if (ucRect != null) return _ellipseEdge(ucRect, toward);
+    final noteRect = noteRects[alias];
+    if (noteRect != null) return _rectEdge(noteRect, toward);
+    return null;
+  }
+
+  /// Returns the rendered footprint of a note rectangle for the given text.
+  Size _measureNote(String text, TextMeasurer measurer) {
+    final size = measurer.measure(text, _noteStyle);
+    final w = math.max(_noteMinWidth, size.width + _notePaddingX * 2);
+    final h = math.max(_noteMinHeight, size.height + _notePaddingY * 2);
+    return Size(w, h);
   }
 
   Offset _edgeOf(
@@ -374,11 +535,173 @@ class UseCaseLayout implements DiagramLayout {
     return 3;
   }
 
+  /// Paints a use-case ellipse whose label is split by `--`/`==`/`..text..`
+  /// section markers. The ellipse itself is drawn with no embedded label,
+  /// and each text segment + separator is stacked vertically inside the
+  /// inscribed rectangle (≈ 70% of the ellipse's bounding box).
+  void _emitSectionedUseCase(
+    List<SceneShape> shapes,
+    Rect rect,
+    List<UseCaseLabelSpan> spans,
+    TextMeasurer measurer,
+  ) {
+    shapes.add(SceneEllipse(
+      rect: rect,
+      label: '',
+      textStyle: _useCaseStyle,
+      fill: _useCaseFill,
+      stroke: _useCaseStroke,
+    ));
+    // Inscribed rectangle inside the ellipse — text outside this rectangle
+    // would clip against the curved edge.
+    final innerHalfW = (rect.width / 2) * 0.92;
+    final innerHalfH = (rect.height / 2) * 0.92;
+    final innerLeft = rect.center.dx - innerHalfW;
+    final innerRight = rect.center.dx + innerHalfW;
+    final innerTop = rect.center.dy - innerHalfH;
+    final innerBottom = rect.center.dy + innerHalfH;
+    final innerWidth = innerRight - innerLeft;
+
+    // Pre-measure each section so we can center the whole stack vertically.
+    final sectionSizes = <Size>[];
+    var totalH = 0.0;
+    for (final s in spans) {
+      switch (s) {
+        case UseCaseLabelText(:final text):
+          final size = measurer.measure(text, _useCaseStyle);
+          sectionSizes.add(size);
+          totalH += size.height;
+        case UseCaseLabelSeparatorSpan(:final kind, :final text):
+          if (kind == UseCaseLabelSeparator.labeled && text != null) {
+            final size = measurer.measure(text, _useCaseStyle);
+            final h = math.max(_separatorHeight, size.height) +
+                _separatorPaddingV * 2;
+            sectionSizes.add(Size(size.width, h));
+            totalH += h;
+          } else {
+            const h = _separatorHeight + _separatorPaddingV * 2;
+            sectionSizes.add(const Size(0, h));
+            totalH += h;
+          }
+      }
+    }
+
+    final innerHeight = innerBottom - innerTop;
+    var y = innerTop + math.max(0, (innerHeight - totalH) / 2);
+    for (var idx = 0; idx < spans.length; idx++) {
+      final s = spans[idx];
+      final size = sectionSizes[idx];
+      switch (s) {
+        case UseCaseLabelText(:final text):
+          shapes.add(SceneText(
+            offset: Offset(
+              rect.center.dx - size.width / 2,
+              y,
+            ),
+            text: text,
+            textStyle: _useCaseStyle,
+            maxWidth: innerWidth,
+          ));
+          y += size.height;
+        case UseCaseLabelSeparatorSpan(:final kind, :final text):
+          final midY = y + size.height / 2;
+          if (kind == UseCaseLabelSeparator.labeled && text != null) {
+            // `..text..` -> thin line with centered text breaking the line.
+            final labelSize = measurer.measure(text, _useCaseStyle);
+            final labelHalf = labelSize.width / 2 + 4;
+            shapes.add(SceneLine(
+              from: Offset(innerLeft, midY),
+              to: Offset(rect.center.dx - labelHalf, midY),
+              dashed: false,
+              head: null,
+              stroke: _useCaseStroke,
+              strokeWidth: 1.0,
+            ));
+            shapes.add(SceneLine(
+              from: Offset(rect.center.dx + labelHalf, midY),
+              to: Offset(innerRight, midY),
+              dashed: false,
+              head: null,
+              stroke: _useCaseStroke,
+              strokeWidth: 1.0,
+            ));
+            shapes.add(SceneText(
+              offset: Offset(
+                rect.center.dx - labelSize.width / 2,
+                midY - labelSize.height / 2,
+              ),
+              text: text,
+              textStyle: _useCaseStyle,
+            ));
+          } else if (kind == UseCaseLabelSeparator.thick) {
+            shapes.add(SceneLine(
+              from: Offset(innerLeft, midY),
+              to: Offset(innerRight, midY),
+              dashed: false,
+              head: null,
+              stroke: _useCaseStroke,
+              strokeWidth: 2.5,
+            ));
+          } else {
+            shapes.add(SceneLine(
+              from: Offset(innerLeft, midY),
+              to: Offset(innerRight, midY),
+              dashed: false,
+              head: null,
+              stroke: _useCaseStroke,
+              strokeWidth: 1.0,
+            ));
+          }
+          y += size.height;
+      }
+    }
+  }
+
   Size _measureUseCase(UseCaseNode uc, TextMeasurer measurer) {
+    final spans = uc.labelSpans;
+    if (spans != null && spans.isNotEmpty) {
+      return _measureMultiSectionLabel(spans, measurer);
+    }
     final labelSize = measurer.measure(uc.label, _useCaseStyle);
     final w = math.max(_useCaseMinWidth, labelSize.width + _useCasePaddingX * 2);
     final h =
         math.max(_useCaseMinHeight, labelSize.height + _useCasePaddingY * 2);
+    return Size(w, h);
+  }
+
+  static const _separatorHeight = 8.0;
+  static const _separatorPaddingV = 2.0;
+  // Use case ellipses need extra horizontal padding when they hold a
+  // sectioned label, otherwise the elliptical sides clip the section text.
+  // We widen the overall shape so each text block fits inside the ellipse's
+  // inscribed rectangle (≈ 70% of the width / height at the equator).
+  static const _ellipsePaddingFactor = 1.35;
+
+  Size _measureMultiSectionLabel(
+      List<UseCaseLabelSpan> spans, TextMeasurer measurer) {
+    var maxW = 0.0;
+    var totalH = 0.0;
+    for (final s in spans) {
+      switch (s) {
+        case UseCaseLabelText(:final text):
+          final size = measurer.measure(text, _useCaseStyle);
+          if (size.width > maxW) maxW = size.width;
+          totalH += size.height;
+        case UseCaseLabelSeparatorSpan(:final kind, :final text):
+          if (kind == UseCaseLabelSeparator.labeled && text != null) {
+            final size = measurer.measure(text, _useCaseStyle);
+            if (size.width > maxW) maxW = size.width;
+            totalH += math.max(_separatorHeight, size.height) +
+                _separatorPaddingV * 2;
+          } else {
+            totalH += _separatorHeight + _separatorPaddingV * 2;
+          }
+      }
+    }
+    final w = math.max(_useCaseMinWidth,
+        (maxW + _useCasePaddingX * 2) * _ellipsePaddingFactor);
+    final h = math.max(_useCaseMinHeight,
+        (totalH + _useCasePaddingY * 2) * _ellipsePaddingFactor);
     return Size(w, h);
   }
 }

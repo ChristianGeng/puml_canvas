@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.11.0
+
+### Added
+
+- Sequence diagrams now support `hide unlinked`, `mainframe <label>`,
+  nested participant boxes, inline actor declarations, participant
+  stereotypes, `alt` / `else` tab and branch body colors, and
+  PlantUML-style found / lost message endpoints (`?->`, `[->`, `->?`,
+  `->]`).
+- Sequence arrow support was expanded for all PlantUML head / tail
+  decoration combinations, including leading `o` / `x` tail markers,
+  bidirectional decorated arrows, edge-found / edge-lost variants, and
+  transmission duration annotations such as `A ->(10) B` with
+  `&`-synchronized messages.
+- Use case diagrams now support colon-wrapped actors, parenthesized
+  use cases, package / rectangle grouping, direction-hint arrows,
+  generalization arrows, attached and free-standing notes, dotted note
+  connectors, multi-line use-case labels with `--`, `==`, and
+  `..Title..` separators, node stereotypes, and inline relation styling
+  (`#color`, `line.bold`, `line.dashed`, `line.dotted`, `text:color`).
+- JSON diagrams now accept `<style> ... </style>` blocks and
+  `#highlight` directives as no-op styling metadata. Inline
+  `json ... { ... }` blocks inside `@startuml` are recognized as JSON
+  diagrams so mixed sources can parse instead of failing.
+- Network diagrams now accept `nwdiag { ... }` wrappers, nested `group`
+  blocks, semicolon-separated statements, comments, segment properties,
+  anonymous top-level groups, and shared node names across networks.
+- The example app now uses a structured sample catalog with sub-samples
+  for sequence, use case, class, activity, component, state, object,
+  deployment, timing, regex, network, wireframe, Archimate, Gantt,
+  mindmap, WBS, EBNF, JSON, and YAML diagrams.
+- Golden and parser coverage was expanded for the new sequence, use
+  case, JSON, nwdiag, class-regression, and inline-markup cases.
+
+### Changed
+
+- The example app now shows selected diagram families as a scrollable
+  list of editable sub-sample cards, each with its own live preview,
+  instead of loading only one sample source at a time.
+
+### Fixed
+
+- Class diagram parsing now tolerates additional PlantUML forms reported
+  in regression cases: colored / stereotyped package blocks, dotted
+  package names, `scale ... width`, `set separator`, lollipop interface
+  relations, direction-hint arrows, and association-class connectors.
+- Sequence layout now excludes anonymous found / lost endpoints from the
+  participant order, filters emptied boxes when `hide unlinked` is used,
+  and keeps synchronized duration arrows from over-expanding or
+  overlapping later events.
+
 ## 0.10.0
 
 ### Added

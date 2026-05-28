@@ -32,6 +32,20 @@ class SequenceDiagram extends Diagram {
   // message; the alias is auto-discovered by event traversal so it must NOT
   // be added to `participants` (which would override its layout order).
   final Map<String, String> aliasDisplayNames;
+  // Set by the `autoactivate on` directive. Informational only — the parser
+  // already lowers autoactivate semantics into explicit Activate/Deactivate
+  // events plus return messages, so layout does not need to inspect this.
+  final bool autoactivate;
+  // Set by the `hide unlinked` directive. When true, layout removes any
+  // participant that is not referenced as the source or target of a
+  // [Message] (declared boxes/groups and activate/deactivate-only references
+  // do not count as "linked"). Order-independent — applied at render time.
+  final bool hideUnlinked;
+  // Set by the `mainframe <label>` directive. When non-null, layout wraps
+  // the entire diagram in an outer rectangle with a folded-corner label tab
+  // in the top-left containing this label (which honours inline markup like
+  // `**bold**`).
+  final String? mainframeLabel;
   @override
   final DiagramDecorations decorations;
 
@@ -40,8 +54,44 @@ class SequenceDiagram extends Diagram {
     this.events = const [],
     this.boxes = const [],
     this.aliasDisplayNames = const {},
+    this.autoactivate = false,
+    this.hideUnlinked = false,
+    this.mainframeLabel,
     this.decorations = const DiagramDecorations(),
   });
+
+  /// Returns the set of participant aliases that are referenced as the source
+  /// or target of at least one [Message] anywhere in the event tree
+  /// (recursing into [Group] branches). External "found"/"lost" endpoints do
+  /// not count — only declared participant aliases.
+  Set<String> linkedAliases() {
+    final out = <String>{};
+    void visit(List<SequenceEvent> list) {
+      for (final e in list) {
+        switch (e) {
+          case Message():
+            if (e.fromExternal == null) out.add(e.from);
+            if (e.toExternal == null) out.add(e.to);
+          case Group():
+            for (final b in e.branches) {
+              visit(b.events);
+            }
+          case Note():
+          case RefBox():
+          case Activate():
+          case Deactivate():
+          case Create():
+          case Destroy():
+          case Separator():
+          case NewPage():
+            break;
+        }
+      }
+    }
+
+    visit(events);
+    return out;
+  }
 
   /// Returns participants in the order they should appear left-to-right.
   ///
@@ -57,7 +107,7 @@ class SequenceDiagram extends Diagram {
     final seen = <String>{};
 
     for (final box in boxes) {
-      for (final p in box.participants) {
+      for (final p in box.allParticipants()) {
         if (seen.add(p.alias)) {
           order.add(byAlias[p.alias] ?? p);
         }
@@ -83,8 +133,10 @@ class SequenceDiagram extends Diagram {
       for (final e in list) {
         switch (e) {
           case Message():
-            touch(e.from);
-            touch(e.to);
+            // Skip anonymous endpoints — they're not real participants and
+            // must not appear in the lifeline column order.
+            if (e.fromExternal == null) touch(e.from);
+            if (e.toExternal == null) touch(e.to);
           case Note():
             for (final alias in e.participants) {
               touch(alias);
@@ -134,13 +186,23 @@ class SequenceDiagram extends Diagram {
     return order;
   }
 
-  /// Returns the box containing the participant with the given alias, or
-  /// null if the participant is not declared inside any box.
+  /// Returns the innermost box containing the participant with the given
+  /// alias, or null if the participant is not declared inside any box.
   ParticipantBox? boxOf(String alias) {
-    for (final box in boxes) {
+    ParticipantBox? search(ParticipantBox box) {
+      for (final c in box.children) {
+        final found = search(c);
+        if (found != null) return found;
+      }
       for (final p in box.participants) {
         if (p.alias == alias) return box;
       }
+      return null;
+    }
+
+    for (final box in boxes) {
+      final found = search(box);
+      if (found != null) return found;
     }
     return null;
   }
@@ -199,13 +261,31 @@ class Legend {
 class ParticipantBox {
   final String label;
   final Color? color;
+  // Participants declared directly inside this box (not inside a nested box).
   final List<Participant> participants;
+  // Nested boxes declared inside this box.
+  final List<ParticipantBox> children;
 
   const ParticipantBox({
     required this.label,
     this.color,
     this.participants = const [],
+    this.children = const [],
   });
+
+  /// All participants enclosed by this box (recursing into nested boxes).
+  List<Participant> allParticipants() {
+    final out = <Participant>[];
+    void visit(ParticipantBox b) {
+      out.addAll(b.participants);
+      for (final c in b.children) {
+        visit(c);
+      }
+    }
+
+    visit(this);
+    return out;
+  }
 }
 
 enum ParticipantKind {
@@ -239,6 +319,7 @@ class Participant {
   final int? order;
   final List<ParticipantLabelSection>? labelSections;
   final Color? color;
+  final String? stereotype;
 
   const Participant({
     required this.alias,
@@ -247,6 +328,7 @@ class Participant {
     this.order,
     this.labelSections,
     this.color,
+    this.stereotype,
   });
 
   String get label => displayName ?? alias;
@@ -274,12 +356,47 @@ enum ArrowHead {
 
 enum MessageDirection { forward, backward, bidirectional }
 
+/// Optional decoration drawn at the non-triangle endpoint of a [Message].
+///
+/// PlantUML sequence syntax allows decorating the TAIL end of an arrow
+/// independently of the head triangle: a small open circle (`o->`, `o<-`,
+/// `o<->o`) or a cross (`x->`, `x<-`, `x<->x`). The head can ALSO carry such
+/// a decoration when stacked behind the triangle (`->>o`, `-\o`) — when
+/// present, the decoder records the visible shape in [Message.head]
+/// (e.g. [ArrowHead.openCircle]) and the head decoration is implicit in that.
+///
+/// For bidirectional arrows both endpoints carry the SAME decoration, so a
+/// single `tailDecoration` plus [Message.head] suffices to round-trip the
+/// 20 PlantUML head/tail combos.
+enum EndpointDecoration { openCircle, cross }
+
 enum ActivationSuffix {
   activateTarget,
   deactivateSource,
   createTarget,
   destroyTarget,
 }
+
+/// Marks one endpoint of a [Message] as anonymous — the arrow attaches to a
+/// notional "external" location instead of a declared participant lifeline.
+///
+/// Source forms:
+/// - `[-> Alice`  → message starts at the LEFT edge of the diagram
+///   ([fromEdge]).
+/// - `?-> Alice`  → message starts at a SHORT stub to the left of Alice's
+///   lifeline ([fromShort]).
+///
+/// Target forms (mirrored):
+/// - `Alice ->]`  → message ends at the RIGHT edge of the diagram ([toEdge]).
+/// - `Alice ->?`  → message ends at a SHORT stub to the right of Alice's
+///   lifeline ([toShort]).
+///
+/// PlantUML calls these "found" (source is external) and "lost"
+/// (target is external) messages. When [Message.fromExternal] is non-null,
+/// [Message.from] holds the placeholder alias of the external endpoint and
+/// must NOT be auto-declared as a participant — layout substitutes a
+/// computed X coordinate instead. Same for [Message.toExternal] / [Message.to].
+enum MessageExternal { fromEdge, fromShort, toEdge, toShort }
 
 class Message extends SequenceEvent {
   final String from;
@@ -291,6 +408,32 @@ class Message extends SequenceEvent {
   final bool hidden;
   final Color? color;
   final ActivationSuffix? activation;
+  // Non-null when the source endpoint is anonymous (`[->` / `?->`). The
+  // [from] field still carries a synthetic alias so the layout can key into
+  // per-event maps, but no participant should be declared for it.
+  final MessageExternal? fromExternal;
+  // Non-null when the target endpoint is anonymous (`->]` / `->?`). Same
+  // alias caveat as [fromExternal].
+  final MessageExternal? toExternal;
+  /// Optional decoration drawn at the TAIL end of the arrow body (the
+  /// endpoint opposite the head triangle for a forward / backward message,
+  /// or the source endpoint for a forward bidirectional). Encodes the leading
+  /// `o` / `x` of PlantUML forms like `o->`, `x->`, `o<->o`, `x<->x`,
+  /// `x->o`. The head's own decoration (e.g. trailing `o` in `->o`) is
+  /// captured by the visible shape in [head], not here.
+  final EndpointDecoration? tailDecoration;
+  /// Optional PlantUML "transmission duration" annotation embedded in the
+  /// arrow body — `A ->(N) B` or `A (N)<- B`. When non-null, the arrow is
+  /// rendered as a slanted/diagonal line: the head endpoint sits below the
+  /// tail endpoint by an amount proportional to [duration]. Forward arrows
+  /// slant DOWN to the right; backward arrows slant DOWN to the left.
+  /// Visualises "time passes during message transmission".
+  final int? duration;
+  /// When true, this message shares its START Y coordinate with the
+  /// immediately preceding message rather than advancing past it. Set by the
+  /// PlantUML `&` line-prefix marker (used together with `!pragma teoz` to
+  /// group parallel messages that arrive at slightly different times).
+  final bool synchronized;
 
   const Message({
     required this.from,
@@ -302,6 +445,11 @@ class Message extends SequenceEvent {
     this.hidden = false,
     this.color,
     this.activation,
+    this.fromExternal,
+    this.toExternal,
+    this.tailDecoration,
+    this.duration,
+    this.synchronized = false,
   });
 }
 
@@ -328,17 +476,25 @@ class Destroy extends SequenceEvent {
 
 enum NotePosition { leftOf, rightOf, over }
 
+/// Visible outline shape for a [Note]. Defaults to [rectangle]; PlantUML's
+/// `hnote` keyword selects [hexagon] and `rnote` selects [rectangle]
+/// explicitly. Layout currently renders both as rectangles (hexagon
+/// rendering deferred).
+enum NoteShape { rectangle, hexagon }
+
 class Note extends SequenceEvent {
   final NotePosition position;
   final List<String> participants;
   final String text;
   final Color? color;
+  final NoteShape shape;
 
   const Note({
     required this.position,
     required this.participants,
     required this.text,
     this.color,
+    this.shape = NoteShape.rectangle,
   });
 }
 
@@ -376,13 +532,23 @@ enum GroupKind { alt, opt, loop, par, group }
 class GroupBranch {
   final String? label;
   final List<SequenceEvent> events;
-  const GroupBranch({this.label, this.events = const []});
+
+  /// Optional background fill colour for this branch's vertical span.
+  /// PlantUML syntax: `alt #Body label` / `else #Body label`.
+  final Color? bodyColor;
+
+  const GroupBranch({this.label, this.events = const [], this.bodyColor});
 }
 
 class Group extends SequenceEvent {
   final GroupKind kind;
   final List<GroupBranch> branches;
-  const Group({required this.kind, required this.branches});
+
+  /// Optional background fill for the small kind tab (e.g. the "alt" corner).
+  /// PlantUML syntax: `alt#Tab` — colour attached directly to the keyword.
+  final Color? tabColor;
+
+  const Group({required this.kind, required this.branches, this.tabColor});
 }
 
 class ClassDiagram extends Diagram {
@@ -558,17 +724,69 @@ class Relationship {
 
 enum UseCaseNodeKind { actor, useCase }
 
+/// A semantic separator placed inside a use-case ellipse's multi-line label.
+///
+/// PlantUML allows quoted use-case labels to embed horizontal section
+/// dividers that render across the shape:
+///
+/// ```
+/// usecase UC1 as "Top section
+/// --
+/// Middle section
+/// ==
+/// Bottom section
+/// ..Footer.."
+/// ```
+///
+/// - [thin]: a single thin horizontal line (the `--` marker).
+/// - [thick]: a thicker / double horizontal line (the `==` marker).
+/// - [labeled]: a thin horizontal line with centered text (the `..Text..`
+///   marker — [text] holds the centered label).
+enum UseCaseLabelSeparator { thin, thick, labeled }
+
+sealed class UseCaseLabelSpan {
+  const UseCaseLabelSpan();
+}
+
+class UseCaseLabelText extends UseCaseLabelSpan {
+  final String text;
+  const UseCaseLabelText(this.text);
+}
+
+class UseCaseLabelSeparatorSpan extends UseCaseLabelSpan {
+  final UseCaseLabelSeparator kind;
+  final String? text;
+  const UseCaseLabelSeparatorSpan(this.kind, {this.text});
+}
+
 class UseCaseNode {
   final String alias;
   final String label;
   final UseCaseNodeKind kind;
 
+  /// Structured representation of [label] when it contains internal
+  /// separator markers (`--`, `==`, `..Text..`). For simple single-line
+  /// labels this is `null` and the layout renders [label] directly.
+  final List<UseCaseLabelSpan>? labelSpans;
+
+  /// Optional `<< Stereotype >>` annotation declared after the node. Stored
+  /// as the inner text (already trimmed by the lexer, no guillemets). When
+  /// non-null, layouts may render `«stereotype»` near the node label.
+  final String? stereotype;
+
   const UseCaseNode({
     required this.alias,
     required this.label,
     required this.kind,
+    this.labelSpans,
+    this.stereotype,
   });
 }
+
+/// Visual line style used by `UseCaseRelation`. Extends the base `LineStyle`
+/// (solid/dashed) with `bold` and `dotted` variants that PlantUML's inline
+/// `#color;line.bold;line.dotted` modifiers introduce on use case relations.
+enum UseCaseLineStyle { solid, bold, dashed, dotted }
 
 class UseCaseRelation {
   final String from;
@@ -578,6 +796,18 @@ class UseCaseRelation {
   final MessageDirection direction;
   final String? label;
 
+  /// Stroke color from `#<color>` / `line:<color>` inline modifier. Null when
+  /// no inline color is supplied — the renderer falls back to the default
+  /// relation stroke.
+  final Color? lineColor;
+
+  /// Inline `line.bold|dashed|dotted` modifier, or null when the relation
+  /// keeps its arrow-derived `lineStyle`.
+  final UseCaseLineStyle? inlineLineStyle;
+
+  /// Label text color from `text:<color>` inline modifier.
+  final Color? textColor;
+
   const UseCaseRelation({
     required this.from,
     required this.to,
@@ -585,6 +815,9 @@ class UseCaseRelation {
     this.head = ArrowHead.open,
     this.direction = MessageDirection.forward,
     this.label,
+    this.lineColor,
+    this.inlineLineStyle,
+    this.textColor,
   });
 }
 
@@ -598,10 +831,49 @@ class UseCaseBoundary {
   });
 }
 
+/// A note attached to a use case diagram. Three flavours:
+///
+/// - Inline attached: `note right of X : text` — [position] and [attachedTo]
+///   are both set, [alias] is null.
+/// - Multi-line attached: `note right of X` ... `end note` — same as inline
+///   but [text] may contain newlines.
+/// - Free-standing: `note "text" as N2` — [alias] is set, [position] and
+///   [attachedTo] are null. Can be connected to other nodes via
+///   [UseCaseNoteConnection].
+class UseCaseNote {
+  /// Stable identifier for this note. Either the user-supplied alias (for
+  /// free-standing notes) or a synthetic one for attached notes (so the
+  /// layout can address it uniformly).
+  final String alias;
+  final String text;
+  final NotePosition? position;
+  final String? attachedTo;
+
+  const UseCaseNote({
+    required this.alias,
+    required this.text,
+    this.position,
+    this.attachedTo,
+  });
+
+  bool get isFreeStanding => position == null && attachedTo == null;
+}
+
+/// A connector line between two endpoints in a use case diagram where at
+/// least one endpoint is a free-standing note. PlantUML draws these as
+/// thin dotted lines without arrowheads (the `..` syntax).
+class UseCaseNoteConnection {
+  final String from;
+  final String to;
+  const UseCaseNoteConnection({required this.from, required this.to});
+}
+
 class UseCaseDiagram extends Diagram {
   final List<UseCaseNode> nodes;
   final List<UseCaseRelation> relations;
   final List<UseCaseBoundary> boundaries;
+  final List<UseCaseNote> notes;
+  final List<UseCaseNoteConnection> noteConnections;
   final bool leftToRightDirection;
   @override
   final DiagramDecorations decorations;
@@ -610,6 +882,8 @@ class UseCaseDiagram extends Diagram {
     this.nodes = const [],
     this.relations = const [],
     this.boundaries = const [],
+    this.notes = const [],
+    this.noteConnections = const [],
     this.leftToRightDirection = false,
     this.decorations = const DiagramDecorations(),
   });

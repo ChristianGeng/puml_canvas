@@ -88,6 +88,21 @@ void main() {
       expect(inner.style?.fontStyle, FontStyle.italic);
     });
 
+    test('//Long long label// parses as a single italic span (spaces inside)',
+        () {
+      // Mirrors the label on the first arrow of the bug-report source:
+      // `a -> b : //Long long label//`. The italic toggle must accept inner
+      // whitespace and emit one italic child carrying the full label text.
+      final span = parseInlineMarkup('//Long long label//', baseStyle);
+      expect(_flatten(span), 'Long long label');
+      final italics = span.children!
+          .whereType<TextSpan>()
+          .where((s) => s.style?.fontStyle == FontStyle.italic)
+          .toList();
+      expect(italics, hasLength(1));
+      expect(_flatten(italics.single), 'Long long label');
+    });
+
     test('Markdown __underline__ produces underline', () {
       final span = parseInlineMarkup('__x__', baseStyle);
       final inner = _firstChildSpan(span);
@@ -139,6 +154,33 @@ void main() {
       final span =
           parseInlineMarkup('<color:#zzz>x</color>', baseStyle);
       expect(_flatten(span), '<color:#zzz>x</color>');
+    });
+
+    test('""verbatim"" wraps content in a monospace span', () {
+      // PlantUML's `""..."" ` markup renders the enclosed text as monospace
+      // and (critically for our case) keeps the inner characters as literal
+      // glyphs — `?->` must NOT get reinterpreted as an arrow.
+      final span = parseInlineMarkup('""?->""', baseStyle);
+      expect(_flatten(span), '?->');
+      final mono = span.children!
+          .whereType<TextSpan>()
+          .firstWhere((s) => s.style?.fontFamily == 'monospace');
+      expect(_flatten(mono), '?->');
+    });
+
+    test('""verbatim"" alongside **bold** in the same label', () {
+      // Mirrors the labels in the found/lost messages source: the verbatim
+      // span and a separate bold span both survive parsing.
+      final span = parseInlineMarkup('""?->""\\n**short** to actor1', baseStyle);
+      expect(_flatten(span), '?->\nshort to actor1');
+      final mono = span.children!
+          .whereType<TextSpan>()
+          .firstWhere((s) => s.style?.fontFamily == 'monospace');
+      expect(_flatten(mono), '?->');
+      final bold = span.children!
+          .whereType<TextSpan>()
+          .firstWhere((s) => s.style?.fontWeight == FontWeight.bold);
+      expect(_flatten(bold), 'short');
     });
   });
 }

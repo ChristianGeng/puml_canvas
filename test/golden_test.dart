@@ -558,6 +558,165 @@ void main() {
       );
     });
 
+    testWidgets('use case multi-line label with separators', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'usecase UC1 as "You can use\n'
+        'several lines to define your usecase.\n'
+        'You can also use separators.\n'
+        '--\n'
+        'Several separators are possible.\n'
+        '==\n'
+        'And you can add titles:\n'
+        '..Conclusion..\n'
+        'This allows large description."\n'
+        '@enduml\n',
+        'usecase_multiline_label_separators',
+        size: const Size(720, 420),
+      );
+    });
+
+    testWidgets('use case actor connections with arrow lengths',
+        (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'User -> (Start)\n'
+        'User --> (Use the application) : A small label\n'
+        '\n'
+        ':Main Admin: ---> (Use the application) : This is\\nyet another\\nlabel\n'
+        '@enduml\n',
+        'usecase_actor_connections',
+        size: const Size(640, 420),
+      );
+    });
+
+    testWidgets('use case minimal actor + ellipse', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        ':user: --> (Use case 1)\n'
+        ':user: -> (Use case 2)\n'
+        '@enduml\n',
+        'usecase_minimal',
+        size: const Size(420, 320),
+      );
+    });
+
+    testWidgets('use case with attached and floating notes', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        ':Main Admin: as Admin\n'
+        '(Use the application) as (Use)\n'
+        '\n'
+        'User -> (Start)\n'
+        'User --> (Use)\n'
+        '\n'
+        'Admin ---> (Use)\n'
+        '\n'
+        'note right of Admin : This is an example.\n'
+        '\n'
+        'note right of (Use)\n'
+        '  A note can also\n'
+        '  be on several lines\n'
+        'end note\n'
+        '\n'
+        'note "This note is connected\\nto several objects." as N2\n'
+        '(Start) .. N2\n'
+        'N2 .. (Use)\n'
+        '@enduml\n',
+        'usecase_with_notes',
+        size: const Size(1100, 460),
+      );
+    });
+
+    testWidgets('usecase direction hint arrows', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        ':user: -left-> (dummyLeft)\n'
+        ':user: -right-> (dummyRight)\n'
+        ':user: -up-> (dummyUp)\n'
+        ':user: -down-> (dummyDown)\n'
+        '@enduml\n',
+        'usecase_direction_hint_arrows',
+        size: const Size(700, 600),
+      );
+    });
+
+    testWidgets('usecase packages left to right', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'left to right direction\n'
+        'actor Guest as g\n'
+        'package Professional {\n'
+        '  actor Chef as c\n'
+        '  actor "Food Critic" as fc\n'
+        '}\n'
+        'package Restaurant {\n'
+        '  usecase "Eat Food" as UC1\n'
+        '  usecase "Pay for Food" as UC2\n'
+        '  usecase "Drink" as UC3\n'
+        '  usecase "Review" as UC4\n'
+        '}\n'
+        'fc --> UC4\n'
+        'g --> UC1\n'
+        'g --> UC2\n'
+        'g --> UC3\n'
+        '@enduml\n',
+        'usecase_packages_left_to_right',
+        size: const Size(900, 600),
+      );
+    });
+
+    testWidgets('usecase skinparam hollow actor', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'skinparam actorStyle Hollow\n'
+        ':User: --> (Use)\n'
+        '"Main Admin" as Admin\n'
+        '"Use the application" as (Use)\n'
+        'Admin --> (Admin the application)\n'
+        '@enduml\n',
+        'usecase_skinparam_hollow_actor',
+        size: const Size(700, 500),
+      );
+    });
+
+    testWidgets('usecase skinparam awesome actor', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'skinparam actorStyle awesome\n'
+        ':User: --> (Use)\n'
+        '"Main Admin" as Admin\n'
+        '"Use the application" as (Use)\n'
+        'Admin --> (Admin the application)\n'
+        '@enduml\n',
+        'usecase_skinparam_awesome_actor',
+        size: const Size(700, 500),
+      );
+    });
+
+    testWidgets('usecase generalization', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        ':Main Admin: as Admin\n'
+        '(Use the application) as (Use)\n'
+        '\n'
+        'User <|-- Admin\n'
+        '(Start) <|-- (Use)\n'
+        '@enduml\n',
+        'usecase_generalization',
+        size: const Size(700, 500),
+      );
+    });
+
     testWidgets('activity diagram', (tester) async {
       await expectPumlGolden(
         tester,
@@ -907,6 +1066,46 @@ void main() {
       );
     });
 
+    testWidgets('sequence chained deactivate activate', (tester) async {
+      // Verbatim source from the bug report: extra whitespace gaps between
+      // tokens (must be tolerated by the lexer/parser) and a chained `--++`
+      // suffix that simultaneously deactivates the source (bob) and
+      // activates the target (charlie). The trailing `--` on the third line
+      // deactivates charlie.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'alice   ->  bob     ++   : hello1\n'
+        'bob     ->  charlie --++ : hello2\n'
+        'charlie --> alice   --   : ok\n'
+        '@enduml\n',
+        'sequence_chained_deactivate_activate',
+        size: const Size(600, 400),
+      );
+    });
+
+    testWidgets('sequence explicit activation create destroy', (tester) async {
+      // Same shape as the autoactivate golden but every call opts in via an
+      // explicit `++` / `**` / `!!` suffix instead of `autoactivate on`. This
+      // verifies the explicit-suffix push-onto-callstack path, color after
+      // suffix (double space tolerated), and chained `return` unwinding.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'alice -> bob ++ : hello\n'
+        'bob -> bob ++ : self call\n'
+        'bob -> bib ++  #005500 : hello\n'
+        'bob -> george ** : create\n'
+        'return done\n'
+        'return rc\n'
+        'bob -> george !! : delete\n'
+        'return success\n'
+        '@enduml\n',
+        'sequence_explicit_activation_create_destroy',
+        size: const Size(800, 700),
+      );
+    });
+
     testWidgets('sequence activate with color', (tester) async {
       await expectPumlGolden(
         tester,
@@ -1172,6 +1371,22 @@ void main() {
       );
     });
 
+    testWidgets('sequence alt else colors', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Alice -> Bob: Authentication Request\n'
+        'alt#Gold #LightBlue Successful case\n'
+        '    Bob -> Alice: Authentication Accepted\n'
+        'else #Pink Failure\n'
+        '    Bob -> Alice: Authentication Rejected\n'
+        'end\n'
+        '@enduml\n',
+        'sequence_alt_else_colors',
+        size: const Size(700, 400),
+      );
+    });
+
     testWidgets('sequence autonumber format strings', (tester) async {
       await expectPumlGolden(
         tester,
@@ -1237,6 +1452,43 @@ void main() {
       );
     });
 
+    testWidgets('sequence hide unlinked drops Carol', (tester) async {
+      // Carol has no incoming or outgoing messages, so `hide unlinked`
+      // must filter her out — no header box, no lifeline, no footer box.
+      // The golden should look identical to a two-participant Alice/Bob
+      // diagram even though Carol is declared in the source.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '  hide unlinked\n'
+        '  participant Alice\n'
+        '  participant Bob\n'
+        '  participant Carol\n'
+        '\n'
+        '  Alice -> Bob : hello\n'
+        '@enduml\n',
+        'sequence_hide_unlinked',
+        size: const Size(500, 300),
+      );
+    });
+
+    testWidgets('sequence mainframe wraps diagram in a labeled UML frame',
+        (tester) async {
+      // `mainframe <label>` draws an outer rectangle around the whole
+      // diagram with a folded-corner tab in the top-left containing the
+      // label. Inline markup like `**mainframe**` renders bold inside the
+      // tab.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'mainframe This is a **mainframe**\n'
+        'Alice->Bob : Hello\n'
+        '@enduml\n',
+        'sequence_mainframe',
+        size: const Size(500, 300),
+      );
+    });
+
     testWidgets('sequence self message backward direction', (tester) async {
       await expectPumlGolden(
         tester,
@@ -1288,6 +1540,22 @@ void main() {
         '@enduml\n',
         'sequence_rich_label',
         size: const Size(600, 300),
+      );
+    });
+
+    testWidgets('sequence inline actor declarations', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '\n'
+        ':First Actor:\n'
+        ':Another\\nactor: as Man2\n'
+        'actor Woman3\n'
+        'actor :Last actor: as Person1\n'
+        '\n'
+        '@enduml\n',
+        'sequence_inline_actor_declarations',
+        size: const Size(700, 350),
       );
     });
 
@@ -1345,6 +1613,224 @@ void main() {
         '@enduml\n',
         'sequence_arrow_variants',
         size: const Size(600, 700),
+      );
+    });
+
+    testWidgets('sequence arrow head variants — all 20 PlantUML forms',
+        (tester) async {
+      // Exercises every head/tail decoration combination used by PlantUML
+      // sequence syntax: leading `o` / `x` (tail decoration), trailing
+      // `o` / `x` (head decoration), `>` / `>>` head triangles, `\` / `/`
+      // half-arrows, and bidirectional `<->`. Regression coverage for the
+      // four lexer bugs (`o->o`, `o<->o`, `x<->x`, `x->o`) and the asymmetric
+      // tail/head decoded by the parser.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice as a\n'
+        'participant Bob   as b\n'
+        'a ->     b : ""->   ""\n'
+        'a ->>    b : ""->>  ""\n'
+        'a -\\     b : ""-\\   ""\n'
+        'a -\\\\    b : ""-\\\\\\\\""\n'
+        'a -/     b : ""-/   ""\n'
+        'a -//    b : ""-//  ""\n'
+        'a ->x    b : ""->x  ""\n'
+        'a x->    b : ""x->  ""\n'
+        'a o->    b : ""o->  ""\n'
+        'a ->o    b : ""->o  ""\n'
+        'a o->o   b : ""o->o ""\n'
+        'a <->    b : ""<->  ""\n'
+        'a o<->o  b : ""o<->o""\n'
+        'a x<->x  b : ""x<->x""\n'
+        'a ->>o   b : ""->>o ""\n'
+        'a -\\o    b : ""-\\o  ""\n'
+        'a -\\\\o   b : ""-\\\\\\\\o""\n'
+        'a -/o    b : ""-/o  ""\n'
+        'a -//o   b : ""-//o ""\n'
+        'a x->o   b : ""x->o ""\n'
+        '@enduml\n',
+        'sequence_arrow_head_variants',
+        size: const Size(560, 880),
+      );
+    });
+
+    testWidgets('sequence found / lost messages', (tester) async {
+      // Exercises all four anonymous-endpoint forms (`?->`, `[->`, `->]`,
+      // `->?`) plus the `""verbatim""` + `**bold**` + `\n` label markup that
+      // is rendered alongside them.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '?-> Alice    : ""?->""\\n**short** to actor1\n'
+        '[-> Alice    : ""[->""\\n**from start** to actor1\n'
+        '[-> Bob      : ""[->""\\n**from start** to actor2\n'
+        '?-> Bob      : ""?->""\\n**short** to actor2\n'
+        'Alice ->]    : ""->]""\\nfrom actor1 **to end**\n'
+        'Alice ->?    : ""->?""\\n**short** from actor1\n'
+        'Alice -> Bob : ""->"" \\nfrom actor1 to actor2\n'
+        '@enduml\n',
+        'sequence_found_lost_messages',
+        size: const Size(640, 520),
+      );
+    });
+
+    testWidgets('sequence arrow variants with lost endpoint',
+        (tester) async {
+      // Verbatim source from the bug report: 20 arrow-head/tail variants
+      // each terminated by a short-lost `?` stub, plus one full arrow with
+      // an italic label. Before the fix the lexer rejected `-\?`, `o->o?`,
+      // `<->?`, etc. — the lost-endpoint scan composed badly with the
+      // `o`/`x` head-cap and half-arrow body scans. This golden locks in
+      // the rendered output for the verbatim user-supplied source.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice as a\n'
+        'participant Bob   as b\n'
+        'a ->     b : //Long long label//\n'
+        'a ->?      : ""->?   ""\n'
+        'a ->>?     : ""->>?  ""\n'
+        'a -\\?      : ""-\\?   ""\n'
+        'a -\\\\?     : ""-\\\\\\\\?""\n'
+        'a -/?      : ""-/?   ""\n'
+        'a -//?     : ""-//?  ""\n'
+        'a ->x?     : ""->x?  ""\n'
+        'a x->?     : ""x->?  ""\n'
+        'a o->?     : ""o->?  ""\n'
+        'a ->o?     : ""->o?  ""\n'
+        'a o->o?    : ""o->o? ""\n'
+        'a <->?     : ""<->?  ""\n'
+        'a o<->o?   : ""o<->o?""\n'
+        'a x<->x?   : ""x<->x?""\n'
+        'a ->>o?    : ""->>o? ""\n'
+        'a -\\o?     : ""-\\o?  ""\n'
+        'a -\\\\o?    : ""-\\\\\\\\o?""\n'
+        'a -/o?     : ""-/o?  ""\n'
+        'a -//o?    : ""-//o? ""\n'
+        'a x->o?    : ""x->o? ""\n'
+        '@enduml\n',
+        'sequence_arrow_variants_with_lost_endpoint',
+        size: const Size(560, 920),
+      );
+    });
+
+    testWidgets('sequence arrow variants with found endpoint',
+        (tester) async {
+      // Verbatim source from the user bug report (Case B): 20 arrow-head/tail
+      // variants each preceded by a short-found `?` stub on the LEFT, plus
+      // one full arrow with an italic label. Before the fix the lexer
+      // rejected `?-\`, `?o->o`, `?x<->x`, etc. — the found-endpoint scan
+      // didn't accept leading `o`/`x` tail decorations or half-arrow body
+      // endings without a `>` head. This golden locks in the rendered output
+      // for the verbatim user-supplied source.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice as a\n'
+        'participant Bob   as b\n'
+        'a ->     b : //Long long label//\n'
+        '?->      b : ""?->   ""\n'
+        '?->>     b : ""?->>  ""\n'
+        '?-\\      b : ""?-\\   ""\n'
+        '?-\\\\     b : ""?-\\\\\\\\""\n'
+        '?-/      b : ""?-/   ""\n'
+        '?-//     b : ""?-//  ""\n'
+        '?->x     b : ""?->x  ""\n'
+        '?x->     b : ""?x->  ""\n'
+        '?o->     b : ""?o->  ""\n'
+        '?->o     b : ""?->o  ""\n'
+        '?o->o    b : ""?o->o ""\n'
+        '?<->     b : ""?<->  ""\n'
+        '?o<->o   b : ""?o<->o""\n'
+        '?x<->x   b : ""?x<->x""\n'
+        '?->>o    b : ""?->>o ""\n'
+        '?-\\o     b : ""?-\\o  ""\n'
+        '?-\\\\o    b : ""?-\\\\\\\\o ""\n'
+        '?-/o     b : ""?-/o  ""\n'
+        '?-//o    b : ""?-//o ""\n'
+        '?x->o    b : ""?x->o ""\n'
+        '@enduml\n',
+        'sequence_arrow_variants_with_found_endpoint',
+        size: const Size(560, 920),
+      );
+    });
+
+    testWidgets('sequence arrow variants with edge-lost endpoint',
+        (tester) async {
+      // Verbatim source from the user bug report (Case C): 20 arrow-head/tail
+      // variants each terminated by an edge-lost `]` marker on the RIGHT. The
+      // right-side `]` lost-endpoint already lexed and parsed correctly
+      // before this task (the prior `consumeLostEnd` helper accepted both
+      // `?` and `]`); this golden ensures it stays that way.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice as a\n'
+        'participant Bob   as b\n'
+        'a ->]      : ""->]   ""\n'
+        'a ->>]     : ""->>]  ""\n'
+        'a -\\]      : ""-\\]   ""\n'
+        'a -\\\\]     : ""-\\\\\\\\]""\n'
+        'a -/]      : ""-/]   ""\n'
+        'a -//]     : ""-//]  ""\n'
+        'a ->x]     : ""->x]  ""\n'
+        'a x->]     : ""x->]  ""\n'
+        'a o->]     : ""o->]  ""\n'
+        'a ->o]     : ""->o]  ""\n'
+        'a o->o]    : ""o->o] ""\n'
+        'a <->]     : ""<->]  ""\n'
+        'a o<->o]   : ""o<->o]""\n'
+        'a x<->x]   : ""x<->x]""\n'
+        'a ->>o]    : ""->>o] ""\n'
+        'a -\\o]     : ""-\\o]  ""\n'
+        'a -\\\\o]    : ""-\\\\\\\\o]""\n'
+        'a -/o]     : ""-/o]  ""\n'
+        'a -//o]    : ""-//o] ""\n'
+        'a x->o]    : ""x->o] ""\n'
+        '@enduml\n',
+        'sequence_arrow_variants_with_edge_lost_endpoint',
+        size: const Size(560, 920),
+      );
+    });
+
+    testWidgets('sequence arrow variants with edge-found endpoint',
+        (tester) async {
+      // Verbatim source from the user bug report (Case D): 20 arrow-head/tail
+      // variants each preceded by an edge-found `[` marker on the LEFT.
+      // Before the fix the parser rejected `[x->`, `[o->`, `[<->`, `[-\`,
+      // etc. — the lexer didn't absorb the leading `[` for head-variant
+      // forms, and the parser's `_isArrowHeadOrBodyChar` didn't include
+      // `o`/`x` as valid first chars after `[`. This golden locks in the
+      // rendered output for the verbatim user-supplied source.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice as a\n'
+        'participant Bob   as b\n'
+        '[->      b : ""[->   ""\n'
+        '[->>     b : ""[->>  ""\n'
+        '[-\\      b : ""[-\\   ""\n'
+        '[-\\\\     b : ""[-\\\\\\\\""\n'
+        '[-/      b : ""[-/   ""\n'
+        '[-//     b : ""[-//  ""\n'
+        '[->x     b : ""[->x  ""\n'
+        '[x->     b : ""[x->  ""\n'
+        '[o->     b : ""[o->  ""\n'
+        '[->o     b : ""[->o  ""\n'
+        '[o->o    b : ""[o->o ""\n'
+        '[<->     b : ""[<->  ""\n'
+        '[o<->o   b : ""[o<->o""\n'
+        '[x<->x   b : ""[x<->x""\n'
+        '[->>o    b : ""[->>o ""\n'
+        '[-\\o     b : ""[-\\o  ""\n'
+        '[-\\\\o    b : ""[-\\\\\\\\o""\n'
+        '[-/o     b : ""[-/o  ""\n'
+        '[-//o    b : ""[-//o ""\n'
+        '[x->o    b : ""[x->o ""\n'
+        '@enduml\n',
+        'sequence_arrow_variants_with_edge_found_endpoint',
+        size: const Size(560, 920),
       );
     });
 
@@ -1421,6 +1907,94 @@ void main() {
         'S --> W : 200 OK\n'
         '@enduml\n',
         'participant_declarations',
+      );
+    });
+
+    testWidgets('sequence nested box with pragma', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '\n'
+        '!pragma teoz true\n'
+        'box "Internal Service" #LightBlue\n'
+        'participant Bob\n'
+        'box "Subteam"\n'
+        'participant Alice\n'
+        'participant John\n'
+        'end box\n'
+        '\n'
+        'end box\n'
+        'participant Other\n'
+        '\n'
+        'Bob -> Alice : hello\n'
+        'Alice -> John : hello\n'
+        'John -> Other: Hello\n'
+        '\n'
+        '@enduml\n',
+        'sequence_nested_box_pragma',
+        size: const Size(720, 360),
+      );
+    });
+
+    testWidgets('sequence arrow duration basic', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'A ->(10) B: text 10\n'
+        'B ->(10) A: text 10\n'
+        '\n'
+        'A ->(10) B: text 10\n'
+        'A (10)<- B: text 10\n'
+        '@enduml\n',
+        'sequence_arrow_duration_basic',
+      );
+    });
+
+    testWidgets('sequence arrow duration with activation', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'A ->(40) B++: Rq\n'
+        'B -->(20) A--: Rs\n'
+        '@enduml\n',
+        'sequence_arrow_duration_with_activation',
+      );
+    });
+
+    testWidgets('sequence arrow duration with sync', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        "!pragma teoz true\n"
+        "A ->(50) C: Starts\\nwhen 'B' sends\n"
+        "& B ->(25) C: \\nBut B's message\\n arrives before A's\n"
+        '@enduml\n',
+        'sequence_arrow_duration_with_sync',
+      );
+    });
+
+    testWidgets('sequence with <style> block and ... delay marker',
+        (tester) async {
+      // Verbatim user repro: a `<style>...</style>` block (consumed and
+      // ignored — style application is deferred) followed by a forward
+      // message, a `...` delay break, and a reverse message.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '<style>\n'
+        'lifeLine {\n'
+        '  LineStyle 0\n'
+        '}\n'
+        'delay {\n'
+        '  LineStyle 1-4\n'
+        '}\n'
+        '</style>\n'
+        'Alice -> Bob : hello\n'
+        '...\n'
+        'Alice <- Bob : hello\n'
+        '@enduml\n',
+        'sequence_style_block_and_delay',
+        size: const Size(400, 320),
       );
     });
   });

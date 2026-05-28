@@ -42,6 +42,8 @@ enum TokenType {
   rightParen,
   leftBracket,
   rightBracket,
+  amp,
+  slash,
   newline,
   eof,
 }
