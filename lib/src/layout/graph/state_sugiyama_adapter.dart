@@ -99,9 +99,22 @@ Scene layoutStateDiagramWithSugiyama(
     );
   }
 
+  const pad = Offset(_padding, _padding);
   final shapes = <SceneShape>[
-    for (final s in root.shapes) _shiftShape(s, const Offset(_padding, _padding)),
+    for (final s in root.shapes) _shiftShape(s, pad),
   ];
+  // Global label de-overlap: per-scope placement already cleared LOCAL
+  // collisions, but labels emitted in DIFFERENT scopes can collide after
+  // composition (e.g. a composite's self-loop label and an inner leaf's
+  // self-loop label landing at the same spot). Now that every label, obstacle,
+  // and self-loop rect lives in one absolute coordinate space, resolve any
+  // remaining overlaps and rewrite only the labels that actually move.
+  _globalLabelDeoverlap(
+    shapes,
+    labels: <_LabelSpec>[for (final l in root.labels) l.shift(pad)],
+    obstacles: <Rect>[for (final r in root.obstacleRects) r.shift(pad)],
+    measurer,
+  );
   final width = root.size.width + _padding * 2;
   final height = root.size.height + _padding * 2;
   return wrapWithDecorations(
@@ -355,6 +368,31 @@ class _HistoryResolution {
   });
 }
 
+/// An edge/transition label emitted in some scope, recorded so a global pass
+/// (run once after the whole scene is composed in absolute coords) can detect
+/// and resolve cross-scope overlaps. [rect] is the label's CURRENT bounding box
+/// in this scope's local coords; [segStart]/[segEnd] are the route mid-segment
+/// (also local) used to choose perpendicular/along-edge nudge directions.
+class _LabelSpec {
+  final String text;
+  final Rect rect;
+  final Offset segStart;
+  final Offset segEnd;
+  const _LabelSpec({
+    required this.text,
+    required this.rect,
+    required this.segStart,
+    required this.segEnd,
+  });
+
+  _LabelSpec shift(Offset by) => _LabelSpec(
+        text: text,
+        rect: rect.shift(by),
+        segStart: segStart + by,
+        segEnd: segEnd + by,
+      );
+}
+
 /// Result of laying out one scope (the root, or one composite's interior) in
 /// LOCAL coordinates with origin (0,0).
 class _ScopeResult {
@@ -369,10 +407,26 @@ class _ScopeResult {
   /// cross-container edge through to a nested leaf.
   final Map<String, Rect> descendantRects;
 
+  /// Every edge label emitted in this scope (or lifted from a child), in local
+  /// coords. Threaded up for the top-level global de-overlap pass.
+  final List<_LabelSpec> labels;
+
+  /// Every obstacle rect (node/leaf/pseudo boxes, composite shells) in this
+  /// scope, in local coords. Threaded up so the global pass knows the full
+  /// obstacle field across all scopes.
+  final List<Rect> obstacleRects;
+
+  /// Self-loop loopback bounding rects emitted in this scope (or lifted from a
+  /// child), in local coords. Used to offset colliding self-loop arcs.
+  final List<Rect> selfLoopRects;
+
   const _ScopeResult({
     required this.shapes,
     required this.size,
     required this.descendantRects,
+    this.labels = const [],
+    this.obstacleRects = const [],
+    this.selfLoopRects = const [],
   });
 }
 
@@ -425,6 +479,10 @@ _ScopeResult _layoutScope(
 
   final shapes = <SceneShape>[];
   final descendantRects = <String, Rect>{};
+  // Edge-label specs and self-loop loopback rects, accumulated from this scope
+  // and lifted from child composites, all projected into this scope's coords.
+  final labelSpecs = <_LabelSpec>[];
+  final selfLoopRects = <Rect>[];
 
   // --- Nodes (and composite interiors) -------------------------------------
   // Composite shells/headers and their translated interiors are emitted as
@@ -460,6 +518,14 @@ _ScopeResult _layoutScope(
       composite.interior.descendantRects.forEach((name, r) {
         descendantRects[name] = r.shift(innerBy);
       });
+      // Lift the child's edge labels and self-loop rects into this scope so the
+      // top-level global pass sees every label/loop in one coordinate space.
+      for (final l in composite.interior.labels) {
+        labelSpecs.add(l.shift(innerBy));
+      }
+      for (final r in composite.interior.selfLoopRects) {
+        selfLoopRects.add(r.shift(innerBy));
+      }
       continue;
     }
     _emitNode(shapes, info, center, measurer);
@@ -488,6 +554,12 @@ _ScopeResult _layoutScope(
     // distinct endpoints and would collapse the loop, so pass it through
     // unchanged (its label sits at the loop's outer segment).
     if (edgeInfo.src == edgeInfo.dst) {
+      // Offset this loopback rightward if its arc rect would collide with a
+      // self-loop already placed in the composed scene (e.g. a composite's own
+      // loop sitting next to one of its children's loops, or a second loop on
+      // the same node), so the arcs stay visually distinct.
+      pts = _offsetSelfLoopIfColliding(pts, selfLoopRects);
+      selfLoopRects.add(_selfLoopBounds(pts));
       draws.add(_DrawRoute(
         points: pts,
         edgeInfo: edgeInfo,
@@ -570,7 +642,9 @@ _ScopeResult _layoutScope(
   final placedLabels = <Rect>[];
   for (final d in draws) {
     if (d.points.length < 2) continue;
-    _emitRoute(shapes, d.points, d.edgeInfo, measurer, obstacles, placedLabels);
+    final spec = _emitRoute(
+        shapes, d.points, d.edgeInfo, measurer, obstacles, placedLabels);
+    if (spec != null) labelSpecs.add(spec);
   }
 
   // Horizontal placement or parallel-edge fan-out may have pushed content past
@@ -581,6 +655,9 @@ _ScopeResult _layoutScope(
       shapes: shapes,
       size: Size(coords.totalWidth, coords.totalHeight),
       descendantRects: descendantRects,
+      labels: labelSpecs,
+      obstacleRects: descendantRects.values.toList(),
+      selfLoopRects: selfLoopRects,
     );
   }
   final bounds = _shapesBounds(shapes);
@@ -589,6 +666,9 @@ _ScopeResult _layoutScope(
       shapes: shapes,
       size: Size(coords.totalWidth, coords.totalHeight),
       descendantRects: descendantRects,
+      labels: labelSpecs,
+      obstacleRects: descendantRects.values.toList(),
+      selfLoopRects: selfLoopRects,
     );
   }
   final shift = Offset(-bounds.left, -bounds.top);
@@ -602,6 +682,9 @@ _ScopeResult _layoutScope(
     shapes: normShapes,
     size: bounds.size,
     descendantRects: normRects,
+    labels: <_LabelSpec>[for (final l in labelSpecs) l.shift(shift)],
+    obstacleRects: <Rect>[for (final r in normRects.values) r],
+    selfLoopRects: <Rect>[for (final r in selfLoopRects) r.shift(shift)],
   );
 }
 
@@ -1709,7 +1792,134 @@ List<Offset> _bowPolyline(List<Offset> pts, double offset) {
   return out;
 }
 
-void _emitRoute(
+/// Resolves cross-scope edge-label overlaps in one global pass over the
+/// composed scene. Each [labels] spec is in absolute coords (matching the
+/// `SceneText` already in [shapes]). Labels are processed in deterministic
+/// emission order: a label that already clears every [obstacle] and every
+/// previously-finalized label keeps its position (so locally-clean cases are
+/// never perturbed); an overlapping one searches the same candidate set as
+/// `_placeLabel` for a clear spot (or min-overlap fallback) and, when it moves,
+/// the matching `SceneText` in [shapes] is rewritten in place. Only edge labels
+/// recorded from `_emitRoute` are considered — node titles and state
+/// descriptions are never touched.
+void _globalLabelDeoverlap(
+  List<SceneShape> shapes,
+  TextMeasurer measurer, {
+  required List<_LabelSpec> labels,
+  required List<Rect> obstacles,
+}) {
+  final placed = <Rect>[];
+  for (final spec in labels) {
+    final size = spec.rect.size;
+    if (_labelClears(spec.rect, obstacles, placed)) {
+      placed.add(spec.rect);
+      continue;
+    }
+    // Reuse the per-scope strategy, but anchor candidates at the label's CURRENT
+    // top-left (not the `+4`/centered base) so a clean label that stays put maps
+    // to a zero shift and a moved one is nudged from where it already sits.
+    final newOffset = _placeLabelFrom(
+      anchor: spec.rect.topLeft,
+      size: size,
+      segStart: spec.segStart,
+      segEnd: spec.segEnd,
+      obstacles: obstacles,
+      placedLabels: placed,
+    );
+    final newRect = newOffset & size;
+    placed.add(newRect);
+    if ((newOffset - spec.rect.topLeft).distance > 1e-6) {
+      _rewriteLabelText(shapes, spec.text, spec.rect.topLeft, newOffset);
+    }
+  }
+}
+
+/// Candidate search identical to `_placeLabel` but with the base rect anchored
+/// at an explicit [anchor] top-left (used by the global pass, where labels are
+/// already positioned and we nudge from their current spot). Returns the chosen
+/// top-left offset.
+Offset _placeLabelFrom({
+  required Offset anchor,
+  required Size size,
+  required Offset segStart,
+  required Offset segEnd,
+  required List<Rect> obstacles,
+  required List<Rect> placedLabels,
+}) {
+  Offset offsetFor(Offset shift) => anchor + shift;
+  Rect rectFor(Offset shift) => offsetFor(shift) & size;
+
+  final base = rectFor(Offset.zero);
+  if (_labelClears(base, obstacles, placedLabels)) return anchor;
+
+  var dx = segEnd.dx - segStart.dx;
+  var dy = segEnd.dy - segStart.dy;
+  final len = math.sqrt(dx * dx + dy * dy);
+  if (len < 1e-6) {
+    dx = 0;
+    dy = 1;
+  } else {
+    dx /= len;
+    dy /= len;
+  }
+  final perp = Offset(-dy, dx);
+  final along = Offset(dx, dy);
+
+  final candidates = <Offset>[];
+  for (var d = _labelStep; d <= _labelMaxOffset; d += _labelStep) {
+    candidates.add(perp * d);
+    candidates.add(perp * -d);
+  }
+  for (var d = _labelStep; d <= _labelMaxOffset; d += _labelStep) {
+    candidates.add(along * d);
+    candidates.add(along * -d);
+  }
+
+  var best = Offset.zero;
+  var bestOverlap = _totalOverlap(base, obstacles, placedLabels);
+  for (final shift in candidates) {
+    final rect = rectFor(shift);
+    if (_labelClears(rect, obstacles, placedLabels)) return offsetFor(shift);
+    final overlap = _totalOverlap(rect, obstacles, placedLabels);
+    if (overlap < bestOverlap) {
+      bestOverlap = overlap;
+      best = shift;
+    }
+  }
+  return offsetFor(best);
+}
+
+/// Rewrites the single `SceneText` whose text equals [text] and whose offset is
+/// (within epsilon) [from], moving it to [to]. Offsets disambiguate duplicate
+/// label texts. No-op if no match is found.
+void _rewriteLabelText(
+  List<SceneShape> shapes,
+  String text,
+  Offset from,
+  Offset to,
+) {
+  for (var i = 0; i < shapes.length; i++) {
+    final s = shapes[i];
+    if (s is SceneText &&
+        s.text == text &&
+        (s.offset - from).distance < 1e-6) {
+      shapes[i] = SceneText(
+        offset: to,
+        text: s.text,
+        textStyle: s.textStyle,
+        maxWidth: s.maxWidth,
+      );
+      return;
+    }
+  }
+}
+
+/// Emits the route's line segments and, when present, its label as a
+/// `SceneText` (placed via the per-scope `_placeLabel` so locally-clean labels
+/// keep their historical position). Returns a `_LabelSpec` describing the
+/// emitted label (its local rect + mid-segment) so a later global pass can
+/// de-overlap it across scope boundaries; returns null for label-less routes.
+_LabelSpec? _emitRoute(
   List<SceneShape> shapes,
   List<Offset> points,
   _EdgeInfo? edgeInfo,
@@ -1741,13 +1951,61 @@ void _emitRoute(
       obstacles: obstacles,
       placedLabels: placedLabels,
     );
-    placedLabels.add(offset & size);
+    final rect = offset & size;
+    placedLabels.add(rect);
     shapes.add(SceneText(
       offset: offset,
       text: label,
       textStyle: _transitionLabelStyle,
     ));
+    return _LabelSpec(text: label, rect: rect, segStart: a, segEnd: b);
   }
+  return null;
+}
+
+/// Axis-aligned bounding rect of a self-loop's 5-point loopback polyline.
+Rect _selfLoopBounds(List<Offset> pts) {
+  var minX = double.infinity, minY = double.infinity;
+  var maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+  for (final p in pts) {
+    if (p.dx < minX) minX = p.dx;
+    if (p.dy < minY) minY = p.dy;
+    if (p.dx > maxX) maxX = p.dx;
+    if (p.dy > maxY) maxY = p.dy;
+  }
+  return Rect.fromLTRB(minX, minY, maxX, maxY);
+}
+
+/// Upward step used when stacking colliding self-loop arcs into a clear band.
+const _selfLoopStep = 16.0;
+
+/// Largest upward shift applied to separate colliding self-loop arcs.
+const _selfLoopMaxShift = 160.0;
+
+/// If [pts] (a 5-point right-side loopback) would overlap any [placed]
+/// self-loop arc, raise the WHOLE loopback upward in fixed steps until its
+/// bounding rect clears them (capped). Shifting the entire loop (anchor points
+/// included) up its node's right edge moves it into a clear vertical band
+/// rather than just widening it, which keeps the near edge from coinciding with
+/// the obstacle loop. Returns the (possibly shifted) polyline.
+List<Offset> _offsetSelfLoopIfColliding(List<Offset> pts, List<Rect> placed) {
+  if (pts.length != 5 || placed.isEmpty) return pts;
+  bool clears(List<Offset> p) {
+    final r = _selfLoopBounds(p);
+    for (final o in placed) {
+      if (r.overlaps(o)) return false;
+    }
+    return true;
+  }
+
+  if (clears(pts)) return pts;
+  for (var dy = _selfLoopStep; dy <= _selfLoopMaxShift; dy += _selfLoopStep) {
+    final shifted = <Offset>[for (final p in pts) p.translate(0, -dy)];
+    if (clears(shifted)) return shifted;
+  }
+  // No clear stack within the cap: use the max shift so the arcs are at least
+  // maximally separated.
+  return <Offset>[for (final p in pts) p.translate(0, -_selfLoopMaxShift)];
 }
 
 /// Largest perpendicular step tried before falling back to along-edge shifts.

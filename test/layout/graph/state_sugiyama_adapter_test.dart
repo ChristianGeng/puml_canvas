@@ -1728,4 +1728,160 @@ void main() {
       expect((label.offset.dy - expected.dy).abs(), lessThan(0.01));
     });
   });
+
+  group('cross-scope label de-overlap', () {
+    Rect rectOf(Scene scene, SceneText t) {
+      final size = measurer.measure(t.text, t.textStyle);
+      return Rect.fromLTWH(t.offset.dx, t.offset.dy, size.width, size.height);
+    }
+
+    SceneText labelText(Scene scene, String text) => scene.shapes
+        .whereType<SceneText>()
+        .firstWhere((t) => t.text == text);
+
+    test('inner self-loop label and composite self-loop label do not overlap',
+        () {
+      // The State 'Long name' sample: `New Data` is a self-loop inside State3's
+      // interior scope; `Failed` is State3's own self-loop at the root scope.
+      // Per-scope placement leaves them coincident after composition; the
+      // global pass must separate them and keep both clear of the shell/leaf.
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        'scale 600 width\n'
+        '[*] -> State1\n'
+        'State2 --> State3 : Succeeded\n'
+        'state State3 {\n'
+        '  state "Accumulate Enough Data" as long1\n'
+        '  [*] --> long1\n'
+        '  long1 --> long1 : New Data\n'
+        '  long1 --> ProcessData : Enough Data\n'
+        '}\n'
+        'State3 --> State3 : Failed\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final newData = rectOf(scene, labelText(scene, 'New Data'));
+      final failed = rectOf(scene, labelText(scene, 'Failed'));
+      expect(newData.overlaps(failed), isFalse,
+          reason: 'cross-scope self-loop labels must not overlap');
+
+      final boxes =
+          scene.shapes.whereType<SceneRoundedBox>().toList(growable: false);
+      final long1 = boxes.firstWhere((b) => b.label == 'Accumulate Enough Data');
+      // State3's shell is the null-label rounded box containing long1.
+      final shell = boxes.firstWhere(
+          (b) => b.label == null && b.rect.contains(long1.rect.center));
+      // The State3 header title sits at the shell top.
+      final shellTitle = labelText(scene, 'State3');
+
+      expect(newData.overlaps(long1.rect), isFalse,
+          reason: 'New Data must not sit on long1');
+      expect(failed.overlaps(long1.rect), isFalse,
+          reason: 'Failed must not sit on long1');
+      expect(newData.overlaps(rectOf(scene, shellTitle)), isFalse,
+          reason: 'New Data must clear the State3 title');
+      expect(failed.overlaps(rectOf(scene, shellTitle)), isFalse,
+          reason: 'Failed must clear the State3 title');
+      // Sanity: the shell really does enclose the inner leaf.
+      expect(shell.rect.contains(long1.rect.center), isTrue);
+    });
+
+    test('colliding composite/inner self-loop arcs are offset apart', () {
+      // long1 nearly fills State3, so the inner leaf's right-side self-loop and
+      // the composite's own right-side self-loop land in the SAME vertical band
+      // and would otherwise coincide. The adapter must push one loop's arc
+      // farther out so the two loopback rectangles no longer overlap.
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        'scale 600 width\n'
+        '[*] -> State1\n'
+        'State2 --> State3 : Succeeded\n'
+        'state State3 {\n'
+        '  state "Accumulate Enough Data" as long1\n'
+        '  [*] --> long1\n'
+        '  long1 --> long1 : New Data\n'
+        '  long1 --> ProcessData : Enough Data\n'
+        '}\n'
+        'State3 --> State3 : Failed\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      // Each self-loop is a 5-point loopback: a pair of horizontal segments
+      // (top and bottom of the loopback) at the same x-range, plus a vertical
+      // outer segment. Find the right-side horizontal segments and reconstruct
+      // each loop's bounding rect, then assert the two arcs do not overlap.
+      final lines = scene.shapes.whereType<SceneLine>().toList();
+      final hsegs = lines
+          .where((l) =>
+              (l.from.dy - l.to.dy).abs() < 0.5 && l.from.dx != l.to.dx)
+          .map((l) => (
+                y: l.from.dy,
+                lo: l.from.dx < l.to.dx ? l.from.dx : l.to.dx,
+                hi: l.from.dx > l.to.dx ? l.from.dx : l.to.dx,
+              ))
+          .toList();
+      // A self-loop contributes two horizontal segments sharing an x-range.
+      // Pair them up into loop rects by matching lo/hi.
+      final loopRects = <Rect>[];
+      final used = <int>{};
+      for (var i = 0; i < hsegs.length; i++) {
+        if (used.contains(i)) continue;
+        for (var j = i + 1; j < hsegs.length; j++) {
+          if (used.contains(j)) continue;
+          final a = hsegs[i];
+          final b = hsegs[j];
+          if ((a.lo - b.lo).abs() < 1.0 && (a.hi - b.hi).abs() < 1.0) {
+            used.add(i);
+            used.add(j);
+            final top = a.y < b.y ? a.y : b.y;
+            final bot = a.y > b.y ? a.y : b.y;
+            loopRects.add(Rect.fromLTRB(a.lo, top, a.hi, bot));
+            break;
+          }
+        }
+      }
+
+      // There are at least the two self-loops (New Data, Failed); no two loop
+      // arcs may overlap.
+      expect(loopRects.length, greaterThanOrEqualTo(2));
+      for (var i = 0; i < loopRects.length; i++) {
+        for (var j = i + 1; j < loopRects.length; j++) {
+          expect(loopRects[i].overlaps(loopRects[j]), isFalse,
+              reason: 'self-loop arcs $i and $j must not overlap');
+        }
+      }
+    });
+
+    test('clean single labeled edge keeps its base position (unperturbed)', () {
+      // A flat diagram with one labeled edge whose base label position already
+      // clears everything must NOT be moved by the global pass.
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A --> B : go\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final boxes =
+          scene.shapes.whereType<SceneRoundedBox>().toList(growable: false);
+      final a = boxes.firstWhere((b) => b.label == 'A');
+      final b = boxes.firstWhere((b) => b.label == 'B');
+      final midY = (a.rect.bottom + b.rect.top) / 2;
+      final midX = a.rect.center.dx;
+      final size = measurer.measure('go', const TextStyle(fontSize: 10));
+      final expected = Offset(midX + 4, midY - size.height / 2);
+
+      final label = labelText(scene, 'go');
+      expect((label.offset.dx - expected.dx).abs(), lessThan(0.01),
+          reason: 'clean label x must be unchanged');
+      expect((label.offset.dy - expected.dy).abs(), lessThan(0.01),
+          reason: 'clean label y must be unchanged');
+    });
+  });
 }
