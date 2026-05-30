@@ -268,6 +268,57 @@ void main() {
       expect(c.rect.contains(a.rect.center), isFalse);
     });
 
+    test('dotted-name nesting: composites A and B with cross transitions', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        'state A.X\n'
+        'state A.Y\n'
+        'state B.Z\n'
+        'X --> Z\n'
+        'Z --> Y\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final boxes = scene.shapes
+          .whereType<SceneRoundedBox>()
+          .toList(growable: false);
+      // Leaf states X, Y, Z render as labelled rects.
+      final x = boxes.firstWhere((b) => b.label == 'X');
+      final y = boxes.firstWhere((b) => b.label == 'Y');
+      final z = boxes.firstWhere((b) => b.label == 'Z');
+
+      // Two composite shells (null label) with header texts 'A' and 'B'.
+      final headers = scene.shapes
+          .whereType<SceneText>()
+          .map((t) => t.text)
+          .toSet();
+      expect(headers.contains('A'), isTrue);
+      expect(headers.contains('B'), isTrue);
+
+      // A's shell contains X and Y; B's shell contains Z.
+      final shellA = boxes.firstWhere(
+          (b) => b.label == null && b.rect.contains(x.rect.center));
+      expect(shellA.rect.contains(y.rect.center), isTrue);
+      expect(shellA.rect.contains(z.rect.center), isFalse);
+      final shellB = boxes.firstWhere(
+          (b) => b.label == null && b.rect.contains(z.rect.center));
+      expect(shellB.rect.contains(x.rect.center), isFalse);
+      expect(shellB.rect.contains(y.rect.center), isFalse);
+
+      // Cross-composite routes X->Z and Z->Y exist (two open arrowheads).
+      final arrows = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head == ArrowHead.open)
+          .toList();
+      expect(arrows.length, 2);
+      bool nearRect(Offset p, Rect r) => r.inflate(2.0).contains(p);
+      // One arrow tip lands on Z (X->Z), another on Y (Z->Y).
+      expect(arrows.any((a) => nearRect(a.to, z.rect)), isTrue);
+      expect(arrows.any((a) => nearRect(a.to, y.rect)), isTrue);
+    });
+
     test('leaf state with a single description: shell + title + divider + desc',
         () {
       final diagram = _parseStateDiagram(

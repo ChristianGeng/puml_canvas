@@ -5270,6 +5270,76 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       expect(outer.nestedTransitions, hasLength(4));
     });
 
+    group('dotted-name composite nesting', () {
+      test('repro: dotted decls nest into composites A and B', () {
+        final d = parseState('@startuml\n'
+            'state A.X\n'
+            'state A.Y\n'
+            'state B.Z\n'
+            'X --> Z\n'
+            'Z --> Y\n'
+            '@enduml\n');
+        expect(d.states.map((s) => s.name), ['A', 'B']);
+        // No flat literal dotted/leaf states leaked to the top level.
+        expect(d.states.map((s) => s.name),
+            isNot(anyElement(anyOf('A.X', 'X', 'Y', 'Z'))));
+        final a = d.states.firstWhere((s) => s.name == 'A');
+        final b = d.states.firstWhere((s) => s.name == 'B');
+        expect(a.nestedStates.map((s) => s.name), ['X', 'Y']);
+        expect(b.nestedStates.map((s) => s.name), ['Z']);
+        expect(
+          d.transitions.map((t) => '${t.from}->${t.to}'),
+          ['X->Z', 'Z->Y'],
+        );
+      });
+
+      test('three-segment name nests A { B { C } }', () {
+        final d = parseState('@startuml\nstate A.B.C\n@enduml\n');
+        expect(d.states.map((s) => s.name), ['A']);
+        final a = d.states.single;
+        expect(a.nestedStates.map((s) => s.name), ['B']);
+        final bInner = a.nestedStates.single;
+        expect(bInner.nestedStates.map((s) => s.name), ['C']);
+        expect(bInner.nestedStates.single.nestedStates, isEmpty);
+      });
+
+      test('decls sharing a prefix merge, preserving order', () {
+        final d = parseState('@startuml\n'
+            'state A.X\n'
+            'state A.Y\n'
+            '@enduml\n');
+        expect(d.states.map((s) => s.name), ['A']);
+        expect(d.states.single.nestedStates.map((s) => s.name), ['X', 'Y']);
+      });
+
+      test('leaf carries description from its dotted decl', () {
+        final d = parseState('@startuml\n'
+            'state A.X : hello\n'
+            'state A.Y\n'
+            '@enduml\n');
+        final a = d.states.single;
+        final x = a.nestedStates.firstWhere((s) => s.name == 'X');
+        expect(x.descriptions, ['hello']);
+      });
+
+      test('quoted name with a dot is not split', () {
+        final d = parseState('@startuml\nstate "A.X" as Foo\n@enduml\n');
+        expect(d.states.single.name, 'Foo');
+        expect(d.states.single.nestedStates, isEmpty);
+      });
+
+      test('regression: brace composite unchanged', () {
+        final d = parseState('@startuml\n'
+            'state A {\n'
+            '  state X { }\n'
+            '  state Y { }\n'
+            '}\n'
+            '@enduml\n');
+        expect(d.states.map((s) => s.name), ['A']);
+        expect(d.states.single.nestedStates.map((s) => s.name), ['X', 'Y']);
+      });
+    });
+
     test('parses full state diagram example', () {
       final d = parseState('@startuml\n'
           '[*] --> Idle\n'

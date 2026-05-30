@@ -3011,27 +3011,7 @@ class Parser {
     void addState(StateDecl decl) {
       final idx = byName[decl.name];
       if (idx != null) {
-        final existing = states[idx];
-        states[idx] = StateDecl(
-          name: existing.name,
-          displayName: decl.displayName ?? existing.displayName,
-          nestedStates: decl.nestedStates.isNotEmpty
-              ? decl.nestedStates
-              : existing.nestedStates,
-          nestedTransitions: decl.nestedTransitions.isNotEmpty
-              ? decl.nestedTransitions
-              : existing.nestedTransitions,
-          concurrentRegions: decl.concurrentRegions.isNotEmpty
-              ? decl.concurrentRegions
-              : existing.concurrentRegions,
-          descriptions: <String>[
-            ...existing.descriptions,
-            ...decl.descriptions,
-          ],
-          stereotype: decl.stereotype ?? existing.stereotype,
-          horizontalRegions:
-              decl.horizontalRegions || existing.horizontalRegions,
-        );
+        states[idx] = _mergeStateDecls(states[idx], decl);
         return;
       }
       // Suppress auto-declaration of a top-level state when the same name
@@ -3157,6 +3137,11 @@ class Parser {
     _advance();
     String name;
     String? displayName;
+    // PlantUML dotted-name nesting (`state A.X`) only applies to bare
+    // identifier names. A quoted name is a literal label and must never be
+    // split, even if it contains dots. Track which form produced [name] so
+    // the wrap step below knows whether to split on `.`.
+    var splittable = false;
     if (_check(TokenType.stringLiteral)) {
       final first = _advance().lexeme;
       if (_isKeyword('as')) {
@@ -3188,6 +3173,7 @@ class Parser {
         }
       } else {
         name = first;
+        splittable = true;
       }
     } else {
       final t = _peek();
@@ -3243,27 +3229,7 @@ class Parser {
       void addNested(StateDecl decl) {
         final idx = byName[decl.name];
         if (idx != null) {
-          final existing = nested[idx];
-          nested[idx] = StateDecl(
-            name: existing.name,
-            displayName: decl.displayName ?? existing.displayName,
-            nestedStates: decl.nestedStates.isNotEmpty
-                ? decl.nestedStates
-                : existing.nestedStates,
-            nestedTransitions: decl.nestedTransitions.isNotEmpty
-                ? decl.nestedTransitions
-                : existing.nestedTransitions,
-            concurrentRegions: decl.concurrentRegions.isNotEmpty
-                ? decl.concurrentRegions
-                : existing.concurrentRegions,
-            descriptions: <String>[
-              ...existing.descriptions,
-              ...decl.descriptions,
-            ],
-            stereotype: decl.stereotype ?? existing.stereotype,
-            horizontalRegions:
-                decl.horizontalRegions || existing.horizontalRegions,
-          );
+          nested[idx] = _mergeStateDecls(nested[idx], decl);
           return;
         }
         byName[decl.name] = nested.length;
@@ -3306,7 +3272,7 @@ class Parser {
       }
     }
 
-    return StateDecl(
+    final leaf = StateDecl(
       name: name,
       displayName: displayName,
       nestedStates: List.unmodifiable(nested),
@@ -3317,6 +3283,93 @@ class Parser {
       descriptions: List.unmodifiable(declDescriptions),
       stereotype: stereotype,
       horizontalRegions: hasRegions && horizontalRegions,
+    );
+    // PlantUML dotted-name nesting: `state A.X` declares leaf `X` inside
+    // composite `A`; `state A.B.C` nests `A { B { C } }`. The parsed payload
+    // (display/stereotype/body) stays on the leaf; each ancestor becomes an
+    // otherwise-empty composite wrapping its child. Quoted names and pseudo
+    // refs are never split (see [splittable]).
+    if (splittable && name.contains('.')) {
+      return _wrapDottedName(name, leaf);
+    }
+    return leaf;
+  }
+
+  /// Wrap a dotted state name into nested composites. [fullName] is the dotted
+  /// identifier (e.g. `A.B.C`) and [leafPayload] carries the declaration's
+  /// body/stereotype/description. The leaf is renamed to the final segment and
+  /// each preceding segment becomes an empty composite around its child. The
+  /// returned decl is the top ancestor (`A`). Empty segments (a stray `.`) are
+  /// ignored so the original name survives unchanged.
+  StateDecl _wrapDottedName(String fullName, StateDecl leafPayload) {
+    final segments = fullName.split('.').where((s) => s.isNotEmpty).toList();
+    if (segments.length < 2) return leafPayload;
+    var current = StateDecl(
+      name: segments.last,
+      displayName: leafPayload.displayName,
+      nestedStates: leafPayload.nestedStates,
+      nestedTransitions: leafPayload.nestedTransitions,
+      concurrentRegions: leafPayload.concurrentRegions,
+      descriptions: leafPayload.descriptions,
+      stereotype: leafPayload.stereotype,
+      horizontalRegions: leafPayload.horizontalRegions,
+    );
+    for (var i = segments.length - 2; i >= 0; i--) {
+      current = StateDecl(
+        name: segments[i],
+        nestedStates: List.unmodifiable(<StateDecl>[current]),
+      );
+    }
+    return current;
+  }
+
+  /// Merge a re-declaration of the same state name into the [existing] decl.
+  /// Scalar fields keep the original "incoming wins if present" semantics;
+  /// descriptions concatenate. Nested children are UNIONED by name (recursing
+  /// for deeper composites) rather than replaced, so dotted decls sharing a
+  /// prefix (`state A.X` + `state A.Y`) accumulate siblings instead of the
+  /// second overwriting the first. When [incoming] declares no nested children
+  /// the [existing] children are preserved verbatim, so a state that is never
+  /// re-declared with a body is byte-identical to the pre-merge behavior.
+  StateDecl _mergeStateDecls(StateDecl existing, StateDecl incoming) {
+    final List<StateDecl> mergedNested;
+    if (incoming.nestedStates.isEmpty) {
+      mergedNested = existing.nestedStates;
+    } else if (existing.nestedStates.isEmpty) {
+      mergedNested = incoming.nestedStates;
+    } else {
+      final result = List<StateDecl>.from(existing.nestedStates);
+      final byName = <String, int>{
+        for (var i = 0; i < result.length; i++) result[i].name: i,
+      };
+      for (final child in incoming.nestedStates) {
+        final idx = byName[child.name];
+        if (idx != null) {
+          result[idx] = _mergeStateDecls(result[idx], child);
+        } else {
+          byName[child.name] = result.length;
+          result.add(child);
+        }
+      }
+      mergedNested = List.unmodifiable(result);
+    }
+    return StateDecl(
+      name: existing.name,
+      displayName: incoming.displayName ?? existing.displayName,
+      nestedStates: mergedNested,
+      nestedTransitions: incoming.nestedTransitions.isNotEmpty
+          ? incoming.nestedTransitions
+          : existing.nestedTransitions,
+      concurrentRegions: incoming.concurrentRegions.isNotEmpty
+          ? incoming.concurrentRegions
+          : existing.concurrentRegions,
+      descriptions: <String>[
+        ...existing.descriptions,
+        ...incoming.descriptions,
+      ],
+      stereotype: incoming.stereotype ?? existing.stereotype,
+      horizontalRegions:
+          incoming.horizontalRegions || existing.horizontalRegions,
     );
   }
 
@@ -3460,8 +3513,8 @@ class Parser {
         desc = _advance().lexeme;
       }
       if (!_isStatePseudoRef(from)) {
-        addState(StateDecl(
-          name: from,
+        addState(_refStub(
+          from,
           descriptions: desc != null ? <String>[desc] : const <String>[],
         ));
       }
@@ -3482,8 +3535,8 @@ class Parser {
         if (_check(TokenType.text)) _advance();
       }
       if (!_isStatePseudoRef(from)) {
-        addState(StateDecl(
-          name: from,
+        addState(_refStub(
+          from,
           stereotype: stereo.isEmpty ? null : stereo,
         ));
       }
@@ -3496,7 +3549,7 @@ class Parser {
         _check(TokenType.eof) ||
         _check(TokenType.endUml)) {
       if (!_isStatePseudoRef(from)) {
-        addState(StateDecl(name: from));
+        addState(_refStub(from));
       }
       return null;
     }
@@ -3516,12 +3569,61 @@ class Parser {
       }
     }
     if (!_isStatePseudoRef(from)) {
-      addState(StateDecl(name: from));
+      addState(_refStub(from));
     }
     if (!_isStatePseudoRef(to)) {
-      addState(StateDecl(name: to));
+      addState(_refStub(to));
     }
-    return StateTransition(from: from, to: to, label: label, direction: dir);
+    return StateTransition(
+      from: _refLeafName(from),
+      to: _refLeafName(to),
+      label: label,
+      direction: dir,
+    );
+  }
+
+  /// Leaf name a transition endpoint resolves to: the final segment of a
+  /// dotted identifier (`A.X` -> `X`), so cross-composite arrows connect to
+  /// the nested leaf. Pseudo refs (`[*]`, `[H]`, `[H*]`) and non-dotted names
+  /// pass through unchanged.
+  String _refLeafName(String ref) {
+    if (_isStatePseudoRef(ref) || !ref.contains('.')) return ref;
+    final segments = ref.split('.').where((s) => s.isNotEmpty).toList();
+    return segments.isEmpty ? ref : segments.last;
+  }
+
+  /// Build the implicit state declaration a transition endpoint implies. A
+  /// dotted endpoint (`A.X`) creates the same nested composite shape as a
+  /// `state A.X` declaration so undeclared composites still materialize and
+  /// the payload lands on the leaf. Non-dotted refs stay flat as before.
+  StateDecl _refStub(
+    String ref, {
+    List<String> descriptions = const <String>[],
+    String? stereotype,
+  }) {
+    if (!ref.contains('.')) {
+      return StateDecl(
+        name: ref,
+        descriptions: descriptions,
+        stereotype: stereotype,
+      );
+    }
+    final segments = ref.split('.').where((s) => s.isNotEmpty).toList();
+    if (segments.length < 2) {
+      return StateDecl(
+        name: ref,
+        descriptions: descriptions,
+        stereotype: stereotype,
+      );
+    }
+    return _wrapDottedName(
+      ref,
+      StateDecl(
+        name: segments.last,
+        descriptions: descriptions,
+        stereotype: stereotype,
+      ),
+    );
   }
 
   /// Resolve a state-transition arrow lexeme into a layout direction. Word
