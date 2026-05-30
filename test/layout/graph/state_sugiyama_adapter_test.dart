@@ -1193,4 +1193,129 @@ void main() {
       expect((a.rect.center.dy - b.rect.center.dy).abs(), lessThan(1.0));
     });
   });
+
+  group('parallel edges', () {
+    // Text rect for a SceneText, measured with the same measurer the adapter
+    // uses for transition labels.
+    Rect rectOf(SceneText t) {
+      final size = measurer.measure(t.text, t.textStyle);
+      return Rect.fromLTWH(t.offset.dx, t.offset.dy, size.width, size.height);
+    }
+
+    SceneText labelText(Scene scene, String text) => scene.shapes
+        .whereType<SceneText>()
+        .firstWhere((t) => t.text == text);
+
+    test('three parallel transitions fan into distinct non-overlapping labels',
+        () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        'state Configuring {\n'
+        '  [*] --> NewValueSelection\n'
+        '  NewValueSelection --> NewValuePreview : EvNewValue\n'
+        '  NewValuePreview --> NewValueSelection : EvNewValueRejected\n'
+        '  NewValuePreview --> NewValueSelection : EvNewValueSaved\n'
+        '  state NewValuePreview { State1 -> State2 }\n'
+        '}\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final ev1 = labelText(scene, 'EvNewValue');
+      final ev2 = labelText(scene, 'EvNewValueRejected');
+      final ev3 = labelText(scene, 'EvNewValueSaved');
+
+      // Pairwise-distinct offsets.
+      expect(ev1.offset, isNot(ev2.offset));
+      expect(ev1.offset, isNot(ev3.offset));
+      expect(ev2.offset, isNot(ev3.offset));
+
+      // No two label text rects overlap.
+      final rects = [rectOf(ev1), rectOf(ev2), rectOf(ev3)];
+      for (var i = 0; i < rects.length; i++) {
+        for (var j = i + 1; j < rects.length; j++) {
+          expect(rects[i].overlaps(rects[j]), isFalse,
+              reason: 'labels $i and $j overlap');
+        }
+      }
+    });
+
+    test('two parallel transitions: distinct polylines, non-overlapping labels',
+        () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A --> B : L1\n'
+        'A --> B : L2\n'
+        'B --> [*]\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final l1 = labelText(scene, 'L1');
+      final l2 = labelText(scene, 'L2');
+      expect(rectOf(l1).overlaps(rectOf(l2)), isFalse);
+
+      // The two A->B routes are not identical polylines. Collect the arrow-
+      // headed final segments grouped near the A->B region; assert at least one
+      // pair of route segments differs.
+      final arrowSegs = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head == ArrowHead.open)
+          .toList();
+      // Two A->B arrows plus the two pseudo arrows: at least the two A->B ones
+      // must have distinct geometry (they no longer coincide).
+      final distinct = <String>{
+        for (final s in arrowSegs) '${s.from}->${s.to}',
+      };
+      expect(distinct.length, arrowSegs.length,
+          reason: 'every arrow segment should be geometrically distinct');
+    });
+
+    test('bidirectional pair: both labels present, non-overlapping, '
+        'arrowheads correct', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A --> B : go\n'
+        'B --> A : back\n'
+        'B --> [*]\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final go = labelText(scene, 'go');
+      final back = labelText(scene, 'back');
+      expect(rectOf(go).overlaps(rectOf(back)), isFalse);
+
+      final a = scene.shapes
+          .whereType<SceneRoundedBox>()
+          .firstWhere((s) => s.label == 'A');
+      final b = scene.shapes
+          .whereType<SceneRoundedBox>()
+          .firstWhere((s) => s.label == 'B');
+
+      // `go` (A->B) arrowhead lands near B; `back` (B->A) arrowhead lands near
+      // A. The arrow-headed segment closest to each label's edge points the
+      // correct way: the head endpoint of the A->B route is on B's side, and
+      // the head endpoint of the B->A route is on A's side.
+      final arrows = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head == ArrowHead.open)
+          .toList();
+      // The arrowhead pointing toward B (down to A->B) has its `to` nearer B's
+      // center than A's; vice versa for the other.
+      bool nearer(Offset p, Rect target, Rect other) =>
+          (p - target.center).distance < (p - other.center).distance;
+      final towardB =
+          arrows.where((l) => nearer(l.to, b.rect, a.rect)).toList();
+      final towardA =
+          arrows.where((l) => nearer(l.to, a.rect, b.rect)).toList();
+      expect(towardB, isNotEmpty);
+      expect(towardA, isNotEmpty);
+    });
+  });
 }

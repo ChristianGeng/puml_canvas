@@ -342,12 +342,17 @@ _ScopeResult _layoutScope(
   // route touching one of these is stale, so we re-route it straight below.
 
   // --- Routes --------------------------------------------------------------
+  // Build the full set of routes-to-draw (ranking + horizontal) FIRST, so
+  // parallel edges (≥2 sharing an unordered endpoint pair) can be fanned out
+  // before emission. Each entry carries its final polyline, its label info,
+  // and the two endpoint node ids used to detect parallels.
+  final draws = <_DrawRoute>[];
   for (final route in result.edgeRoutes.routes) {
     if (route.points.length < 2) continue;
     var pts = route.points.toList();
     final edgeInfo = builder.edgeInfoById[route.edgeId];
     if (edgeInfo == null) {
-      _emitRoute(shapes, pts, null, measurer);
+      draws.add(_DrawRoute(points: pts, edgeInfo: null, a: null, b: null));
       continue;
     }
     // A ranking edge incident to a horizontally-moved node has a stale route;
@@ -361,7 +366,12 @@ _ScopeResult _layoutScope(
         final start =
             _clipPointIntoRect(dstRect.center, srcRect.center, srcRect);
         final end = _clipPointIntoRect(srcRect.center, dstRect.center, dstRect);
-        _emitRoute(shapes, [start, end], edgeInfo, measurer);
+        draws.add(_DrawRoute(
+          points: [start, end],
+          edgeInfo: edgeInfo,
+          a: edgeInfo.src,
+          b: edgeInfo.dst,
+        ));
         continue;
       }
     }
@@ -382,7 +392,12 @@ _ScopeResult _layoutScope(
       descendantRects: descendantRects,
     );
     if (pts.length < 2) continue;
-    _emitRoute(shapes, pts, edgeInfo, measurer);
+    draws.add(_DrawRoute(
+      points: pts,
+      edgeInfo: edgeInfo,
+      a: edgeInfo.src,
+      b: edgeInfo.dst,
+    ));
   }
 
   // --- Horizontal (left/right) routes --------------------------------------
@@ -394,19 +409,26 @@ _ScopeResult _layoutScope(
     if (srcRect == null || dstRect == null) continue;
     final start = _clipPointIntoRect(dstRect.center, srcRect.center, srcRect);
     final end = _clipPointIntoRect(srcRect.center, dstRect.center, dstRect);
-    final pts = <Offset>[start, end];
-    _emitRoute(
-      shapes,
-      pts,
-      _EdgeInfo(label: h.label, src: h.src, dst: h.dst),
-      measurer,
-    );
+    draws.add(_DrawRoute(
+      points: <Offset>[start, end],
+      edgeInfo: _EdgeInfo(label: h.label, src: h.src, dst: h.dst),
+      a: h.src,
+      b: h.dst,
+    ));
   }
 
-  // Horizontal placement may have pushed content past the original layout
-  // bounds (or, for `left`, into negative x), so recompute the bounding box
-  // over all shapes and normalize the origin to (0,0).
-  if (builder.horizontalEdges.isEmpty) {
+  // Fan out parallel edges (groups of ≥2 sharing an unordered endpoint pair)
+  // so their polylines and labels no longer coincide, then emit everything.
+  final fanned = _fanOutParallelDraws(draws, measurer);
+  for (final d in draws) {
+    if (d.points.length < 2) continue;
+    _emitRoute(shapes, d.points, d.edgeInfo, measurer);
+  }
+
+  // Horizontal placement or parallel-edge fan-out may have pushed content past
+  // the original layout bounds (or into negative coordinates), so recompute the
+  // bounding box over all shapes and normalize the origin to (0,0).
+  if (builder.horizontalEdges.isEmpty && !fanned) {
     return _ScopeResult(
       shapes: shapes,
       size: Size(coords.totalWidth, coords.totalHeight),
@@ -1365,6 +1387,107 @@ void _emitNode(
     ));
     y += ds.height;
   }
+}
+
+/// A route queued for emission: its final polyline [points], the [edgeInfo]
+/// that carries the label/direction, and the two endpoint node ids ([a], [b])
+/// used to detect parallel edges. [a]/[b] are null for label-less engine
+/// routes that have no edge info (they never participate in grouping).
+class _DrawRoute {
+  List<Offset> points;
+  final _EdgeInfo? edgeInfo;
+  final String? a;
+  final String? b;
+  _DrawRoute({
+    required this.points,
+    required this.edgeInfo,
+    required this.a,
+    required this.b,
+  });
+}
+
+/// Minimum lateral separation between adjacent fanned routes.
+const _parallelMinStep = 22.0;
+
+/// Detects groups of routes that connect the SAME unordered node pair and bows
+/// each group member sideways so the n polylines fan out symmetrically and
+/// their labels (placed at the bowed midpoint) no longer overlap. Self-loops
+/// (a==b) and routes without endpoint ids are skipped. Single-edge pairs are
+/// left untouched so existing label positions don't shift. Mutates the
+/// [draws] points in place.
+bool _fanOutParallelDraws(List<_DrawRoute> draws, TextMeasurer measurer) {
+  var fanned = false;
+  final groups = <String, List<_DrawRoute>>{};
+  for (final d in draws) {
+    final a = d.a;
+    final b = d.b;
+    if (a == null || b == null || a == b) continue;
+    final key = a.compareTo(b) <= 0 ? '$a $b' : '$b $a';
+    groups.putIfAbsent(key, () => <_DrawRoute>[]).add(d);
+  }
+  for (final group in groups.values) {
+    final n = group.length;
+    if (n < 2) continue;
+    fanned = true;
+    // A group is vertical when its first member runs mostly top-to-bottom; the
+    // label de-overlap axis follows from that (vertical fan separates labels in
+    // X by label width; horizontal fan separates in Y by label height).
+    final first = group.first.points;
+    final vertical = (first.last.dy - first.first.dy).abs() >=
+        (first.last.dx - first.first.dx).abs();
+    // Step: large enough that adjacent labels clear each other along the
+    // lateral axis, with a sensible minimum.
+    var maxLabelExtent = 0.0;
+    for (final d in group) {
+      final label = d.edgeInfo?.label;
+      if (label == null || label.isEmpty) continue;
+      final s = measurer.measure(label, _transitionLabelStyle);
+      final extent = vertical ? s.width : s.height;
+      if (extent > maxLabelExtent) maxLabelExtent = extent;
+    }
+    final step = math.max(_parallelMinStep, maxLabelExtent + 8.0);
+    for (var i = 0; i < n; i++) {
+      final offset = (i - (n - 1) / 2) * step;
+      if (offset == 0) continue;
+      group[i].points = _bowPolyline(group[i].points, offset);
+    }
+  }
+  return fanned;
+}
+
+/// Bows [pts] laterally by [offset] (signed). The lateral axis is chosen from
+/// the dominant direction of the endpoints: a mostly-vertical edge is offset in
+/// X, a mostly-horizontal edge in Y. The endpoints stay anchored; an offset
+/// midpoint is inserted (and any existing interior points shifted) so the line
+/// visibly separates and the label midpoint moves with it.
+List<Offset> _bowPolyline(List<Offset> pts, double offset) {
+  final start = pts.first;
+  final end = pts.last;
+  final dx = (end.dx - start.dx).abs();
+  final dy = (end.dy - start.dy).abs();
+  final vertical = dy >= dx;
+  Offset bow(Offset p, double w) => vertical
+      ? Offset(p.dx + offset * w, p.dy)
+      : Offset(p.dx, p.dy + offset * w);
+  final mid = Offset((start.dx + end.dx) / 2, (start.dy + end.dy) / 2);
+  // Two-point routes gain a duplicated bowed apex (start -> apex -> apex -> end)
+  // so `_emitRoute`'s label anchor — the segment between points[mid-1] and
+  // points[mid] for the 4-point list (both the apex) — lands ON the offset
+  // apex, giving each parallel route the full `offset` of label separation.
+  if (pts.length == 2) {
+    final apex = bow(mid, 1.0);
+    return <Offset>[start, apex, apex, end];
+  }
+  // Multi-point routes: shift each interior point by a weight that tapers to 0
+  // at the endpoints, keeping the terminals (and thus arrowheads) anchored.
+  final out = <Offset>[start];
+  for (var i = 1; i < pts.length - 1; i++) {
+    final t = i / (pts.length - 1);
+    final w = 1.0 - (2.0 * t - 1.0).abs();
+    out.add(bow(pts[i], w));
+  }
+  out.add(end);
+  return out;
 }
 
 void _emitRoute(
