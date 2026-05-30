@@ -1643,4 +1643,89 @@ void main() {
       expect(hasSelfLoopRoute(scene, shell.rect), isFalse);
     });
   });
+
+  group('label placement', () {
+    // Text rect for a SceneText, measured with the adapter's measurer.
+    Rect rectOf(SceneText t) {
+      final size = measurer.measure(t.text, t.textStyle);
+      return Rect.fromLTWH(t.offset.dx, t.offset.dy, size.width, size.height);
+    }
+
+    SceneText labelText(Scene scene, String text) => scene.shapes
+        .whereType<SceneText>()
+        .firstWhere((t) => t.text == text);
+
+    test('short edge label clears both endpoint boxes', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> State1\n'
+        'State1 --> State2 : Succeeded\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final boxes =
+          scene.shapes.whereType<SceneRoundedBox>().toList(growable: false);
+      final state1 = boxes.firstWhere((b) => b.label == 'State1');
+      final state2 = boxes.firstWhere((b) => b.label == 'State2');
+      final label = rectOf(labelText(scene, 'Succeeded'));
+
+      expect(label.overlaps(state1.rect), isFalse,
+          reason: 'label must not sit on the State1 box');
+      expect(label.overlaps(state2.rect), isFalse,
+          reason: 'label must not sit on the State2 box');
+    });
+
+    test('two converging edges keep their labels from overlapping', () {
+      // A and B sit side by side and both point down into C; with long labels
+      // their base midpoint positions would collide, so one is nudged clear.
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        '[*] --> B\n'
+        'A --> C : LongLabelOne\n'
+        'B --> C : LongLabelTwo\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final one = rectOf(labelText(scene, 'LongLabelOne'));
+      final two = rectOf(labelText(scene, 'LongLabelTwo'));
+      expect(one.overlaps(two), isFalse,
+          reason: 'converging-edge labels must not overlap each other');
+    });
+
+    test('a clean, well-separated edge label keeps its base position', () {
+      // Single A->B edge with plenty of vertical room: the label must NOT be
+      // perturbed — it stays at the historical mid-segment anchor (`+4` x,
+      // vertically centered on the segment midpoint).
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A --> B : go\n'
+        'B --> [*]\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      // Reconstruct the expected base anchor from the A->B route geometry.
+      final boxes =
+          scene.shapes.whereType<SceneRoundedBox>().toList(growable: false);
+      final a = boxes.firstWhere((b) => b.label == 'A');
+      final b = boxes.firstWhere((b) => b.label == 'B');
+      // The straight A->B route runs from A's bottom to B's top along the
+      // shared center x; its mid-segment midpoint is the segment midpoint.
+      final midY = (a.rect.bottom + b.rect.top) / 2;
+      final midX = a.rect.center.dx;
+      final size = measurer.measure('go', const TextStyle(fontSize: 10));
+      final expected = Offset(midX + 4, midY - size.height / 2);
+
+      final label = labelText(scene, 'go');
+      expect((label.offset.dx - expected.dx).abs(), lessThan(0.01));
+      expect((label.offset.dy - expected.dy).abs(), lessThan(0.01));
+    });
+  });
 }

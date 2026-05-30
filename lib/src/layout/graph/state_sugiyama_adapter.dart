@@ -561,9 +561,16 @@ _ScopeResult _layoutScope(
   // Fan out parallel edges (groups of ≥2 sharing an unordered endpoint pair)
   // so their polylines and labels no longer coincide, then emit everything.
   final fanned = _fanOutParallelDraws(draws, measurer);
+  // Obstacle rects every label in this scope must avoid: each placed node
+  // (leaf rect, composite shell, pseudo circle bounds) plus any nested-leaf
+  // rect projected up from a child composite — all already in descendantRects.
+  // A growing list of already-placed label rects is appended as we emit, so
+  // later labels also dodge earlier ones.
+  final obstacles = descendantRects.values.toList();
+  final placedLabels = <Rect>[];
   for (final d in draws) {
     if (d.points.length < 2) continue;
-    _emitRoute(shapes, d.points, d.edgeInfo, measurer);
+    _emitRoute(shapes, d.points, d.edgeInfo, measurer, obstacles, placedLabels);
   }
 
   // Horizontal placement or parallel-edge fan-out may have pushed content past
@@ -1707,6 +1714,8 @@ void _emitRoute(
   List<Offset> points,
   _EdgeInfo? edgeInfo,
   TextMeasurer measurer,
+  List<Rect> obstacles,
+  List<Rect> placedLabels,
 ) {
   for (var i = 0; i + 1 < points.length; i++) {
     final isLast = i + 2 == points.length;
@@ -1724,12 +1733,134 @@ void _emitRoute(
     final b = points[midIdx];
     final size = measurer.measure(label, _transitionLabelStyle);
     final mid = Offset((a.dx + b.dx) / 2, (a.dy + b.dy) / 2);
+    final offset = _placeLabel(
+      mid: mid,
+      size: size,
+      segStart: a,
+      segEnd: b,
+      obstacles: obstacles,
+      placedLabels: placedLabels,
+    );
+    placedLabels.add(offset & size);
     shapes.add(SceneText(
-      offset: Offset(mid.dx + 4, mid.dy - size.height / 2),
+      offset: offset,
       text: label,
       textStyle: _transitionLabelStyle,
     ));
   }
+}
+
+/// Largest perpendicular step tried before falling back to along-edge shifts.
+const _labelMaxOffset = 60.0;
+
+/// Increment between successive label-nudge candidates.
+const _labelStep = 6.0;
+
+/// Chooses a top-left offset for an edge label whose rect (size [size]) is
+/// anchored at the route's mid-segment midpoint [mid] (segment [segStart] ->
+/// [segEnd]). The base position matches historical behavior exactly: a `+4` x
+/// nudge with the rect vertically centered on [mid]. When that base rect clears
+/// every obstacle and already-placed label, it is returned unchanged so simple
+/// edges keep their established positions. Otherwise candidates are tried in a
+/// fixed, deterministic order — perpendicular to the local edge direction at
+/// growing offsets (positive side first, then negative), then small shifts
+/// along the edge — and the first fully-clear candidate wins; if none clears
+/// within the cap, the candidate with minimum total overlap is returned.
+Offset _placeLabel({
+  required Offset mid,
+  required Size size,
+  required Offset segStart,
+  required Offset segEnd,
+  required List<Rect> obstacles,
+  required List<Rect> placedLabels,
+}) {
+  // Base rect: top-left at (mid.dx + 4, mid.dy - height/2). Candidates are
+  // expressed as a center shift from `base` so the `+4`/centering offset is
+  // preserved in every candidate.
+  Offset offsetFor(Offset shift) =>
+      Offset(mid.dx + 4 + shift.dx, mid.dy - size.height / 2 + shift.dy);
+  Rect rectFor(Offset shift) => offsetFor(shift) & size;
+
+  final base = rectFor(Offset.zero);
+  if (_labelClears(base, obstacles, placedLabels)) {
+    return offsetFor(Offset.zero);
+  }
+
+  // Local edge direction; perpendicular is the primary nudge axis. Degenerate
+  // (zero-length) segments fall back to a vertical edge / horizontal nudge.
+  var dx = segEnd.dx - segStart.dx;
+  var dy = segEnd.dy - segStart.dy;
+  final len = math.sqrt(dx * dx + dy * dy);
+  if (len < 1e-6) {
+    dx = 0;
+    dy = 1;
+  } else {
+    dx /= len;
+    dy /= len;
+  }
+  final perp = Offset(-dy, dx);
+  final along = Offset(dx, dy);
+
+  final candidates = <Offset>[];
+  // Perpendicular, both sides, growing magnitude (positive side first).
+  for (var d = _labelStep; d <= _labelMaxOffset; d += _labelStep) {
+    candidates.add(perp * d);
+    candidates.add(perp * -d);
+  }
+  // Then small shifts along the edge (both directions).
+  for (var d = _labelStep; d <= _labelMaxOffset; d += _labelStep) {
+    candidates.add(along * d);
+    candidates.add(along * -d);
+  }
+
+  var best = Offset.zero;
+  var bestOverlap = _totalOverlap(base, obstacles, placedLabels);
+  for (final shift in candidates) {
+    final rect = rectFor(shift);
+    if (_labelClears(rect, obstacles, placedLabels)) {
+      return offsetFor(shift);
+    }
+    final overlap = _totalOverlap(rect, obstacles, placedLabels);
+    if (overlap < bestOverlap) {
+      bestOverlap = overlap;
+      best = shift;
+    }
+  }
+  return offsetFor(best);
+}
+
+/// True when [rect] overlaps none of the [obstacles] or [placedLabels].
+bool _labelClears(Rect rect, List<Rect> obstacles, List<Rect> placedLabels) {
+  for (final o in obstacles) {
+    if (rect.overlaps(o)) return false;
+  }
+  for (final p in placedLabels) {
+    if (rect.overlaps(p)) return false;
+  }
+  return true;
+}
+
+/// Sum of intersection areas between [rect] and every obstacle/placed label.
+double _totalOverlap(
+  Rect rect,
+  List<Rect> obstacles,
+  List<Rect> placedLabels,
+) {
+  double area(Rect a, Rect b) {
+    final w = math.min(a.right, b.right) - math.max(a.left, b.left);
+    final h = math.min(a.bottom, b.bottom) - math.max(a.top, b.top);
+    if (w <= 0 || h <= 0) return 0;
+    return w * h;
+  }
+
+  var total = 0.0;
+  for (final o in obstacles) {
+    total += area(rect, o);
+  }
+  for (final p in placedLabels) {
+    total += area(rect, p);
+  }
+  return total;
 }
 
 /// Returns a copy of [shape] translated by [by]. Handles every shape type a
