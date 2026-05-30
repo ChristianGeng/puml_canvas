@@ -1495,4 +1495,152 @@ void main() {
       }
     });
   });
+
+  group('self loops', () {
+    // A self-loop's route is a poly-line that both starts and ends on its
+    // node's rect boundary while bulging away from it — distinct from a simple
+    // straight edge (whose endpoints touch two different rects). This helper
+    // finds such a route's segments among [scene]'s lines for node [rect].
+    bool hasSelfLoopRoute(Scene scene, Rect rect) {
+      final box = rect.inflate(1.0);
+      final lines = scene.shapes.whereType<SceneLine>().toList();
+      // The loop's arrowhead segment ends on the node boundary, and the loop's
+      // first segment starts on the node boundary; collectively at least one
+      // intermediate point must leave the rect (the bulge).
+      final touching = lines
+          .where((l) => box.contains(l.from) || box.contains(l.to))
+          .toList();
+      if (touching.isEmpty) return false;
+      // Find an arrowhead segment whose tip lands on the boundary.
+      final headOnNode = touching.any(
+        (l) => l.head == ArrowHead.open && box.contains(l.to),
+      );
+      // Find a segment whose start is on the boundary and whose other point is
+      // outside the rect (the bulge away).
+      final startsOnNode = touching.any(
+        (l) => box.contains(l.from) && !box.contains(l.to),
+      );
+      return headOnNode && startsOnNode;
+    }
+
+    test('leaf self-loop on A renders label once and loops back on A', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A --> A : Loop\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final a = scene.shapes
+          .whereType<SceneRoundedBox>()
+          .firstWhere((b) => b.label == 'A');
+
+      // Label renders exactly once.
+      final labelCount = scene.shapes
+          .whereType<SceneText>()
+          .where((t) => t.text == 'Loop')
+          .length;
+      expect(labelCount, 1);
+
+      // A self-loop route exists on A (leaves and returns to A's boundary).
+      expect(hasSelfLoopRoute(scene, a.rect), isTrue);
+    });
+
+    test('leaf self-loop inside a composite loops on the nested state', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        'state C {\n'
+        '  [*] --> X\n'
+        '  X --> X : Re\n'
+        '}\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final boxes =
+          scene.shapes.whereType<SceneRoundedBox>().toList(growable: false);
+      final x = boxes.firstWhere((b) => b.label == 'X');
+      final shell = boxes.firstWhere(
+          (b) => b.label == null && b.rect.contains(x.rect.center));
+
+      // Label renders exactly once.
+      final reCount = scene.shapes
+          .whereType<SceneText>()
+          .where((t) => t.text == 'Re')
+          .length;
+      expect(reCount, 1);
+
+      // The loop is on X, and X sits inside C's shell.
+      expect(hasSelfLoopRoute(scene, x.rect), isTrue);
+      expect(shell.rect.contains(x.rect.center), isTrue);
+    });
+
+    test('composite self-loop loops on the composite shell', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        'state C {\n'
+        '  [*] --> Y\n'
+        '  Y --> [*]\n'
+        '}\n'
+        'C --> C : Failed\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      final boxes =
+          scene.shapes.whereType<SceneRoundedBox>().toList(growable: false);
+      final y = boxes.firstWhere((b) => b.label == 'Y');
+      // C's shell is the null-label box that contains Y.
+      final shell = boxes.firstWhere(
+          (b) => b.label == null && b.rect.contains(y.rect.center));
+
+      // Label renders exactly once.
+      final failedCount = scene.shapes
+          .whereType<SceneText>()
+          .where((t) => t.text == 'Failed')
+          .length;
+      expect(failedCount, 1);
+
+      // The self-loop is on C's shell rect.
+      expect(hasSelfLoopRoute(scene, shell.rect), isTrue);
+    });
+
+    test('internal-composite edge is still dropped at the outer scope', () {
+      // `A --> B` where B is inside composite C is routed in C's inner scope,
+      // not at the root; the guard that drops it (direct children differ only
+      // in nested target) must still hold for non-self edges too. Here the
+      // classic case: an edge whose endpoints lift to the SAME composite but
+      // DIFFERENT nested targets must not produce a duplicate outer route.
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        'state C {\n'
+        '  P --> Q : inside\n'
+        '}\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      // The internal edge label renders exactly once (from the inner scope),
+      // never duplicated by an outer-scope self-edge.
+      final insideCount = scene.shapes
+          .whereType<SceneText>()
+          .where((t) => t.text == 'inside')
+          .length;
+      expect(insideCount, 1);
+
+      // No self-loop route on C's shell (the internal edge was NOT turned into
+      // a composite self-loop).
+      final boxes =
+          scene.shapes.whereType<SceneRoundedBox>().toList(growable: false);
+      final p = boxes.firstWhere((b) => b.label == 'P');
+      final shell = boxes.firstWhere(
+          (b) => b.label == null && b.rect.contains(p.rect.center));
+      expect(hasSelfLoopRoute(scene, shell.rect), isFalse);
+    });
+  });
 }

@@ -483,6 +483,19 @@ _ScopeResult _layoutScope(
       draws.add(_DrawRoute(points: pts, edgeInfo: null, a: null, b: null));
       continue;
     }
+    // Self-loop: the engine already anchored the 5-point loopback on the
+    // node's boundary. Reconciliation/horizontal re-routing assume two
+    // distinct endpoints and would collapse the loop, so pass it through
+    // unchanged (its label sits at the loop's outer segment).
+    if (edgeInfo.src == edgeInfo.dst) {
+      draws.add(_DrawRoute(
+        points: pts,
+        edgeInfo: edgeInfo,
+        a: edgeInfo.src,
+        b: edgeInfo.dst,
+      ));
+      continue;
+    }
     // A ranking edge incident to a horizontally-moved node has a stale route;
     // recompute it as a straight segment clipped to the (updated) endpoint
     // rects, mirroring the horizontal-edge routing below.
@@ -1064,7 +1077,28 @@ class _ScopeBuilder {
     final from = _resolveEndpoint(t.from, source: true, history: st.fromHistory);
     final to = _resolveEndpoint(t.to, source: false, history: st.toHistory);
     if (from == null || to == null) return;
-    if (from.directChild == to.directChild) return;
+    // A TRUE self-loop resolves both endpoints to the SAME node (same direct
+    // child AND same nested target). When the direct children match but the
+    // nested targets differ, this is an edge INTERNAL to a composite seen from
+    // an outer scope; it is routed in the composite's own inner scope, so drop
+    // it here (unchanged behavior).
+    final selfLoop = from.directChild == to.directChild &&
+        from.nestedTarget == to.nestedTarget;
+    if (from.directChild == to.directChild && !selfLoop) return;
+    if (selfLoop) {
+      // Self-loops have no meaningful direction: always a side loop-back arc.
+      // Feed a self-edge (src == dst) so the engine emits the 5-point loopback.
+      final id = 'e${_edgeSeq++}';
+      _edges.add(GraphEdge(id: id, src: from.directChild, dst: from.directChild));
+      edgeInfoById[id] = _EdgeInfo(
+        label: t.label,
+        src: from.directChild,
+        dst: from.directChild,
+        srcOriginal: from.nestedTarget,
+        dstOriginal: to.nestedTarget,
+      );
+      return;
+    }
     final dir = t.direction ?? StateArrowDirection.down;
     // Horizontal edges are NON-RANKING: collect them for post-placement
     // routing so they don't force a layer difference.
