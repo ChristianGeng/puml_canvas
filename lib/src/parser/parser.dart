@@ -3113,13 +3113,28 @@ class Parser {
     }
     _expect(TokenType.endUml);
     // PlantUML resolves state names globally, regardless of declaration order.
-    // A composite/aliased state declared at top level owns its name; an empty
-    // nested stub of the same name (auto-declared by a forward-referencing
-    // transition inside another composite) is dropped so the state isn't
-    // duplicated. The naming transition stays and becomes a cross-boundary edge.
+    // A state declared at top level owns its name; an empty nested stub of the
+    // same name (auto-declared by a forward-referencing transition inside
+    // another composite) is dropped so the state isn't duplicated. The naming
+    // transition stays and becomes a cross-boundary edge into the composite.
+    //
+    // A name is owned at top level when its top-level state either carries
+    // payload (composite/aliased/described) OR is a real top-level participant,
+    // i.e. it appears as an endpoint of a top-level transition. A bare leaf that
+    // only shows up as a nested forward reference is not anchored at top level
+    // and must NOT claim ownership, so cross-container members (e.g. `state C {
+    // B }` with `A --> B`, where the top-level `B` stub is suppressed during
+    // parsing) keep their genuine nested home.
+    final topLevelNames = <String>{for (final s in states) s.name};
+    final topLevelEndpoints = <String>{
+      for (final t in transitions) ...[
+        if (!_isStatePseudoRef(t.from) && topLevelNames.contains(t.from)) t.from,
+        if (!_isStatePseudoRef(t.to) && topLevelNames.contains(t.to)) t.to,
+      ],
+    };
     final ownedTopLevel = <String>{
       for (final s in states)
-        if (_hasStatePayload(s)) s.name,
+        if (_hasStatePayload(s) || topLevelEndpoints.contains(s.name)) s.name,
     };
     if (ownedTopLevel.isNotEmpty) {
       for (var i = 0; i < states.length; i++) {

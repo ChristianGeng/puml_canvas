@@ -1368,5 +1368,30 @@ void main() {
       expect(towardB, isNotEmpty);
       expect(towardA, isNotEmpty);
     });
+
+    test('nested forward-ref to a top-level leaf renders it only once', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] -> State1\n'
+        'State1 --> State2 : Succeeded\n'
+        'State2 --> State3 : Succeeded\n'
+        'state State3 {\n'
+        '  [*] --> long1\n'
+        '  State2 --> [H]: Resume\n'
+        '}\n'
+        'State3 --> State2 : Pause\n'
+        '@enduml\n',
+      );
+
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      // State2 must be rendered exactly once: the spurious nested stub inside
+      // State3 was pruned by the parser, so only the top-level box remains.
+      final state2Boxes = scene.shapes
+          .whereType<SceneRoundedBox>()
+          .where((s) => s.label == 'State2')
+          .length;
+      expect(state2Boxes, 1);
+    });
   });
 }

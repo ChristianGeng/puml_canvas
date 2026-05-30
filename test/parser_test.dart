@@ -5340,6 +5340,46 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       });
     });
 
+    group('nested forward-ref to a top-level participant', () {
+      test('does not duplicate a top-level leaf as a nested stub', () {
+        final d = parseState('@startuml\n'
+            '[*] -> State1\n'
+            'State1 --> State2 : Succeeded\n'
+            'State2 --> State3 : Succeeded\n'
+            'state State3 {\n'
+            '  [*] --> long1\n'
+            '  State2 --> [H]: Resume\n'
+            '}\n'
+            'State3 --> State2 : Pause\n'
+            '@enduml\n');
+        // State2 is a real top-level participant; it stays at top level once.
+        expect(d.states.where((s) => s.name == 'State2'), hasLength(1));
+        final state3 = d.states.firstWhere((s) => s.name == 'State3');
+        // The spurious nested State2 stub is pruned; long1 remains nested.
+        expect(state3.nestedStates.map((s) => s.name), ['long1']);
+        expect(state3.nestedStates.map((s) => s.name), isNot(contains('State2')));
+        // The naming transition survives as a cross-boundary edge.
+        expect(
+          state3.nestedTransitions.map((t) => '${t.from}->${t.to}'),
+          contains('State2->[H]'),
+        );
+      });
+
+      test('cross-container member is not pruned (state C { B }, A --> B)', () {
+        final d = parseState('@startuml\n'
+            'state C {\n'
+            '  B\n'
+            '}\n'
+            'A --> B : enter\n'
+            '@enduml\n');
+        // B is a genuine nested member of C, not a top-level participant, so
+        // it must remain nested.
+        expect(d.states.map((s) => s.name), isNot(contains('B')));
+        final c = d.states.firstWhere((s) => s.name == 'C');
+        expect(c.nestedStates.map((s) => s.name), ['B']);
+      });
+    });
+
     test('parses full state diagram example', () {
       final d = parseState('@startuml\n'
           '[*] --> Idle\n'
