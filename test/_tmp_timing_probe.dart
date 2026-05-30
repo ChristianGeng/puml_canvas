@@ -190,9 +190,8 @@ void main() {
     try {
       final tokens = Lexer().tokenize(entry.value);
       Parser().parse(tokens);
-      print('${entry.key}: OK');
     } catch (e) {
-      print('${entry.key}: FAIL - $e');
+      throw StateError('${entry.key}: FAIL - $e');
     }
   }
 }

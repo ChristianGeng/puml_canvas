@@ -2,8 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:puml_canvas/src/lexer/lexer.dart';
 import 'package:puml_canvas/src/parser/parser.dart';
 
-/// Regression test for ArchiMate source sample A1: combines `!include
-/// <archimate/Archimate>`, a `<style>` block, `rectangle`/`()` interface
+/// Regression test for ArchiMate source sample A1: combines
+/// `!include <archimate/Archimate>`, a `<style>` block, `rectangle`/`()` interface
 /// declarations, and a battery of `Rel_*(src, tgt, label)` macro calls
 /// (Triggering, Specialization, Serving, Realization, Influence, Flow,
 /// Composition, Association, Assignment, Aggregation, Access*). All
