@@ -4,6 +4,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'samples/sample_models.dart';
+import 'samples/plantuml_server.dart';
 import 'samples/sequence_samples.dart';
 import 'samples/use_case_samples.dart';
 import 'samples/class_samples.dart';
@@ -248,17 +249,115 @@ class _SingleSampleView extends StatelessWidget {
         ),
         const VerticalDivider(width: 1),
         Expanded(
-          child: Container(
-            color: const Color(0xFFFAFAFA),
-            padding: const EdgeInsets.all(12),
+          child: _LabeledPane(
+            label: 'puml_canvas',
             child: InteractiveViewer(
               minScale: 0.2,
               maxScale: 4,
-              child: PumlView(source: source),
+              child: PumlView(source: source, useSugiyamaForStates: true),
+            ),
+          ),
+        ),
+        const VerticalDivider(width: 1),
+        Expanded(
+          child: _LabeledPane(
+            label: 'plantuml.com',
+            child: InteractiveViewer(
+              minScale: 0.2,
+              maxScale: 4,
+              child: _PlantUmlOriginal(source: source),
             ),
           ),
         ),
       ],
+    );
+  }
+}
+
+/// A titled panel that labels which renderer produced the content below it,
+/// so the puml_canvas output and the original plantuml.com image are easy to
+/// tell apart when compared side by side.
+class _LabeledPane extends StatelessWidget {
+  const _LabeledPane({required this.label, required this.child});
+
+  final String label;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: const Color(0xFFFAFAFA),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            color: const Color(0xFFEEEEEE),
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: const Color(0xFF555555),
+                  ),
+            ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: child,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Renders the original diagram from the official plantuml.com server so it can
+/// be compared against the local puml_canvas rendering.
+class _PlantUmlOriginal extends StatelessWidget {
+  const _PlantUmlOriginal({required this.source});
+
+  final String source;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = plantUmlImageUrl(source);
+    return Image.network(
+      url,
+      fit: BoxFit.contain,
+      loadingBuilder: (context, child, progress) {
+        if (progress == null) return child;
+        return const Center(child: CircularProgressIndicator());
+      },
+      errorBuilder: (context, error, stackTrace) {
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.cloud_off, color: Colors.grey),
+                const SizedBox(height: 8),
+                Text(
+                  'Failed to load plantuml.com image',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '$error',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: Colors.redAccent, fontSize: 10),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -365,15 +464,28 @@ class _SubSampleCardState extends State<_SubSampleCard> {
                 ),
                 const VerticalDivider(width: 1),
                 Expanded(
-                  child: Container(
-                    color: const Color(0xFFFAFAFA),
-                    padding: const EdgeInsets.all(12),
+                  child: _LabeledPane(
+                    label: 'puml_canvas',
                     child: SingleChildScrollView(
                       scrollDirection: Axis.vertical,
                       child: SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
-                        child: PumlView(source: _source),
+                        child: PumlView(
+                          source: _source,
+                          useSugiyamaForStates: true,
+                        ),
                       ),
+                    ),
+                  ),
+                ),
+                const VerticalDivider(width: 1),
+                Expanded(
+                  child: _LabeledPane(
+                    label: 'plantuml.com',
+                    child: InteractiveViewer(
+                      minScale: 0.2,
+                      maxScale: 4,
+                      child: _PlantUmlOriginal(source: _source),
                     ),
                   ),
                 ),
