@@ -332,6 +332,13 @@ _ScopeResult _layoutScope(
     _emitNode(shapes, info, center, measurer);
   }
 
+  // Nodes whose position was changed by horizontal placement. Any pre-computed
+  // engine route touching one of these is stale (it was routed from the node's
+  // original layer position), so we re-route it straight from the new rects.
+  final movedNodes = <String>{
+    for (final h in builder.horizontalEdges) h.dst,
+  };
+
   // --- Routes --------------------------------------------------------------
   for (final route in result.edgeRoutes.routes) {
     if (route.points.length < 2) continue;
@@ -340,6 +347,21 @@ _ScopeResult _layoutScope(
     if (edgeInfo == null) {
       _emitRoute(shapes, pts, null, measurer);
       continue;
+    }
+    // A ranking edge incident to a horizontally-moved node has a stale route;
+    // recompute it as a straight segment clipped to the (updated) endpoint
+    // rects, mirroring the horizontal-edge routing below.
+    if (movedNodes.contains(edgeInfo.src) ||
+        movedNodes.contains(edgeInfo.dst)) {
+      final srcRect = descendantRects[edgeInfo.srcOriginal ?? edgeInfo.src];
+      final dstRect = descendantRects[edgeInfo.dstOriginal ?? edgeInfo.dst];
+      if (srcRect != null && dstRect != null) {
+        final start =
+            _clipPointIntoRect(dstRect.center, srcRect.center, srcRect);
+        final end = _clipPointIntoRect(srcRect.center, dstRect.center, dstRect);
+        _emitRoute(shapes, [start, end], edgeInfo, measurer);
+        continue;
+      }
     }
     // Source reconciliation.
     pts = _reconcileEnd(

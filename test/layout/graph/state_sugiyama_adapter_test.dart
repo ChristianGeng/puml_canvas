@@ -1058,5 +1058,38 @@ void main() {
           .length;
       expect(arrows, 4);
     });
+
+    test('horizontally-placed node re-routes its other edges from new spot',
+        () {
+      // Regression: State2 is pulled into State1's row by `State1 -> State2`,
+      // so its `State2 --> [*]` edge must route from State2's NEW position, not
+      // the stale layer-0 spot it had before horizontal placement.
+      final scene = layoutStateDiagramWithSugiyama(
+        _parseStateDiagram(
+          '@startuml\n'
+          '[*] --> State1\n'
+          'State1 --> [*]\n'
+          'State1 -> State2\n'
+          'State2 --> [*]\n'
+          '@enduml\n',
+        ),
+        measurer,
+      );
+      final state2 = boxFor(scene, 'State2');
+      final ring =
+          scene.shapes.whereType<SceneCircle>().firstWhere((c) => c.ring);
+      // Arrows whose tip lands on the final ring (State1->[*] and State2->[*]).
+      final intoRing = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) =>
+              l.head == ArrowHead.open && (l.to - ring.center).distance < 30)
+          .toList();
+      expect(intoRing.length, 2);
+      // One of them must start from State2 (right side), not the stale top-left
+      // position: its tail x must reach State2's column.
+      final maxTailX =
+          intoRing.map((l) => l.from.dx).reduce((a, b) => a > b ? a : b);
+      expect(maxTailX, greaterThanOrEqualTo(state2.rect.left - 5));
+    });
   });
 }
