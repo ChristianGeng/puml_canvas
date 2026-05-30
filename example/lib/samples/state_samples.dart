@@ -87,6 +87,7 @@ Z --> Y
     source: '''
 @startuml
 scale 600 width
+
 [*] -> State1
 State1 --> State2 : Succeeded
 State1 --> [*] : Aborted
@@ -102,6 +103,7 @@ state State3 {
 State3 --> State3 : Failed
 State3 --> [*] : Succeeded / Save Result
 State3 --> [*] : Aborted
+
 @enduml
 ''',
   ),
