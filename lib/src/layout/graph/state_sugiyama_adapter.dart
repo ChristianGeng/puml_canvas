@@ -79,12 +79,15 @@ Scene layoutStateDiagramWithSugiyama(
     );
   }
 
-  final builder = _StateGraphBuilder(measurer);
-  builder.collect(diagram.states, diagram.transitions);
-  final graph = builder.build();
-
-  final shapes = <SceneShape>[];
-  if (graph.nodes.isEmpty) {
+  final plan = _StatePlan.build(diagram);
+  final root = _layoutScope(
+    diagram.states,
+    plan.transitionsForScope(''),
+    measurer,
+    scope: '',
+    plan: plan,
+  );
+  if (root.shapes.isEmpty) {
     return wrapWithDecorations(
       Scene(
         size: Size.zero,
@@ -96,37 +99,11 @@ Scene layoutStateDiagramWithSugiyama(
     );
   }
 
-  // Composite states with descriptions need extra vertical space at the top
-  // of their cluster bbox (title + divider + desc lines + bottom pad). The
-  // builder pre-measured this; surface it to the coordinate phase via the
-  // per-cluster top-inset map.
-  final clusterTopInsets = <String, double>{
-    for (final draft in builder.clustersById.values)
-      if (draft.topInset > 0) draft.id: draft.topInset,
-  };
-  final result = runSugiyama(
-    graph,
-    coordinatesConfig: CoordinatesConfig(
-      nodeSpacing: _nodeSpacing,
-      layerSpacing: _layerSpacing,
-      clusterPadding: _clusterPadding,
-      clusterTitleHeight: _clusterTitleHeight,
-      clusterTopInsets: clusterTopInsets,
-    ),
-  );
-
-  final coords = result.coordinates;
-
-  shapes.addAll(_renderGraph(
-    builder,
-    graph,
-    result,
-    const Offset(_padding, _padding),
-    measurer,
-  ));
-
-  final width = coords.totalWidth + _padding * 2;
-  final height = coords.totalHeight + _padding * 2;
+  final shapes = <SceneShape>[
+    for (final s in root.shapes) _shiftShape(s, const Offset(_padding, _padding)),
+  ];
+  final width = root.size.width + _padding * 2;
+  final height = root.size.height + _padding * 2;
   return wrapWithDecorations(
     Scene(
       size: Size(width, height),
@@ -138,120 +115,342 @@ Scene layoutStateDiagramWithSugiyama(
   );
 }
 
-/// Renders a laid-out graph (cluster shells, nodes, routes) into scene shapes.
-/// [origin] is added to every coordinate; the top level passes the outer
-/// `_padding`, region sub-layouts pass `Offset.zero`.
-List<SceneShape> _renderGraph(
-  _StateGraphBuilder builder,
-  Graph graph,
-  SugiyamaResult result,
-  Offset origin,
-  TextMeasurer measurer,
-) {
-  final shapes = <SceneShape>[];
-  final coords = result.coordinates;
-  final routes = result.edgeRoutes;
+/// Global plan that assigns every transition (top-level or nested) to the
+/// scope where it should be laid out — the lowest-common-ancestor (LCA)
+/// container of its two endpoints. A transition declared inside one composite
+/// that references a state in a sibling composite is therefore lifted up to
+/// their common ancestor (often the root), so it routes between the two
+/// composites' shells rather than dangling inside the wrong one.
+class _StatePlan {
+  /// Scope path (`''` root, else `A`, `A/B`, …) -> transitions to lay out
+  /// there. The path matches the `scope` string threaded through `_layoutScope`
+  /// (root composites prefix-free, nested composites slash-joined).
+  final Map<String, List<StateTransition>> _byScope;
 
-  Offset translate(Offset p) => Offset(p.dx + origin.dx, p.dy + origin.dy);
+  const _StatePlan(this._byScope);
 
-  // Render composite-state shells first, outermost to innermost, so child
-  // nodes and inner clusters paint on top. Depth is the number of parent
-  // links to walk from the cluster up to a top-level container.
-  final clusterDepth = <String, int>{};
-  final clusterById = <String, GraphCluster>{
-    for (final c in graph.clusters) c.id: c,
-  };
-  int depthOf(String id) {
-    final cached = clusterDepth[id];
-    if (cached != null) return cached;
-    final c = clusterById[id];
-    final parent = c?.parentClusterId;
-    final d = parent == null ? 0 : depthOf(parent) + 1;
-    clusterDepth[id] = d;
-    return d;
-  }
-  for (final c in graph.clusters) {
-    depthOf(c.id);
-  }
-  final orderedClusters = [...graph.clusters]
-    ..sort((a, b) => depthOf(a.id).compareTo(depthOf(b.id)));
-  for (final c in orderedClusters) {
-    final box = coords.clusterBoxes[c.id];
-    if (box == null) continue;
-    final rect = box.shift(origin);
-    shapes.add(SceneRoundedBox(
-      rect: rect,
-      textStyle: _compositeHeaderStyle,
-      fill: _compositeFill,
-      stroke: _stateStroke,
-      cornerRadius: 12.0,
-    ));
-    final label = c.label ?? c.id;
-    if (label.isNotEmpty) {
-      final headerSize = measurer.measure(label, _compositeHeaderStyle);
-      shapes.add(SceneText(
-        offset: Offset(
-          rect.center.dx - headerSize.width / 2,
-          rect.top + (_clusterTitleHeight - headerSize.height) / 2,
-        ),
-        text: label,
-        textStyle: _compositeHeaderStyle,
-      ));
-    }
-    shapes.add(SceneLine(
-      from: Offset(rect.left, rect.top + _clusterTitleHeight),
-      to: Offset(rect.right, rect.top + _clusterTitleHeight),
-      head: null,
-      stroke: _stateStroke,
-    ));
-    // Composite description lines: stacked left-aligned below the divider,
-    // mirroring the leaf-state description block in `_emitNode`. The bbox
-    // already reserves enough vertical space via the cluster top inset.
-    final draft = builder.clustersById[c.id];
-    if (draft != null && draft.descriptions.isNotEmpty) {
-      var y = rect.top + _clusterTitleHeight + _stateDescriptionDividerPad;
-      for (var i = 0; i < draft.descriptions.length; i++) {
-        final desc = draft.descriptions[i];
-        final ds = draft.descriptionSizes[i];
-        shapes.add(SceneText(
-          offset: Offset(rect.left + _statePaddingX, y),
-          text: desc,
-          textStyle: _stateDescriptionStyle,
-        ));
-        y += ds.height;
+  List<StateTransition> transitionsForScope(String scope) =>
+      _byScope[scope] ?? const [];
+
+  static _StatePlan build(StateDiagram diagram) {
+    // Container path per state name: the slash-joined scope of its enclosing
+    // composite (`''` for a top-level state; `A` for a child of composite A;
+    // `A/B` for a child of nested composite B inside A). Concurrent regions
+    // are opaque (their interior transitions are handled by the region's own
+    // sub-layout), so we do not descend into them here for path mapping.
+    final containerOf = <String, String>{};
+    void mapStates(List<StateDecl> decls, String scope) {
+      for (final d in decls) {
+        containerOf[d.name] = scope;
+        if (d.concurrentRegions.isEmpty) {
+          final childScope = scope.isEmpty ? d.name : '$scope/${d.name}';
+          mapStates(d.nestedStates, childScope);
+        }
       }
     }
+    mapStates(diagram.states, '');
+
+    final byScope = <String, List<StateTransition>>{};
+    void assign(StateTransition t, String declScope) {
+      final scope = _lcaScope(t, declScope, containerOf);
+      byScope.putIfAbsent(scope, () => <StateTransition>[]).add(t);
+    }
+
+    void walk(List<StateDecl> decls, String scope) {
+      for (final d in decls) {
+        if (d.concurrentRegions.isNotEmpty) {
+          // Concurrent regions lay out their own nested transitions; skip.
+          continue;
+        }
+        final childScope = scope.isEmpty ? d.name : '$scope/${d.name}';
+        for (final t in d.nestedTransitions) {
+          assign(t, childScope);
+        }
+        walk(d.nestedStates, childScope);
+      }
+    }
+
+    for (final t in diagram.transitions) {
+      assign(t, '');
+    }
+    walk(diagram.states, '');
+
+    return _StatePlan(byScope);
   }
 
+  /// LCA scope for a transition: the longest common scope prefix of both
+  /// endpoints' container paths. Pseudo endpoints (`[*]`/`[H]`/`[H*]`) are
+  /// scope-local, so they anchor to the declaring scope rather than lifting.
+  static String _lcaScope(
+    StateTransition t,
+    String declScope,
+    Map<String, String> containerOf,
+  ) {
+    final fromPseudo = _isPseudoRef(t.from);
+    final toPseudo = _isPseudoRef(t.to);
+    if (fromPseudo && toPseudo) return declScope;
+    // For a pseudo endpoint, treat its path as the declaring scope.
+    final fromPath = fromPseudo
+        ? _scopeSegments(declScope)
+        : _endpointScope(t.from, declScope, containerOf);
+    final toPath = toPseudo
+        ? _scopeSegments(declScope)
+        : _endpointScope(t.to, declScope, containerOf);
+    final common = <String>[];
+    for (var i = 0; i < fromPath.length && i < toPath.length; i++) {
+      if (fromPath[i] == toPath[i]) {
+        common.add(fromPath[i]);
+      } else {
+        break;
+      }
+    }
+    return common.join('/');
+  }
+
+  /// Container scope segments for a real-state endpoint. Falls back to the
+  /// declaring scope when the name is unknown (e.g. declared only via a
+  /// transition).
+  static List<String> _endpointScope(
+    String ref,
+    String declScope,
+    Map<String, String> containerOf,
+  ) {
+    final c = containerOf[ref];
+    if (c == null) return _scopeSegments(declScope);
+    return _scopeSegments(c);
+  }
+
+  static List<String> _scopeSegments(String scope) =>
+      scope.isEmpty ? const [] : scope.split('/');
+}
+
+bool _isPseudoRef(String ref) =>
+    ref == '[*]' || ref == '[H]' || ref == '[H*]';
+
+/// Result of laying out one scope (the root, or one composite's interior) in
+/// LOCAL coordinates with origin (0,0).
+class _ScopeResult {
+  /// Scene shapes in local coordinates (shells before nodes before routes).
+  final List<SceneShape> shapes;
+
+  /// Bounding size of the laid-out content.
+  final Size size;
+
+  /// Absolute-local rect of every descendant state/leaf reachable from this
+  /// scope (keyed by state name), used by an ancestor scope to punch a
+  /// cross-container edge through to a nested leaf.
+  final Map<String, Rect> descendantRects;
+
+  const _ScopeResult({
+    required this.shapes,
+    required this.size,
+    required this.descendantRects,
+  });
+}
+
+/// Recursively lays out one scope: leaf states, stereotype pseudo states, and
+/// concurrent composites become sized nodes; each TRUE composite is laid out
+/// as its OWN sub-graph (origin 0,0) and embedded as a single sized node whose
+/// body carries the translated interior sub-scene. Transitions are lifted to
+/// this scope's direct children (LCA scoping); cross-container edges that
+/// originally targeted a nested leaf are reconciled after placement so the
+/// arrow punches through to that leaf's absolute position.
+_ScopeResult _layoutScope(
+  List<StateDecl> states,
+  List<StateTransition> transitions,
+  TextMeasurer measurer, {
+  required String scope,
+  required _StatePlan plan,
+}) {
+  final builder = _ScopeBuilder(measurer, scope, plan);
+  builder.collect(states, transitions);
+  final graph = builder.build();
+  if (graph.nodes.isEmpty) {
+    return const _ScopeResult(
+      shapes: [],
+      size: Size.zero,
+      descendantRects: {},
+    );
+  }
+
+  final result = runSugiyama(
+    graph,
+    coordinatesConfig: const CoordinatesConfig(
+      nodeSpacing: _nodeSpacing,
+      layerSpacing: _layerSpacing,
+      clusterPadding: _clusterPadding,
+      clusterTitleHeight: _clusterTitleHeight,
+    ),
+  );
+  final coords = result.coordinates;
+
+  final shapes = <SceneShape>[];
+  final descendantRects = <String, Rect>{};
+
+  // --- Nodes (and composite interiors) -------------------------------------
+  // Composite shells/headers and their translated interiors are emitted as
+  // part of the node pass so they paint before routes (preserving z-order).
   for (final node in graph.nodes) {
     final cx = coords.xByNode[node.id];
     final cy = coords.yByNode[node.id];
     if (cx == null || cy == null) continue;
-    final center = translate(Offset(cx, cy));
+    final center = Offset(cx, cy);
     final info = builder.infoById[node.id]!;
+    final rect = Rect.fromCenter(
+      center: center,
+      width: info.width,
+      height: info.height,
+    );
+    descendantRects[node.id] = rect;
+    final composite = info.composite;
+    if (composite != null) {
+      // Embed the recursive interior: shell + header + descriptions + divider,
+      // then translate the interior sub-scene into the body. Mirrors the
+      // concurrent-composite embedding.
+      _emitCompositeShell(shapes, info, rect, measurer);
+      // Center the interior horizontally in the body; the body top sits below
+      // the header/description inset.
+      final innerX =
+          rect.left + (rect.width - composite.interior.size.width) / 2;
+      final innerBy = Offset(innerX, rect.top + info.bodyTop);
+      for (final s in composite.interior.shapes) {
+        shapes.add(_shiftShape(s, innerBy));
+      }
+      // Project descendant rects to this scope's coordinate space so an
+      // ancestor edge can punch through to a deeply nested leaf.
+      composite.interior.descendantRects.forEach((name, r) {
+        descendantRects[name] = r.shift(innerBy);
+      });
+      continue;
+    }
     _emitNode(shapes, info, center, measurer);
   }
 
-  for (final route in routes.routes) {
+  // --- Routes --------------------------------------------------------------
+  for (final route in result.edgeRoutes.routes) {
     if (route.points.length < 2) continue;
-    var pts = route.points.map(translate).toList();
+    var pts = route.points.toList();
     final edgeInfo = builder.edgeInfoById[route.edgeId];
-    // Cluster-incident edges were redirected to an inner representative node;
-    // clip the polyline back to the referenced composite's boundary so the
-    // arrow terminates on the shell rather than inside it.
-    final srcBox = edgeInfo?.srcCluster == null
-        ? null
-        : coords.clusterBoxes[edgeInfo!.srcCluster];
-    final dstBox = edgeInfo?.dstCluster == null
-        ? null
-        : coords.clusterBoxes[edgeInfo!.dstCluster];
-    if (srcBox != null) pts = _clipHeadToBoundary(pts, srcBox.shift(origin));
-    if (dstBox != null) pts = _clipTailToBoundary(pts, dstBox.shift(origin));
+    if (edgeInfo == null) {
+      _emitRoute(shapes, pts, null, measurer);
+      continue;
+    }
+    // Source reconciliation.
+    pts = _reconcileEnd(
+      pts,
+      head: false,
+      targetName: edgeInfo.srcOriginal,
+      directChildId: edgeInfo.src,
+      descendantRects: descendantRects,
+    );
+    // Destination reconciliation.
+    pts = _reconcileEnd(
+      pts,
+      head: true,
+      targetName: edgeInfo.dstOriginal,
+      directChildId: edgeInfo.dst,
+      descendantRects: descendantRects,
+    );
     if (pts.length < 2) continue;
     _emitRoute(shapes, pts, edgeInfo, measurer);
   }
 
-  return shapes;
+  return _ScopeResult(
+    shapes: shapes,
+    size: Size(coords.totalWidth, coords.totalHeight),
+    descendantRects: descendantRects,
+  );
+}
+
+/// Reconcile one end of a route. When [targetName] names a nested leaf reached
+/// THROUGH a composite [directChildId], redirect the route's terminal point to
+/// that leaf's absolute center (clipped to its rect) so the arrow punches into
+/// the leaf. When [targetName] is null (the direct child IS the endpoint), trim
+/// the route so it terminates on the direct child's boundary.
+List<Offset> _reconcileEnd(
+  List<Offset> pts, {
+  required bool head,
+  required String? targetName,
+  required String directChildId,
+  required Map<String, Rect> descendantRects,
+}) {
+  if (targetName == null || targetName == directChildId) {
+    // The composite itself is the endpoint: terminate on its boundary.
+    final box = descendantRects[directChildId];
+    if (box == null) return pts;
+    return head ? _clipTailToBoundary(pts, box) : _clipHeadToBoundary(pts, box);
+  }
+  // Punch through to the nested leaf's absolute rect.
+  final leaf = descendantRects[targetName];
+  if (leaf == null) {
+    final box = descendantRects[directChildId];
+    if (box == null) return pts;
+    return head ? _clipTailToBoundary(pts, box) : _clipHeadToBoundary(pts, box);
+  }
+  final out = pts.toList();
+  if (head) {
+    final prev = out[out.length - 2];
+    final target = _clipPointIntoRect(prev, leaf.center, leaf);
+    out[out.length - 1] = target;
+  } else {
+    final next = out[1];
+    final target = _clipPointIntoRect(next, leaf.center, leaf);
+    out[0] = target;
+  }
+  return out;
+}
+
+/// Point on the boundary of [rect] along the segment from [from] toward
+/// [rect.center]; falls back to the center if the segment doesn't cross.
+Offset _clipPointIntoRect(Offset from, Offset center, Rect rect) {
+  final hit = _segmentRectCrossing(from, center, rect);
+  return hit ?? center;
+}
+
+/// Emits a composite shell: rounded box, centered header, divider, and any
+/// description lines below the divider (inside the reserved top inset).
+void _emitCompositeShell(
+  List<SceneShape> shapes,
+  _NodeInfo info,
+  Rect rect,
+  TextMeasurer measurer,
+) {
+  shapes.add(SceneRoundedBox(
+    rect: rect,
+    textStyle: _compositeHeaderStyle,
+    fill: _compositeFill,
+    stroke: _stateStroke,
+    cornerRadius: 12.0,
+  ));
+  final label = info.label;
+  if (label.isNotEmpty) {
+    final headerSize = measurer.measure(label, _compositeHeaderStyle);
+    shapes.add(SceneText(
+      offset: Offset(
+        rect.center.dx - headerSize.width / 2,
+        rect.top + (_clusterTitleHeight - headerSize.height) / 2,
+      ),
+      text: label,
+      textStyle: _compositeHeaderStyle,
+    ));
+  }
+  shapes.add(SceneLine(
+    from: Offset(rect.left, rect.top + _clusterTitleHeight),
+    to: Offset(rect.right, rect.top + _clusterTitleHeight),
+    head: null,
+    stroke: _stateStroke,
+  ));
+  if (info.descriptions.isNotEmpty) {
+    var y = rect.top + _clusterTitleHeight + _stateDescriptionDividerPad;
+    for (var i = 0; i < info.descriptions.length; i++) {
+      shapes.add(SceneText(
+        offset: Offset(rect.left + _statePaddingX, y),
+        text: info.descriptions[i],
+        textStyle: _stateDescriptionStyle,
+      ));
+      y += info.descriptionSizes[i].height;
+    }
+  }
 }
 
 /// Trim the tail of [pts] so it ends on the boundary of [box] (the dst end was
@@ -313,59 +512,25 @@ Offset? _segmentRectCrossing(Offset outside, Offset inside, Rect box) {
   return Offset(outside.dx + tEnter * dx, outside.dy + tEnter * dy);
 }
 
-/// Lays out a region's states/transitions in LOCAL coordinates (origin 0,0,
-/// no outer padding) and returns the shapes plus the bounding size.
-({List<SceneShape> shapes, Size size}) _layoutLocal(
-  List<StateDecl> states,
-  List<StateTransition> transitions,
-  TextMeasurer measurer,
-) {
-  final builder = _StateGraphBuilder(measurer);
-  builder.collect(states, transitions);
-  final graph = builder.build();
-  if (graph.nodes.isEmpty) {
-    return (shapes: const <SceneShape>[], size: Size.zero);
-  }
-  final clusterTopInsets = <String, double>{
-    for (final draft in builder.clustersById.values)
-      if (draft.topInset > 0) draft.id: draft.topInset,
-  };
-  final result = runSugiyama(
-    graph,
-    coordinatesConfig: CoordinatesConfig(
-      nodeSpacing: _nodeSpacing,
-      layerSpacing: _layerSpacing,
-      clusterPadding: _clusterPadding,
-      clusterTitleHeight: _clusterTitleHeight,
-      clusterTopInsets: clusterTopInsets,
-    ),
-  );
-  final shapes = _renderGraph(builder, graph, result, Offset.zero, measurer);
-  final coords = result.coordinates;
-  return (shapes: shapes, size: Size(coords.totalWidth, coords.totalHeight));
-}
-
 class _NodeInfo {
   final String id;
   final double width;
   final double height;
   final String label;
   final _PseudoKind? pseudoKind;
-  final String? clusterId;
-  /// True when this node is a concurrent composite (see [concurrent]).
-  final bool isFlattenedComposite;
-  /// PlantUML `A : foo` description lines for this leaf state. Empty for
-  /// pseudo states and flattened composites.
+  /// PlantUML `A : foo` description lines for this leaf/composite state.
   final List<String> descriptions;
-  /// Pre-measured size for each entry in [descriptions], used by `_emitNode`
-  /// to position description text without re-measuring.
   final List<Size> descriptionSizes;
-  /// Title text height (measured with `_stateStyle`); the divider sits below
-  /// the title at `top + _statePaddingY + titleHeight + divider pad`.
+  /// Title text height (measured with `_stateStyle`).
   final double titleHeight;
-  /// Non-null when this node is a concurrent composite; carries the pre-laid
-  /// region sub-shapes, their offsets, and the region divider lines.
+  /// Non-null when this node is a concurrent composite.
   final _ConcurrentLayout? concurrent;
+  /// Non-null when this node is a TRUE (sequential) composite laid out
+  /// recursively.
+  final _CompositeLayout? composite;
+  /// Y offset (from the node top) at which the body content begins — title
+  /// row plus any description block.
+  final double bodyTop;
 
   const _NodeInfo({
     required this.id,
@@ -373,12 +538,12 @@ class _NodeInfo {
     required this.height,
     required this.label,
     this.pseudoKind,
-    this.clusterId,
-    this.isFlattenedComposite = false,
     this.descriptions = const [],
     this.descriptionSizes = const [],
     this.titleHeight = 0.0,
     this.concurrent,
+    this.composite,
+    this.bodyTop = 0.0,
   });
 }
 
@@ -398,172 +563,232 @@ class _ConcurrentLayout {
   });
 }
 
-class _EdgeInfo {
-  final String? label;
-  /// Cluster id the edge's source/destination originally referenced when that
-  /// endpoint was a composite. The edge is redirected to a representative
-  /// member node for layout; the route is later clipped at this cluster's
-  /// boundary so the arrow terminates on the composite shell.
-  final String? srcCluster;
-  final String? dstCluster;
-  const _EdgeInfo({this.label, this.srcCluster, this.dstCluster});
+/// Pre-laid TRUE-composite interior: the recursive scope result for the
+/// composite's nested states/transitions.
+class _CompositeLayout {
+  final _ScopeResult interior;
+  const _CompositeLayout({required this.interior});
 }
 
-class _StateGraphBuilder {
+class _EdgeInfo {
+  final String? label;
+  /// The direct-child node id of the scope this edge's source/destination
+  /// resolves to (a leaf, composite, or pseudo node).
+  final String src;
+  final String dst;
+  /// When the source/destination originally named a nested leaf reached
+  /// THROUGH a composite, this is that leaf's name so the route can be punched
+  /// through after placement. Null when the direct child IS the endpoint.
+  final String? srcOriginal;
+  final String? dstOriginal;
+  const _EdgeInfo({
+    this.label,
+    required this.src,
+    required this.dst,
+    this.srcOriginal,
+    this.dstOriginal,
+  });
+}
+
+/// Builds the flat Sugiyama graph for ONE scope: leaf/pseudo/concurrent nodes
+/// plus recursively-embedded composite nodes, with edges lifted to the scope's
+/// direct children.
+class _ScopeBuilder {
   final TextMeasurer measurer;
 
-  // Preserves insertion order so the graph layout is deterministic.
+  /// Scope id used to make this scope's pseudo states distinct from siblings.
+  final String scope;
+
+  /// Global LCA plan, threaded to child composites for their sub-layouts.
+  final _StatePlan plan;
+
   final Map<String, _NodeInfo> infoById = <String, _NodeInfo>{};
   final Map<String, _EdgeInfo> edgeInfoById = <String, _EdgeInfo>{};
   final List<GraphEdge> _edges = <GraphEdge>[];
-  // Cluster id -> mutable definition under construction. Member ids are
-  // appended as nested children are walked. Exposed (via [clustersById]) so
-  // the renderer can look up extra per-cluster metadata (descriptions, title
-  // height, top inset) that doesn't live on [GraphCluster].
-  final Map<String, _ClusterDraft> _clusters = <String, _ClusterDraft>{};
-  Map<String, _ClusterDraft> get clustersById => _clusters;
-  // Tracks the parent cluster while recursing through nestedStates so each
-  // child gets the right clusterId stamped on its _NodeInfo.
-  final List<String> _clusterStack = <String>[];
+
+  /// Maps every descendant state name (at any depth) to the direct-child node
+  /// id of this scope that encloses it. Direct children map to themselves.
+  final Map<String, String> _directChildOf = <String, String>{};
+
   int _edgeSeq = 0;
 
-  _StateGraphBuilder(this.measurer);
+  _ScopeBuilder(this.measurer, this.scope, this.plan);
 
   void collect(List<StateDecl> states, List<StateTransition> transitions) {
-    // Resolution helper: PlantUML treats state names as globally unique within
-    // a diagram, so a DFS first-match is unambiguous in practice.
-    String resolve(String ref) {
-      if (ref == '[*]' || ref == '[H]' || ref == '[H*]') return ref;
-      // Look up by name across the entire (potentially nested) tree.
-      final found = _findStateByName(states, ref);
-      return found ?? ref;
-    }
-
     for (final decl in states) {
-      _addStateNode(decl);
+      _addDirectChild(decl);
     }
-
-    // Top-level transitions live in the root scope (scope == null); each
-    // composite's nested transitions live in that composite's scope so their
-    // [*]/[H]/[H*] pseudo states are distinct per-composite instances rather
-    // than collapsing onto a single shared global node.
     for (final t in transitions) {
-      _addEdge(t, resolve, null);
+      _addEdge(t);
     }
-    void walkNested(List<StateDecl> decls) {
-      for (final d in decls) {
-        // Pseudo scoping is intentionally root-level (null) for now: per-
-        // composite [*]/[H] instances are only correct once composites lay out
-        // recursively (each as its own sub-graph), otherwise their top-layer
-        // initial drags the cluster bbox up and overlaps sibling composites.
-        for (final t in d.nestedTransitions) {
-          _addEdge(t, resolve, null);
-        }
-        walkNested(d.nestedStates);
-        // Concurrent regions render via their own recursive sub-layouts in
-        // `_addConcurrentNode`; their nested transitions are intentionally not
-        // added to the outer graph (kept inside each region's sub-graph).
-      }
-    }
-    walkNested(states);
   }
 
-  void _addEdge(StateTransition t, String Function(String) resolve,
-      String? scope) {
-    var fromKey = _endpointKey(resolve(t.from), source: true, scope: scope);
-    var toKey = _endpointKey(resolve(t.to), source: false, scope: scope);
-    // An endpoint that names a composite (cluster) has no GraphNode. Redirect
-    // it to a representative member node so the edge participates in layout;
-    // the route is clipped back to the cluster boundary at render time.
-    String? srcCluster;
-    String? dstCluster;
-    if (!infoById.containsKey(fromKey)) {
-      if (!_clusters.containsKey(fromKey)) return;
-      final rep = _clusterRepresentative(fromKey);
-      if (rep == null) return;
-      srcCluster = fromKey;
-      fromKey = rep;
+  /// Add a direct child of this scope as a single sized node, recording the
+  /// names of all descendants so transitions targeting a nested leaf can be
+  /// lifted to this child.
+  void _addDirectChild(StateDecl decl) {
+    if (infoById.containsKey(decl.name)) return;
+    final stereo = _pseudoKindFromStereotype(decl.stereotype);
+    if (stereo != null) {
+      _addStereotypePseudo(decl.name, stereo);
+      _directChildOf[decl.name] = decl.name;
+      return;
     }
-    if (!infoById.containsKey(toKey)) {
-      if (!_clusters.containsKey(toKey)) return;
-      final rep = _clusterRepresentative(toKey);
-      if (rep == null) return;
-      dstCluster = toKey;
-      toKey = rep;
+    final hasNested =
+        decl.nestedStates.isNotEmpty || decl.nestedTransitions.isNotEmpty;
+    final hasConcurrent = decl.concurrentRegions.isNotEmpty;
+    if (hasConcurrent) {
+      _addConcurrentNode(decl);
+      _recordDescendants(decl, decl.name);
+      return;
     }
-    if (fromKey == toKey) return;
+    if (hasNested) {
+      _addCompositeNode(decl);
+      _recordDescendants(decl, decl.name);
+      return;
+    }
+    _addLeafNode(decl);
+    _directChildOf[decl.name] = decl.name;
+  }
+
+  /// Record every descendant state name under [decl] as enclosed by the
+  /// direct-child [childId].
+  void _recordDescendants(StateDecl decl, String childId) {
+    _directChildOf[decl.name] = childId;
+    for (final c in decl.nestedStates) {
+      _recordDescendants(c, childId);
+    }
+    for (final region in decl.concurrentRegions) {
+      for (final c in region) {
+        _recordDescendants(c, childId);
+      }
+    }
+  }
+
+  /// True composite: lay out its interior recursively and wrap as a sized node
+  /// whose size = interior size + header/description inset + body padding.
+  void _addCompositeNode(StateDecl decl) {
+    final childScope = scope.isEmpty ? decl.name : '$scope/${decl.name}';
+    final interior = _layoutScope(
+      decl.nestedStates,
+      plan.transitionsForScope(childScope),
+      measurer,
+      scope: childScope,
+      plan: plan,
+    );
+
+    final headerSize = measurer.measure(decl.label, _compositeHeaderStyle);
+    final descSizes = <Size>[];
+    var descBlockHeight = 0.0;
+    for (final d in decl.descriptions) {
+      final s = measurer.measure(d, _stateDescriptionStyle);
+      descSizes.add(s);
+      descBlockHeight += s.height;
+    }
+    var bodyTop = _clusterTitleHeight;
+    if (decl.descriptions.isNotEmpty) {
+      bodyTop = _clusterTitleHeight +
+          _stateDescriptionDividerPad +
+          descBlockHeight +
+          _stateDescriptionBottomPad;
+    }
+    bodyTop += _compositeBodyPad;
+
+    final innerW = interior.size.width;
+    final innerH = interior.size.height;
+    final width = math.max(
+      math.max(_minStateWidth, headerSize.width + _statePaddingX * 2),
+      innerW + _compositeBodyPad * 2,
+    );
+    final height = bodyTop + innerH + _compositeBodyPad;
+
+    infoById[decl.name] = _NodeInfo(
+      id: decl.name,
+      width: width,
+      height: height,
+      label: decl.label,
+      descriptions: decl.descriptions,
+      descriptionSizes: descSizes,
+      titleHeight: headerSize.height,
+      composite: _CompositeLayout(interior: interior),
+      bodyTop: bodyTop,
+    );
+  }
+
+  void _addEdge(StateTransition t) {
+    final from = _resolveEndpoint(t.from, source: true);
+    final to = _resolveEndpoint(t.to, source: false);
+    if (from == null || to == null) return;
+    if (from.directChild == to.directChild) return;
     final id = 'e${_edgeSeq++}';
-    _edges.add(GraphEdge(id: id, src: fromKey, dst: toKey));
-    edgeInfoById[id] =
-        _EdgeInfo(label: t.label, srcCluster: srcCluster, dstCluster: dstCluster);
+    _edges.add(GraphEdge(id: id, src: from.directChild, dst: to.directChild));
+    edgeInfoById[id] = _EdgeInfo(
+      label: t.label,
+      src: from.directChild,
+      dst: to.directChild,
+      srcOriginal: from.nestedTarget,
+      dstOriginal: to.nestedTarget,
+    );
   }
 
-  /// Resolve a composite [clusterId] to a representative leaf node id, walking
-  /// its members (descending into sub-clusters) so a cluster-incident edge has
-  /// a real node to attach to for layering and routing.
-  String? _clusterRepresentative(String clusterId) {
-    final draft = _clusters[clusterId];
-    if (draft == null) return null;
-    for (final m in draft.memberIds) {
-      final info = infoById[m];
-      if (info != null && info.pseudoKind == null) return m;
-      if (_clusters.containsKey(m)) {
-        final r = _clusterRepresentative(m);
-        if (r != null) return r;
+  /// Resolve a transition endpoint [ref] to the direct-child node id of this
+  /// scope, plus (when the ref names a nested leaf) the original target name.
+  ({String directChild, String? nestedTarget})? _resolveEndpoint(
+    String ref, {
+    required bool source,
+  }) {
+    if (ref == '[*]' || ref == '[H]' || ref == '[H*]') {
+      final id = _ensureScopedPseudo(ref, source: source);
+      return (directChild: id, nestedTarget: null);
+    }
+    final direct = _directChildOf[ref];
+    if (direct == null) {
+      // Unknown reference (e.g. a state declared only via a transition with no
+      // decl). Materialize it as a leaf so the edge still participates.
+      if (!infoById.containsKey(ref)) {
+        _addLeafNode(StateDecl(name: ref));
+        _directChildOf[ref] = ref;
       }
+      return (directChild: ref, nestedTarget: null);
     }
-    // Fall back to a pseudo member if the composite has no real-state child.
-    for (final m in draft.memberIds) {
-      if (infoById.containsKey(m)) return m;
-    }
-    return null;
+    final nestedTarget = direct == ref ? null : ref;
+    return (directChild: direct, nestedTarget: nestedTarget);
   }
 
-  /// Map a transition endpoint [ref] to a node id, materialising [*]/[H]/[H*]
-  /// pseudo nodes scoped to the enclosing composite [scope] (null = root) so
-  /// each composite owns its own initial/final/history instances.
-  String _endpointKey(String ref,
-      {required bool source, required String? scope}) {
+  /// Materialise a scope-local `[*]`/`[H]`/`[H*]` pseudo node once.
+  String _ensureScopedPseudo(String ref, {required bool source}) {
+    final _PseudoKind kind;
+    final String base;
     switch (ref) {
       case '[*]':
-        final kind = source ? _PseudoKind.initial : _PseudoKind.finalState;
-        final id =
-            _scopedPseudoId(source ? '[*]:initial' : '[*]:final', scope);
-        _ensurePseudo(id, kind, scope);
-        return id;
+        kind = source ? _PseudoKind.initial : _PseudoKind.finalState;
+        base = source ? '[*]:initial' : '[*]:final';
       case '[H]':
-        final id = _scopedPseudoId('[H]', scope);
-        _ensurePseudo(id, _PseudoKind.historyShallow, scope);
-        return id;
+        kind = _PseudoKind.historyShallow;
+        base = '[H]';
       case '[H*]':
-        final id = _scopedPseudoId('[H*]', scope);
-        _ensurePseudo(id, _PseudoKind.historyDeep, scope);
-        return id;
+        kind = _PseudoKind.historyDeep;
+        base = '[H*]';
       default:
-        return ref;
+        kind = _PseudoKind.initial;
+        base = ref;
     }
-  }
-
-  String _scopedPseudoId(String base, String? scope) =>
-      scope == null ? base : '$base@$scope';
-
-  /// Create a scoped pseudo node once, stamping it into [scope]'s cluster so
-  /// the coordinate phase nests it inside the right composite bbox.
-  void _ensurePseudo(String id, _PseudoKind kind, String? scope) {
-    if (infoById.containsKey(id)) return;
-    final r = (kind == _PseudoKind.historyShallow ||
-            kind == _PseudoKind.historyDeep)
-        ? _historyRadius
-        : _pseudoRadius;
-    infoById[id] = _NodeInfo(
-      id: id,
-      width: r * 2,
-      height: r * 2,
-      label: '',
-      pseudoKind: kind,
-      clusterId: scope,
-    );
-    if (scope != null) _clusters[scope]?.memberIds.add(id);
+    final id = scope.isEmpty ? base : '$base@$scope';
+    if (!infoById.containsKey(id)) {
+      final r = (kind == _PseudoKind.historyShallow ||
+              kind == _PseudoKind.historyDeep)
+          ? _historyRadius
+          : _pseudoRadius;
+      infoById[id] = _NodeInfo(
+        id: id,
+        width: r * 2,
+        height: r * 2,
+        label: '',
+        pseudoKind: kind,
+      );
+      _directChildOf[id] = id;
+    }
+    return id;
   }
 
   Graph build() {
@@ -574,92 +799,15 @@ class _StateGraphBuilder {
           width: info.width,
           height: info.height,
           label: info.label,
-          clusterId: info.clusterId,
-        ),
-    ];
-    final clusters = <GraphCluster>[
-      for (final draft in _clusters.values)
-        GraphCluster(
-          id: draft.id,
-          label: draft.label,
-          parentClusterId: draft.parentClusterId,
-          memberIds: List.unmodifiable(draft.memberIds),
         ),
     ];
     return Graph(
       nodes: nodes,
       edges: List.unmodifiable(_edges),
-      clusters: List.unmodifiable(clusters),
     );
   }
 
-  void _addStateNode(StateDecl decl) {
-    if (infoById.containsKey(decl.name)) return;
-    if (_clusters.containsKey(decl.name)) return;
-    final stereo = _pseudoKindFromStereotype(decl.stereotype);
-    if (stereo != null) {
-      _addStereotypePseudo(decl.name, stereo);
-      return;
-    }
-    final hasNested =
-        decl.nestedStates.isNotEmpty || decl.nestedTransitions.isNotEmpty;
-    final hasConcurrent = decl.concurrentRegions.isNotEmpty;
-    if (hasNested && !hasConcurrent) {
-      // True composite: emit a GraphCluster and recurse into nested states.
-      // The composite itself has no GraphNode; the bbox is derived from its
-      // children + cluster padding by `assignCoordinates`.
-      final parent = _clusterStack.isEmpty ? null : _clusterStack.last;
-      // Pre-measure the title and any description lines so the bbox can
-      // reserve enough vertical space at the top for them. Mirrors the leaf
-      // description block: divider pad above and below, then stacked desc
-      // lines, then a bottom pad before the first child node.
-      final headerSize = measurer.measure(decl.label, _compositeHeaderStyle);
-      final descSizes = <Size>[];
-      var descBlockHeight = 0.0;
-      for (final d in decl.descriptions) {
-        final s = measurer.measure(d, _stateDescriptionStyle);
-        descSizes.add(s);
-        descBlockHeight += s.height;
-      }
-      // Default cluster top inset is just `_clusterTitleHeight` (handled by
-      // CoordinatesConfig). When there are descriptions we extend it by the
-      // divider gap + description block + bottom pad so the child nodes have
-      // room to sit below the description rows.
-      var topInset = 0.0;
-      if (decl.descriptions.isNotEmpty) {
-        topInset = _clusterTitleHeight +
-            _stateDescriptionDividerPad +
-            descBlockHeight +
-            _stateDescriptionBottomPad;
-      }
-      final draft = _ClusterDraft(
-        id: decl.name,
-        label: decl.label,
-        parentClusterId: parent,
-        descriptions: decl.descriptions,
-        descriptionSizes: descSizes,
-        titleHeight: headerSize.height,
-        topInset: topInset,
-      );
-      _clusters[decl.name] = draft;
-      _clusterStack.add(decl.name);
-      for (final child in decl.nestedStates) {
-        _addStateNode(child);
-        // After adding, attach the child as a member of this cluster.
-        if (infoById.containsKey(child.name)) {
-          draft.memberIds.add(child.name);
-        } else if (_clusters.containsKey(child.name)) {
-          draft.memberIds.add(child.name);
-        }
-      }
-      _clusterStack.removeLast();
-      return;
-    }
-    if (hasConcurrent) {
-      _addConcurrentNode(decl);
-      return;
-    }
-    // Leaf state.
+  void _addLeafNode(StateDecl decl) {
     final titleSize = measurer.measure(decl.label, _stateStyle);
     final showDescriptions = decl.descriptions.isNotEmpty;
     var contentWidth = titleSize.width;
@@ -673,26 +821,20 @@ class _StateGraphBuilder {
         descBlockHeight += s.height;
       }
     }
-    final width =
-        math.max(_minStateWidth, contentWidth + _statePaddingX * 2);
-    var height =
-        math.max(_minStateHeight, titleSize.height + _statePaddingY * 2);
+    final width = math.max(_minStateWidth, contentWidth + _statePaddingX * 2);
+    var height = math.max(_minStateHeight, titleSize.height + _statePaddingY * 2);
     if (showDescriptions) {
-      // Mirrors `state_layout.dart`: padded title row, divider with pad on
-      // each side, description block, bottom pad.
       height = _statePaddingY +
           titleSize.height +
           _stateDescriptionDividerPad * 2 +
           descBlockHeight +
           _stateDescriptionBottomPad;
     }
-    final parentCluster = _clusterStack.isEmpty ? null : _clusterStack.last;
     infoById[decl.name] = _NodeInfo(
       id: decl.name,
       width: width,
       height: height,
       label: decl.label,
-      clusterId: parentCluster,
       descriptions: showDescriptions ? decl.descriptions : const [],
       descriptionSizes: showDescriptions ? descSizes : const [],
       titleHeight: titleSize.height,
@@ -712,7 +854,18 @@ class _StateGraphBuilder {
           .where((t) =>
               _isInRegion(t.from, region) && _isInRegion(t.to, region))
           .toList(growable: false);
-      final laid = _layoutLocal(region, relevant, measurer);
+      // A region is an independent sub-diagram: build its own LCA plan so any
+      // composites nested inside the region lay out recursively too.
+      final regionPlan = _StatePlan.build(
+        StateDiagram(states: region, transitions: relevant),
+      );
+      final laid = _layoutScope(
+        region,
+        regionPlan.transitionsForScope(''),
+        measurer,
+        scope: '',
+        plan: regionPlan,
+      );
       regionShapesList.add(laid.shapes);
       regionSizes.add(laid.size);
     }
@@ -725,7 +878,6 @@ class _StateGraphBuilder {
     double width;
     double height;
     if (!horizontal) {
-      // Vertical stack: regions top-to-bottom, horizontal dashed dividers.
       var maxRegionWidth = 0.0;
       for (final s in regionSizes) {
         if (s.width > maxRegionWidth) maxRegionWidth = s.width;
@@ -757,14 +909,11 @@ class _StateGraphBuilder {
         }
       }
     } else {
-      // Horizontal stack: regions left-to-right, vertical dashed dividers.
       var maxRegionHeight = 0.0;
       for (final s in regionSizes) {
         if (s.height > maxRegionHeight) maxRegionHeight = s.height;
       }
-      height = _clusterTitleHeight +
-          _compositeBodyPad * 2 +
-          maxRegionHeight;
+      height = _clusterTitleHeight + _compositeBodyPad * 2 + maxRegionHeight;
       var sumWidths = 0.0;
       for (final s in regionSizes) {
         sumWidths += s.width;
@@ -789,14 +938,11 @@ class _StateGraphBuilder {
       }
     }
 
-    final parentCluster = _clusterStack.isEmpty ? null : _clusterStack.last;
     infoById[decl.name] = _NodeInfo(
       id: decl.name,
       width: width,
       height: height,
       label: decl.label,
-      clusterId: parentCluster,
-      isFlattenedComposite: true,
       titleHeight: headerSize.height,
       concurrent: _ConcurrentLayout(
         regionShapes: regionShapesList,
@@ -807,8 +953,7 @@ class _StateGraphBuilder {
     );
   }
 
-  /// True when [ref] belongs to [region] (or is the `[*]` pseudo). Mirrors the
-  /// legacy region-membership check in `state_layout.dart`.
+  /// True when [ref] belongs to [region] (or is the `[*]` pseudo).
   bool _isInRegion(String ref, List<StateDecl> region) {
     if (ref == '[*]') return true;
     for (final s in region) {
@@ -817,23 +962,7 @@ class _StateGraphBuilder {
     return false;
   }
 
-  void _addPseudoNode(String id, _PseudoKind kind) {
-    if (infoById.containsKey(id)) return;
-    final r = (kind == _PseudoKind.historyShallow ||
-            kind == _PseudoKind.historyDeep)
-        ? _historyRadius
-        : _pseudoRadius;
-    infoById[id] = _NodeInfo(
-      id: id,
-      width: r * 2,
-      height: r * 2,
-      label: '',
-      pseudoKind: kind,
-    );
-  }
-
   void _addStereotypePseudo(String name, _PseudoKind kind) {
-    final parentCluster = _clusterStack.isEmpty ? null : _clusterStack.last;
     switch (kind) {
       case _PseudoKind.choice:
         infoById[name] = _NodeInfo(
@@ -842,7 +971,6 @@ class _StateGraphBuilder {
           height: 24,
           label: '',
           pseudoKind: kind,
-          clusterId: parentCluster,
         );
         return;
       case _PseudoKind.fork:
@@ -853,67 +981,26 @@ class _StateGraphBuilder {
           height: 8,
           label: '',
           pseudoKind: kind,
-          clusterId: parentCluster,
         );
         return;
       case _PseudoKind.initial:
       case _PseudoKind.finalState:
       case _PseudoKind.historyShallow:
       case _PseudoKind.historyDeep:
-        _addPseudoNode(name, kind);
+        final r = (kind == _PseudoKind.historyShallow ||
+                kind == _PseudoKind.historyDeep)
+            ? _historyRadius
+            : _pseudoRadius;
+        infoById[name] = _NodeInfo(
+          id: name,
+          width: r * 2,
+          height: r * 2,
+          label: '',
+          pseudoKind: kind,
+        );
         return;
     }
   }
-
-  /// DFS first-match lookup for a state name anywhere in the tree (top-level
-  /// or nested through nestedStates/concurrentRegions). Returns the matched
-  /// state's `name` (which is also its node id).
-  String? _findStateByName(List<StateDecl> decls, String name) {
-    for (final d in decls) {
-      if (d.name == name) return d.name;
-      final inNested = _findStateByName(d.nestedStates, name);
-      if (inNested != null) return inNested;
-      for (final region in d.concurrentRegions) {
-        final inRegion = _findStateByName(region, name);
-        if (inRegion != null) return inRegion;
-      }
-    }
-    return null;
-  }
-}
-
-/// Mutable builder helper for a [GraphCluster]: collects member ids during the
-/// DFS so we can freeze them into an immutable cluster at build time.
-class _ClusterDraft {
-  final String id;
-  final String? label;
-  final String? parentClusterId;
-  final List<String> memberIds = <String>[];
-  /// PlantUML `Outer : foo` description lines attached to this composite
-  /// state. Rendered below the cluster title + divider, inside the bbox's
-  /// extra top inset (see [topInset]).
-  final List<String> descriptions;
-  /// Pre-measured size per entry in [descriptions], used to position text
-  /// without re-measuring at render time.
-  final List<Size> descriptionSizes;
-  /// Title text height (measured with `_compositeHeaderStyle`); used to place
-  /// the divider line just below the title row.
-  final double titleHeight;
-  /// Extra top inset (in addition to the title row) requested for this
-  /// cluster's bbox — 0 when there are no descriptions; otherwise the height
-  /// of the description block plus its dividers/pads. Passed to
-  /// [CoordinatesConfig.clusterTopInsets].
-  final double topInset;
-
-  _ClusterDraft({
-    required this.id,
-    this.label,
-    this.parentClusterId,
-    this.descriptions = const [],
-    this.descriptionSizes = const [],
-    this.titleHeight = 0.0,
-    this.topInset = 0.0,
-  });
 }
 
 _PseudoKind? _pseudoKindFromStereotype(String? stereotype) {
@@ -1051,9 +1138,6 @@ void _emitNode(
     ));
     return;
   }
-  // Description path: paint the shell without a label so we can place the
-  // title, divider, and description lines explicitly. Matches the legacy
-  // `_NodeKind.simple` description branch in `state_layout.dart`.
   shapes.add(SceneRoundedBox(
     rect: rect,
     textStyle: _stateStyle,
@@ -1082,11 +1166,10 @@ void _emitNode(
   ));
   var y = dividerY + _stateDescriptionDividerPad;
   for (var i = 0; i < info.descriptions.length; i++) {
-    final desc = info.descriptions[i];
     final ds = info.descriptionSizes[i];
     shapes.add(SceneText(
       offset: Offset(rect.left + _statePaddingX, y),
-      text: desc,
+      text: info.descriptions[i],
       textStyle: _stateDescriptionStyle,
     ));
     y += ds.height;
@@ -1124,7 +1207,7 @@ void _emitRoute(
 }
 
 /// Returns a copy of [shape] translated by [by]. Handles every shape type a
-/// region sub-layout can emit; unknown types are returned unshifted.
+/// sub-layout can emit; unknown types are returned unshifted.
 SceneShape _shiftShape(SceneShape shape, Offset by) {
   switch (shape) {
     case SceneRoundedBox():

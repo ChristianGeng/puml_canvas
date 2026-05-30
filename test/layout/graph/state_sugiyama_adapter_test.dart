@@ -766,4 +766,180 @@ void main() {
       expect(texts.contains('Inner'), isTrue);
     });
   });
+
+  group('recursive composite layout', () {
+    // The canonical PlantUML NotShooting/Configuring example. Each composite
+    // owns its own [*] initial and lays out as its own recursive sub-graph;
+    // sibling composites stack vertically without overlapping; cross-container
+    // EvConfig transitions route between the two composites' shells.
+    StateDiagram canonical() => _parseStateDiagram(
+          '@startuml\n'
+          '[*] --> NotShooting\n'
+          'state NotShooting {\n'
+          '  [*] --> Idle\n'
+          '  Idle --> Configuring : EvConfig\n'
+          '  Configuring --> Idle : EvConfig\n'
+          '}\n'
+          'state Configuring {\n'
+          '  [*] --> NewValueSelection\n'
+          '  NewValueSelection --> NewValuePreview : EvNewValue\n'
+          '  NewValuePreview --> NewValueSelection : EvNewValueRejected\n'
+          '  NewValuePreview --> NewValueSelection : EvNewValueSaved\n'
+          '  state NewValuePreview { State1 -> State2 }\n'
+          '}\n'
+          '@enduml\n',
+        );
+
+    SceneRoundedBox boxLabelled(Scene scene, String label) => scene.shapes
+        .whereType<SceneRoundedBox>()
+        .firstWhere((b) => b.label == label);
+
+    // The composite shell whose rect contains [child]'s center but is itself
+    // the smallest such null-label box (so a nested shell wins over an outer).
+    SceneRoundedBox shellContaining(Scene scene, Rect child) {
+      final shells = scene.shapes
+          .whereType<SceneRoundedBox>()
+          .where((b) => b.label == null && b.rect.contains(child.center))
+          .toList();
+      shells.sort((a, b) =>
+          (a.rect.width * a.rect.height).compareTo(b.rect.width * b.rect.height));
+      return shells.first;
+    }
+
+    test('all leaf labels present', () {
+      final scene = layoutStateDiagramWithSugiyama(canonical(), measurer);
+      final labels = <String>{
+        for (final s in scene.shapes.whereType<SceneRoundedBox>())
+          if (s.label != null) s.label!,
+      };
+      for (final name in ['Idle', 'NewValueSelection', 'State1', 'State2']) {
+        expect(labels.contains(name), isTrue, reason: name);
+      }
+    });
+
+    test('three initial dots: one per scope, each inside its composite shell',
+        () {
+      final scene = layoutStateDiagramWithSugiyama(canonical(), measurer);
+      final dots = scene.shapes
+          .whereType<SceneCircle>()
+          .where((c) => !c.ring)
+          .toList();
+      expect(dots.length, 3);
+
+      // NotShooting and Configuring shells: the two outer composite shells.
+      final idle = boxLabelled(scene, 'Idle');
+      final nvs = boxLabelled(scene, 'NewValueSelection');
+      final notShooting = shellContaining(scene, idle.rect);
+      final configuring = shellContaining(scene, nvs.rect);
+
+      // Root dot: above NotShooting, not inside either composite shell.
+      final rootDots = dots
+          .where((d) =>
+              !notShooting.rect.contains(d.center) &&
+              !configuring.rect.contains(d.center))
+          .toList();
+      expect(rootDots.length, 1);
+      expect(rootDots.single.center.dy, lessThan(notShooting.rect.top));
+
+      // One dot inside NotShooting's shell, one inside Configuring's shell.
+      final inNotShooting =
+          dots.where((d) => notShooting.rect.contains(d.center)).toList();
+      final inConfiguring =
+          dots.where((d) => configuring.rect.contains(d.center)).toList();
+      expect(inNotShooting.length, 1);
+      expect(inConfiguring.length, 1);
+    });
+
+    test('NotShooting shell sits above Configuring shell, no overlap', () {
+      final scene = layoutStateDiagramWithSugiyama(canonical(), measurer);
+      final idle = boxLabelled(scene, 'Idle');
+      final nvs = boxLabelled(scene, 'NewValueSelection');
+      final notShooting = shellContaining(scene, idle.rect);
+      final configuring = shellContaining(scene, nvs.rect);
+
+      const eps = 1.0;
+      expect(notShooting.rect.bottom, lessThanOrEqualTo(configuring.rect.top + eps));
+      // No rect overlap between the two sibling shells.
+      expect(notShooting.rect.overlaps(configuring.rect), isFalse);
+    });
+
+    test('all five transition labels render', () {
+      final scene = layoutStateDiagramWithSugiyama(canonical(), measurer);
+      final texts =
+          scene.shapes.whereType<SceneText>().map((t) => t.text).toList();
+      expect(texts.where((t) => t == 'EvConfig').length, 2);
+      expect(texts.contains('EvNewValue'), isTrue);
+      expect(texts.contains('EvNewValueRejected'), isTrue);
+      expect(texts.contains('EvNewValueSaved'), isTrue);
+    });
+
+    test('NewValuePreview shell strictly inside Configuring; State1/2 inside it',
+        () {
+      final scene = layoutStateDiagramWithSugiyama(canonical(), measurer);
+      final nvs = boxLabelled(scene, 'NewValueSelection');
+      final configuring = shellContaining(scene, nvs.rect);
+      final s1 = boxLabelled(scene, 'State1');
+      final s2 = boxLabelled(scene, 'State2');
+      final preview = shellContaining(scene, s1.rect);
+
+      // Preview shell strictly inside Configuring shell.
+      expect(preview.rect.left, greaterThan(configuring.rect.left));
+      expect(preview.rect.top, greaterThan(configuring.rect.top));
+      expect(preview.rect.right, lessThan(configuring.rect.right));
+      expect(preview.rect.bottom, lessThan(configuring.rect.bottom));
+
+      // State1/State2 inside the preview shell.
+      expect(preview.rect.contains(s1.rect.center), isTrue);
+      expect(preview.rect.contains(s2.rect.center), isTrue);
+    });
+
+    test('EvConfig routes connect NotShooting and Configuring shells', () {
+      final scene = layoutStateDiagramWithSugiyama(canonical(), measurer);
+      final idle = boxLabelled(scene, 'Idle');
+      final nvs = boxLabelled(scene, 'NewValueSelection');
+      final notShooting = shellContaining(scene, idle.rect);
+      final configuring = shellContaining(scene, nvs.rect);
+
+      // The two EvConfig label texts identify their route midpoints; instead,
+      // assert that arrowhead endpoints exist near both shells' boundaries.
+      final arrows = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head == ArrowHead.open)
+          .toList();
+
+      // Gather all route endpoints (segment ends) from arrow-tipped segments.
+      bool nearShell(Offset p, Rect shell) {
+        final inflated = shell.inflate(20.0);
+        return inflated.contains(p) &&
+            (!shell.deflate(2.0).contains(p) || shell.contains(p));
+      }
+
+      // At least one arrow segment touches near the NotShooting shell and at
+      // least one near the Configuring shell (the EvConfig pair crosses the
+      // boundary between the two composites).
+      final touchNotShooting = arrows.any((a) =>
+          nearShell(a.from, notShooting.rect) ||
+          nearShell(a.to, notShooting.rect));
+      final touchConfiguring = arrows.any((a) =>
+          nearShell(a.from, configuring.rect) ||
+          nearShell(a.to, configuring.rect));
+      expect(touchNotShooting, isTrue);
+      expect(touchConfiguring, isTrue);
+
+      // A route endpoint should land exactly on one of Configuring's
+      // horizontal boundaries (the composite is the EvConfig destination/
+      // source, terminated at its shell rather than punched through).
+      final onConfiguringBoundary = arrows.any((a) {
+        for (final p in [a.from, a.to]) {
+          final onTop = (p.dy - configuring.rect.top).abs() < 0.5;
+          final onBottom = (p.dy - configuring.rect.bottom).abs() < 0.5;
+          final withinX =
+              p.dx >= configuring.rect.left && p.dx <= configuring.rect.right;
+          if ((onTop || onBottom) && withinX) return true;
+        }
+        return false;
+      });
+      expect(onConfiguringBoundary, isTrue);
+    });
+  });
 }
