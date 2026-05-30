@@ -111,6 +111,8 @@ class ActivityLayout implements DiagramLayout {
         return s.rect;
       case SceneDiamond():
         return s.rect;
+      case SceneTriangle():
+        return s.rect;
       case SceneRoundedBox():
         return s.rect;
       case SceneCircle():

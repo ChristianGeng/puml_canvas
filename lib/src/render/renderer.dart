@@ -40,6 +40,8 @@ class Renderer {
           _drawEllipse(canvas, shape);
         case SceneDiamond():
           _drawDiamond(canvas, shape);
+        case SceneTriangle():
+          _drawTriangle(canvas, shape);
         case SceneCircle():
           _drawCircle(canvas, shape);
         case SceneRoundedBox():
@@ -153,6 +155,30 @@ class Renderer {
         ),
       );
     }
+  }
+
+  void _drawTriangle(Canvas canvas, SceneTriangle t) {
+    final r = t.rect;
+    final path = Path()
+      ..moveTo(r.center.dx, r.top)
+      ..lineTo(r.right, r.bottom)
+      ..lineTo(r.left, r.bottom)
+      ..close();
+    if (t.fill.a > 0) {
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = t.fill
+          ..style = PaintingStyle.fill,
+      );
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = t.stroke
+        ..strokeWidth = t.strokeWidth
+        ..style = PaintingStyle.stroke,
+    );
   }
 
   void _drawCircle(Canvas canvas, SceneCircle c) {

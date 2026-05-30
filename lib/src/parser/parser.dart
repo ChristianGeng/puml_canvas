@@ -3024,7 +3024,30 @@ class Parser {
           concurrentRegions: decl.concurrentRegions.isNotEmpty
               ? decl.concurrentRegions
               : existing.concurrentRegions,
+          descriptions: <String>[
+            ...existing.descriptions,
+            ...decl.descriptions,
+          ],
+          stereotype: decl.stereotype ?? existing.stereotype,
+          horizontalRegions:
+              decl.horizontalRegions || existing.horizontalRegions,
         );
+        return;
+      }
+      // Suppress auto-declaration of a top-level state when the same name
+      // already appears nested inside a previously-declared composite. This
+      // avoids duplicate top-level boxes when a cross-container transition
+      // (e.g. `X --> Z` between siblings nested under different parents)
+      // is parsed AFTER the containers have been declared. The auto-declared
+      // stubs carry no payload (no displayName / nested children), so we can
+      // safely drop them when a richer or equivalently-named nested state
+      // already exists in the tree.
+      if (decl.displayName == null &&
+          decl.nestedStates.isEmpty &&
+          decl.nestedTransitions.isEmpty &&
+          decl.concurrentRegions.isEmpty &&
+          decl.descriptions.isEmpty &&
+          _findNestedStateByName(states, decl.name)) {
         return;
       }
       byName[decl.name] = states.length;
@@ -3158,8 +3181,10 @@ class Parser {
           'Expected state name, got ${t.type}', t.line, t.column);
     }
 
+    String? stereotype;
     if (_check(TokenType.stereotype)) {
-      _advance();
+      final lex = _advance().lexeme;
+      if (lex.isNotEmpty) stereotype = lex;
     }
     // PlantUML inline state styling: `#color[;key:value]...` for the
     // background and `##[modifier]color` for the border. Both lex to a
@@ -3168,14 +3193,24 @@ class Parser {
     while (_check(TokenType.hashColor)) {
       _advance();
     }
+    // Stereotype can also appear *after* a `#color` styling token on the
+    // same declaration line; accept that ordering too so that
+    // `state X #lightblue <<choice>>` parses the same as
+    // `state X <<choice>> #lightblue`.
+    if (stereotype == null && _check(TokenType.stereotype)) {
+      final lex = _advance().lexeme;
+      if (lex.isNotEmpty) stereotype = lex;
+    }
     // Optional trailing description: `state Foo : text`. The lexer emits
     // `colon` + `text` for whatever follows the colon (everything up to
-    // the next newline). Accept and currently discard — the display name
-    // is still derived from the alias form when provided.
+    // the next newline). Captured into [descriptions] for rendering below
+    // the state title; the display name is still derived from the alias
+    // form when provided.
+    final declDescriptions = <String>[];
     if (_check(TokenType.colon)) {
       _advance();
       if (_check(TokenType.text)) {
-        _advance();
+        declDescriptions.add(_advance().lexeme);
       }
     }
 
@@ -3184,6 +3219,7 @@ class Parser {
     final regions = <List<StateDecl>>[];
     var currentRegion = <StateDecl>[];
     var hasRegions = false;
+    var horizontalRegions = false;
 
     if (_check(TokenType.leftBrace)) {
       _advance();
@@ -3206,6 +3242,13 @@ class Parser {
             concurrentRegions: decl.concurrentRegions.isNotEmpty
                 ? decl.concurrentRegions
                 : existing.concurrentRegions,
+            descriptions: <String>[
+              ...existing.descriptions,
+              ...decl.descriptions,
+            ],
+            stereotype: decl.stereotype ?? existing.stereotype,
+            horizontalRegions:
+                decl.horizontalRegions || existing.horizontalRegions,
           );
           return;
         }
@@ -3219,6 +3262,9 @@ class Parser {
           !_check(TokenType.endUml)) {
         if (_check(TokenType.minusMinus) ||
             _check(TokenType.doublePipe)) {
+          if (_check(TokenType.doublePipe)) {
+            horizontalRegions = true;
+          }
           _advance();
           hasRegions = true;
           regions.add(List<StateDecl>.from(currentRegion));
@@ -3254,7 +3300,31 @@ class Parser {
       concurrentRegions: hasRegions
           ? List.unmodifiable(regions.map(List<StateDecl>.unmodifiable))
           : const [],
+      descriptions: List.unmodifiable(declDescriptions),
+      stereotype: stereotype,
+      horizontalRegions: hasRegions && horizontalRegions,
     );
+  }
+
+  /// True when [name] appears as a nested state anywhere inside [states]
+  /// (recursively walking nestedStates and concurrentRegions). Used to
+  /// suppress duplicate top-level state stubs that the implicit-declaration
+  /// path would otherwise emit when a cross-container transition references
+  /// a state already declared inside a composite.
+  bool _findNestedStateByName(List<StateDecl> states, String name) {
+    for (final s in states) {
+      for (final n in s.nestedStates) {
+        if (n.name == name) return true;
+        if (_findNestedStateByName([n], name)) return true;
+      }
+      for (final region in s.concurrentRegions) {
+        for (final n in region) {
+          if (n.name == name) return true;
+          if (_findNestedStateByName([n], name)) return true;
+        }
+      }
+    }
+    return false;
   }
 
   /// True when the current token is a `frame` / `folder` / etc. container
@@ -3313,25 +3383,30 @@ class Parser {
       void Function(StateDecl) addState) {
     final from = _readStateRef();
     // `name : description` form — a member-style state description that
-    // attaches to an already-declared (or implicitly-declared) state. The
-    // description currently has no AST slot; we accept and discard so the
-    // surrounding diagram parses without error.
+    // attaches to an already-declared (or implicitly-declared) state. We
+    // capture the text into [StateDecl.descriptions] so the renderer can
+    // display the lines below the state title.
     if (_check(TokenType.colon)) {
       _advance();
+      String? desc;
       if (_check(TokenType.text)) {
-        _advance();
+        desc = _advance().lexeme;
       }
-      if (from != '[*]') {
-        addState(StateDecl(name: from));
+      if (!_isStatePseudoRef(from)) {
+        addState(StateDecl(
+          name: from,
+          descriptions: desc != null ? <String>[desc] : const <String>[],
+        ));
       }
       return null;
     }
     // PlantUML bare state declaration with a stereotype but no `state` keyword
     // (e.g. `end <<end>>`). Accept the stereotype and any trailing line-tail
     // styling as an implicit state declaration so the surrounding diagram
-    // parses cleanly. Visual rendering of the stereotype is deferred.
+    // parses cleanly. The stereotype rides on the StateDecl so layouts can
+    // dispatch pseudo-state shapes (start/end/choice/fork/join).
     if (_check(TokenType.stereotype)) {
-      _advance();
+      final stereo = _advance().lexeme;
       while (_check(TokenType.hashColor)) {
         _advance();
       }
@@ -3339,8 +3414,11 @@ class Parser {
         _advance();
         if (_check(TokenType.text)) _advance();
       }
-      if (from != '[*]') {
-        addState(StateDecl(name: from));
+      if (!_isStatePseudoRef(from)) {
+        addState(StateDecl(
+          name: from,
+          stereotype: stereo.isEmpty ? null : stereo,
+        ));
       }
       return null;
     }
@@ -3350,7 +3428,7 @@ class Parser {
     if (_check(TokenType.newline) ||
         _check(TokenType.eof) ||
         _check(TokenType.endUml)) {
-      if (from != '[*]') {
+      if (!_isStatePseudoRef(from)) {
         addState(StateDecl(name: from));
       }
       return null;
@@ -3369,13 +3447,17 @@ class Parser {
         label = _advance().lexeme;
       }
     }
-    if (from != '[*]') {
+    if (!_isStatePseudoRef(from)) {
       addState(StateDecl(name: from));
     }
-    if (to != '[*]') {
+    if (!_isStatePseudoRef(to)) {
       addState(StateDecl(name: to));
     }
     return StateTransition(from: from, to: to, label: label);
+  }
+
+  bool _isStatePseudoRef(String ref) {
+    return ref == '[*]' || ref == '[H]' || ref == '[H*]';
   }
 
   String _readStateRef() {
@@ -3413,19 +3495,27 @@ class Parser {
     if (_check(TokenType.identifier)) {
       final name = _advance().lexeme;
       // PlantUML chained history reference: `StateName[H]`, `StateName[H*]`.
-      // The bracketed history marker attaches to the preceding state name; we
-      // currently keep the base name as the canonical identifier and skip
-      // over the bracket suffix so the surrounding transition parses.
+      // The bracketed history marker attaches to the preceding state name.
+      // We surface it as a synthetic pseudo-state name `[H]` / `[H*]` (the
+      // base name is preserved for the surrounding container) so the
+      // renderer can draw a small history-marker circle. This loses the
+      // composite-vs-shallow association in the AST but matches PlantUML's
+      // visual rendering of history pseudo-states.
       if (_check(TokenType.leftBracket)) {
         final save = _pos;
         _advance();
         if (_check(TokenType.identifier)) {
-          _advance();
+          final inner = _advance().lexeme;
+          var tail = '';
           if (_check(TokenType.identifier) && _peek().lexeme == '*') {
             _advance();
+            tail = '*';
           }
           if (_check(TokenType.rightBracket)) {
             _advance();
+            if (inner == 'H' || inner == 'h') {
+              return '[H$tail]';
+            }
             return name;
           }
         }

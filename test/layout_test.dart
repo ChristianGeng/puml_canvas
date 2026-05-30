@@ -1523,7 +1523,7 @@ void main() {
       expect(texts.where((t) => t.text == 'Foo'), hasLength(1));
     });
 
-    test('class with two members emits two body text lines plus the vis chars',
+    test('class with two members emits two body text lines plus visibility icons',
         () {
       final scene = layout.layout(
         const ClassDiagram(classes: [
@@ -1535,9 +1535,14 @@ void main() {
         measurer,
       );
       final texts = scene.shapes.whereType<SceneText>().toList();
-      // header name + kind-badge glyph ("C") + 2 visibility chars + 2 body
-      // strings = 6
-      expect(texts, hasLength(6));
+      // header name + kind-badge glyph ("C") + 2 body strings = 4
+      // (visibility prefixes are now drawn as shape primitives, not text)
+      expect(texts, hasLength(4));
+      // Two members → one icon per member. Public field → hollow circle,
+      // public method → filled circle (both render via SceneCircle).
+      final circles = scene.shapes.whereType<SceneCircle>().toList();
+      // 1 kind-badge circle + 2 visibility-icon circles = 3
+      expect(circles, hasLength(3));
     });
 
     test('two classes side-by-side do not overlap', () {

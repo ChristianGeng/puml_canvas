@@ -275,6 +275,13 @@ SceneShape _translate(SceneShape shape, double dx, double dy) {
         stroke: shape.stroke,
         strokeWidth: shape.strokeWidth,
       );
+    case SceneTriangle():
+      return SceneTriangle(
+        rect: shape.rect.shift(Offset(dx, dy)),
+        fill: shape.fill,
+        stroke: shape.stroke,
+        strokeWidth: shape.strokeWidth,
+      );
     case SceneCircle():
       return SceneCircle(
         center: shape.center.translate(dx, dy),

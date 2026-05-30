@@ -129,6 +129,23 @@ class SceneDiamond extends SceneShape {
   });
 }
 
+/// Upright isoceles triangle inscribed in [rect] with its apex at the top
+/// midpoint. Used by the class layout to draw the package-private visibility
+/// glyph (hollow or filled blue triangle) on class members.
+class SceneTriangle extends SceneShape {
+  final Rect rect;
+  final Color fill;
+  final Color stroke;
+  final double strokeWidth;
+
+  const SceneTriangle({
+    required this.rect,
+    this.fill = const Color(0x00000000),
+    this.stroke = const Color(0xFF000000),
+    this.strokeWidth = 1.0,
+  });
+}
+
 class SceneCircle extends SceneShape {
   final Offset center;
   final double radius;

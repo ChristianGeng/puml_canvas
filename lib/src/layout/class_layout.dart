@@ -78,10 +78,17 @@ class ClassLayout implements DiagramLayout {
   static const _classStroke = Color(0xFF000000);
   static const _headerFill = Color(0xFFFFFFBB);
 
-  static const _publicColor = Color(0xFF1B7F1B);
-  static const _privateColor = Color(0xFFC62828);
-  static const _protectedColor = Color(0xFFEF6C00);
-  static const _packageColor = Color(0xFF6A1B9A);
+  // PlantUML visibility-icon palette. Each visibility maps to its own shape
+  // (square / diamond / triangle / circle); the field-vs-method axis selects
+  // hollow (field) vs filled (method).
+  static const _privateColor = Color(0xFFC62828); // square, private
+  static const _protectedColor = Color(0xFFF9A825); // diamond, protected
+  static const _packageColor = Color(0xFF1565C0); // triangle, packagePrivate
+  static const _publicColor = Color(0xFF2E7D32); // circle, public
+  // Per-member visibility icon geometry.
+  static const _memberIconSize = 9.0;
+  static const _memberIconGap = 4.0;
+  static const _memberHollowFill = Color(0xFFFFFFFF);
   static const _edgeRouter = OrthogonalEdgeRouter();
 
   // Kind badge ("C" for class, "I" for interface, "E" for enum, ...) drawn as
@@ -353,34 +360,32 @@ class ClassLayout implements DiagramLayout {
   }
 
   _MemberLine _renderMember(ClassMember m, TextMeasurer measurer) {
+    // Per-line reservation for the leading visibility icon. The icon itself
+    // is a small shape primitive of [_memberIconSize] inscribed in a square,
+    // followed by a fixed [_memberIconGap] before the body text.
+    const visReserved = _memberIconSize + _memberIconGap;
     switch (m) {
       case Field():
-        final visChar = _visibilityChar(m.visibility);
-        final visColor = _visibilityColor(m.visibility);
         final requiredPrefix = m.required ? '* ' : '';
         final stereotypeSuffix =
             m.stereotype == null ? '' : ' <<${m.stereotype}>>';
         final core = m.type == null ? m.name : '${m.name}: ${m.type}';
         final body = '$requiredPrefix$core$stereotypeSuffix';
         final style = m.isStatic ? _staticMemberStyle : _memberStyle;
-        final visSize =
-            measurer.measure(visChar, style.copyWith(color: visColor));
-        final bodySize = measurer.measure(' $body', style);
+        final bodySize = measurer.measure(body, style);
         return _MemberLine(
-          visibilityChar: visChar,
-          visibilityColor: visColor,
-          body: ' $body',
+          visibility: m.visibility,
+          isMethod: false,
+          body: body,
           bodyStyle: style,
-          width: visSize.width + bodySize.width,
-          height: math.max(visSize.height, bodySize.height),
-          visWidth: visSize.width,
+          width: visReserved + bodySize.width,
+          height: math.max(_memberIconSize, bodySize.height),
+          visWidth: visReserved,
         );
       case Method():
-        final visChar = _visibilityChar(m.visibility);
-        final visColor = _visibilityColor(m.visibility);
         final body = m.signature ?? '${m.name}()';
         final suffix = m.returnType == null ? '' : ': ${m.returnType}';
-        final fullBody = ' $body$suffix';
+        final fullBody = '$body$suffix';
         TextStyle style;
         if (m.isAbstract) {
           style = _abstractMemberStyle;
@@ -389,23 +394,21 @@ class ClassLayout implements DiagramLayout {
         } else {
           style = _memberStyle;
         }
-        final visSize =
-            measurer.measure(visChar, style.copyWith(color: visColor));
         final bodySize = measurer.measure(fullBody, style);
         return _MemberLine(
-          visibilityChar: visChar,
-          visibilityColor: visColor,
+          visibility: m.visibility,
+          isMethod: true,
           body: fullBody,
           bodyStyle: style,
-          width: visSize.width + bodySize.width,
-          height: math.max(visSize.height, bodySize.height),
-          visWidth: visSize.width,
+          width: visReserved + bodySize.width,
+          height: math.max(_memberIconSize, bodySize.height),
+          visWidth: visReserved,
         );
       case EnumValue():
         final size = measurer.measure(m.name, _enumValueStyle);
         return _MemberLine(
-          visibilityChar: '',
-          visibilityColor: const Color(0xFF000000),
+          visibility: null,
+          isMethod: false,
           body: m.name,
           bodyStyle: _enumValueStyle,
           width: size.width,
@@ -414,8 +417,8 @@ class ClassLayout implements DiagramLayout {
         );
       case MemberDivider():
         return _MemberLine(
-          visibilityChar: '',
-          visibilityColor: const Color(0xFF000000),
+          visibility: null,
+          isMethod: false,
           body: '',
           bodyStyle: _memberStyle,
           width: 0.0,
@@ -428,8 +431,8 @@ class ClassLayout implements DiagramLayout {
         final body = '${m.name}$sep${m.value}';
         final size = measurer.measure(body, _memberStyle);
         return _MemberLine(
-          visibilityChar: '',
-          visibilityColor: const Color(0xFF000000),
+          visibility: null,
+          isMethod: false,
           body: body,
           bodyStyle: _memberStyle,
           width: size.width,
@@ -539,12 +542,19 @@ class ClassLayout implements DiagramLayout {
         continue;
       }
       final x = rect.left + _classPaddingX;
-      if (line.visibilityChar.isNotEmpty) {
-        shapes.add(SceneText(
-          offset: Offset(x, my),
-          text: line.visibilityChar,
-          textStyle: line.bodyStyle.copyWith(color: line.visibilityColor),
-        ));
+      final visibility = line.visibility;
+      if (visibility != null) {
+        // Centre the icon vertically against the body text baseline; the icon
+        // square is [_memberIconSize] tall and the line itself is whichever
+        // of (icon, text) is taller.
+        final iconTop = my + (line.height - _memberIconSize) / 2;
+        final iconRect = Rect.fromLTWH(
+          x,
+          iconTop,
+          _memberIconSize,
+          _memberIconSize,
+        );
+        _emitVisibilityIcon(shapes, iconRect, visibility, line.isMethod);
       }
       shapes.add(SceneText(
         offset: Offset(x + line.visWidth, my),
@@ -869,20 +879,62 @@ class ClassLayout implements DiagramLayout {
     }
   }
 
-  static String _visibilityChar(Visibility v) {
+  /// Emits the leading visibility icon for a class member.
+  ///
+  /// PlantUML draws four distinct shapes — one per visibility — and switches
+  /// between hollow (field) and filled (method) variants of each shape:
+  ///
+  /// - `-` private        → square,   red    (hollow=field, filled=method)
+  /// - `#` protected      → diamond,  yellow
+  /// - `~` packagePrivate → triangle, blue
+  /// - `+` public         → circle,   green
+  ///
+  /// Hollow variants render with a white fill plus the colour-coded stroke;
+  /// filled variants render with the colour-coded fill (and the same stroke).
+  static void _emitVisibilityIcon(
+    List<SceneShape> shapes,
+    Rect rect,
+    Visibility v,
+    bool isMethod,
+  ) {
+    final color = _visibilityIconColor(v);
+    final fill = isMethod ? color : _memberHollowFill;
     switch (v) {
-      case Visibility.public:
-        return '+';
       case Visibility.private:
-        return '-';
+        shapes.add(SceneBox(
+          rect: rect,
+          textStyle: _memberStyle,
+          fill: fill,
+          stroke: color,
+          strokeWidth: 1.0,
+        ));
       case Visibility.protected:
-        return '#';
+        shapes.add(SceneDiamond(
+          rect: rect,
+          textStyle: _memberStyle,
+          fill: fill,
+          stroke: color,
+          strokeWidth: 1.0,
+        ));
       case Visibility.packagePrivate:
-        return '~';
+        shapes.add(SceneTriangle(
+          rect: rect,
+          fill: fill,
+          stroke: color,
+          strokeWidth: 1.0,
+        ));
+      case Visibility.public:
+        shapes.add(SceneCircle(
+          center: rect.center,
+          radius: rect.width / 2,
+          fill: fill,
+          stroke: color,
+          strokeWidth: 1.0,
+        ));
     }
   }
 
-  static Color _visibilityColor(Visibility v) {
+  static Color _visibilityIconColor(Visibility v) {
     switch (v) {
       case Visibility.public:
         return _publicColor;
@@ -932,8 +984,12 @@ class _KindBadge {
 }
 
 class _MemberLine {
-  final String visibilityChar;
-  final Color visibilityColor;
+  /// When non-null, a leading visibility icon (shape primitive) is drawn at
+  /// the start of this line. The shape is dictated by [visibility]; whether
+  /// it's drawn hollow (field) or filled (method) is dictated by [isMethod].
+  /// When null (enum values, attributes, dividers) no icon is drawn.
+  final Visibility? visibility;
+  final bool isMethod;
   final String body;
   final TextStyle bodyStyle;
   final double width;
@@ -942,8 +998,8 @@ class _MemberLine {
   final DividerKind? divider;
 
   const _MemberLine({
-    required this.visibilityChar,
-    required this.visibilityColor,
+    required this.visibility,
+    required this.isMethod,
     required this.body,
     required this.bodyStyle,
     required this.width,

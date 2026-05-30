@@ -452,6 +452,27 @@ void main() {
       );
     });
 
+    testWidgets('class diagram visibility icons', (tester) async {
+      // Each member's leading icon should mirror PlantUML's visibility palette:
+      //   - field1 (-) → hollow red square
+      //   - field2 (#) → hollow yellow diamond
+      //   - method1 (~) → filled blue triangle
+      //   - method2 (+) → filled green circle
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'class Dummy {\n'
+        '-field1\n'
+        '#field2\n'
+        '~method1()\n'
+        '+method2()\n'
+        '}\n'
+        '@enduml\n',
+        'class_diagram_visibility_icons',
+        size: const Size(320, 240),
+      );
+    });
+
     testWidgets('class diagram inline members', (tester) async {
       // Verbatim source for the inline-member rendering bug: classes are
       // declared implicitly via the relationship line and members are added
@@ -837,6 +858,165 @@ void main() {
         '@enduml\n',
         'state_diagram_composite',
         size: const Size(720, 720),
+      );
+    });
+
+    testWidgets('state diagram cross-container no duplicates', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'state A {\n'
+        '  state X {\n'
+        '  }\n'
+        '  state Y {\n'
+        '  }\n'
+        '}\n'
+        'state B {\n'
+        '  state Z {\n'
+        '  }\n'
+        '}\n'
+        'X --> Z\n'
+        'Z --> Y\n'
+        '@enduml\n',
+        'state_diagram_cross_container_no_duplicates',
+        size: const Size(640, 480),
+      );
+    });
+
+    testWidgets('state diagram state with description', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '[*] --> State1\n'
+        'State1 --> [*]\n'
+        'State1 : this is a string\n'
+        'State1 : this is another string\n'
+        'State1 -> State2\n'
+        'State2 --> [*]\n'
+        '@enduml\n',
+        'state_diagram_state_with_description',
+        size: const Size(640, 480),
+      );
+    });
+
+    testWidgets('state diagram history pseudo states', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'state State3 {\n'
+        '  state long1\n'
+        '  long1 --> ProcessData : Enough Data\n'
+        '  State2 --> [H]: Resume\n'
+        '}\n'
+        'State3 --> State2 : Pause\n'
+        'State2 --> State3[H*]: DeepResume\n'
+        '@enduml\n',
+        'state_diagram_history_pseudo_states',
+        size: const Size(720, 600),
+      );
+    });
+
+    testWidgets('state diagram stereotype pseudo states', (tester) async {
+      // Exercises every shape-bearing state stereotype side by side:
+      //   <<start>>   -> filled dot
+      //   <<choice>>  -> hollow diamond
+      //   <<fork>>    -> solid horizontal bar
+      //   <<join>>    -> solid horizontal bar
+      //   <<end>>     -> dot with outer ring
+      // plus the regular `[*]` pseudo nodes so we can confirm start/end
+      // stereotypes render identically to their bracket-form counterparts.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'state start1 <<start>>\n'
+        'state choice1 <<choice>>\n'
+        'state fork1 <<fork>>\n'
+        'state join2 <<join>>\n'
+        'state end3 <<end>>\n'
+        '[*] --> choice1 : from start to choice\n'
+        'start1 --> choice1 : stereo start\n'
+        'choice1 --> fork1 : to fork\n'
+        'choice1 --> join2 : to join\n'
+        'choice1 --> end3 : to end stereo\n'
+        'fork1 --> State1 : to state\n'
+        'fork1 --> State2 : to state\n'
+        'State2 --> join2 : to join\n'
+        'State1 --> [*] : to end\n'
+        'join2 --> [*] : to end\n'
+        '@enduml\n',
+        'state_diagram_stereotype_pseudo_states',
+        size: const Size(720, 720),
+      );
+    });
+
+    testWidgets('state diagram sdlreceive', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'state "Req(Id)" as ReqId <<sdlreceive>>\n'
+        'state c <<choice>>\n'
+        'Idle --> ReqId\n'
+        'ReqId --> c\n'
+        'c --> Minor : [Id <= 10]\n'
+        'c --> Major : [Id > 10]\n'
+        '@enduml\n',
+        'state_diagram_sdlreceive',
+        size: const Size(640, 480),
+      );
+    });
+
+    testWidgets('state diagram concurrent horizontal pipe', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '[*] --> Active\n'
+        'state Active {\n'
+        '  [*] -> NumLockOff\n'
+        '  NumLockOff --> NumLockOn : EvNumLockPressed\n'
+        '  ||\n'
+        '  [*] -> CapsLockOff\n'
+        '  CapsLockOff --> CapsLockOn : EvCapsLockPressed\n'
+        '  ||\n'
+        '  [*] -> ScrollLockOff\n'
+        '  ScrollLockOff --> ScrollLockOn : EvScrollLockPressed\n'
+        '}\n'
+        '@enduml\n',
+        'state_diagram_concurrent_horizontal_pipe',
+        size: const Size(900, 480),
+      );
+    });
+
+    testWidgets('state diagram concurrent vertical dash', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'state Active {\n'
+        '  [*] -> NumLockOff\n'
+        '  NumLockOff --> NumLockOn\n'
+        '  --\n'
+        '  [*] -> CapsLockOff\n'
+        '  --\n'
+        '  [*] -> ScrollLockOff\n'
+        '}\n'
+        '@enduml\n',
+        'state_diagram_concurrent_vertical_dash',
+        size: const Size(640, 600),
+      );
+    });
+
+    testWidgets('state diagram collision avoidance labels', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '[*] -> State1\n'
+        'State1 --> State2 : Succeeded\n'
+        'State1 --> [*] : Aborted\n'
+        'State2 --> [*] : Aborted\n'
+        'State3 --> [*] : Succeeded / Save Result\n'
+        'State3 --> [*] : Aborted\n'
+        '@enduml\n',
+        'state_diagram_collision_avoidance_labels',
+        size: const Size(720, 600),
       );
     });
 

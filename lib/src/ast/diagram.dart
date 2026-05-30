@@ -1058,6 +1058,21 @@ class StateDecl {
   final List<StateDecl> nestedStates;
   final List<StateTransition> nestedTransitions;
   final List<List<StateDecl>> concurrentRegions;
+  final List<String> descriptions;
+
+  /// Optional `<<stereotype>>` text declared as `state X <<start>>`. PlantUML
+  /// uses certain stereotypes (`start`, `end`, `choice`, `fork`, `join`,
+  /// `history`, `history*`) to draw the state as a UML pseudo-state shape
+  /// instead of a rounded box. The raw inner content (without the `<< >>`
+  /// brackets) is preserved here; layouts decide which values trigger a
+  /// shape override.
+  final String? stereotype;
+
+  /// True when [concurrentRegions] should be laid out side-by-side with
+  /// vertical dashed dividers (PlantUML `||` separator). False when regions
+  /// stack vertically with horizontal dashed dividers (PlantUML `--`
+  /// separator). Has no effect when [concurrentRegions] is empty.
+  final bool horizontalRegions;
 
   const StateDecl({
     required this.name,
@@ -1065,6 +1080,9 @@ class StateDecl {
     this.nestedStates = const [],
     this.nestedTransitions = const [],
     this.concurrentRegions = const [],
+    this.descriptions = const [],
+    this.stereotype,
+    this.horizontalRegions = false,
   });
 
   String get label => displayName ?? name;

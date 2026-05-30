@@ -3347,6 +3347,35 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       expect((members[1] as Field).visibility, Visibility.packagePrivate);
     });
 
+    test('captures every visibility prefix per member kind', () {
+      // Mirrors the verbatim source from the visibility-icons rendering bug:
+      // each member has a distinct prefix and the parser must preserve the
+      // (visibility, field-vs-method) tuple downstream so the layout can pick
+      // the right shape primitive.
+      final d = parseClass('@startuml\n'
+          'class Dummy {\n'
+          '-field1\n'
+          '#field2\n'
+          '~method1()\n'
+          '+method2()\n'
+          '}\n'
+          '@enduml\n');
+      final members = d.classes.single.members;
+      expect(members, hasLength(4));
+      final f1 = members[0] as Field;
+      expect(f1.name, 'field1');
+      expect(f1.visibility, Visibility.private);
+      final f2 = members[1] as Field;
+      expect(f2.name, 'field2');
+      expect(f2.visibility, Visibility.protected);
+      final m1 = members[2] as Method;
+      expect(m1.name, 'method1');
+      expect(m1.visibility, Visibility.packagePrivate);
+      final m2 = members[3] as Method;
+      expect(m2.name, 'method2');
+      expect(m2.visibility, Visibility.public);
+    });
+
     test('parses static and abstract modifiers', () {
       final d = parseClass('@startuml\n'
           'abstract class Shape {\n'
@@ -5255,6 +5284,37 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
         d.states.map((s) => s.name),
         containsAll(['Idle', 'Running', 'Paused']),
       );
+    });
+
+    test(
+        'cross-container transitions do not duplicate nested states '
+        'at top level', () {
+      final d = parseState('@startuml\n'
+          'state A {\n'
+          '  state X {\n'
+          '  }\n'
+          '  state Y {\n'
+          '  }\n'
+          '}\n'
+          'state B {\n'
+          '  state Z {\n'
+          '  }\n'
+          '}\n'
+          'X --> Z\n'
+          'Z --> Y\n'
+          '@enduml\n');
+      // Only the two composite containers should appear at top level.
+      expect(d.states.map((s) => s.name), ['A', 'B']);
+      final a = d.states.firstWhere((s) => s.name == 'A');
+      final b = d.states.firstWhere((s) => s.name == 'B');
+      expect(a.nestedStates.map((s) => s.name), containsAll(['X', 'Y']));
+      expect(b.nestedStates.map((s) => s.name), contains('Z'));
+      // The two cross-container transitions survive verbatim at top level.
+      expect(d.transitions, hasLength(2));
+      expect(d.transitions[0].from, 'X');
+      expect(d.transitions[0].to, 'Z');
+      expect(d.transitions[1].from, 'Z');
+      expect(d.transitions[1].to, 'Y');
     });
 
     test('state-keyword wins over class dispatcher', () {

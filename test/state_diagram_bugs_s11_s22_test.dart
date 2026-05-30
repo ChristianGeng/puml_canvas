@@ -6,6 +6,15 @@ void _parse(String source) {
   Parser().parse(tokens);
 }
 
+StateDiagram _parseStateDiagram(String source) {
+  final tokens = Lexer().tokenize(source);
+  final diagram = Parser().parse(tokens);
+  if (diagram is! StateDiagram) {
+    throw StateError('Expected StateDiagram, got ${diagram.runtimeType}');
+  }
+  return diagram;
+}
+
 void main() {
   group('state diagram bugs S11-S22', () {
     test('S11: note on link on transition', () {
@@ -189,6 +198,32 @@ state Configuring {
 }
 @enduml
 ''');
+    });
+
+    test('pseudo-state stereotypes captured on StateDecl', () {
+      // Every recognized pseudo-state stereotype (`start`, `choice`, `fork`,
+      // `join`, `end`) must round-trip onto `StateDecl.stereotype` so the
+      // state layout can dispatch to special shapes instead of rendering a
+      // rounded box with the alias name.
+      final diagram = _parseStateDiagram('''
+@startuml
+state start1 <<start>>
+state choice1 <<choice>>
+state fork1 <<fork>>
+state join2 <<join>>
+state end3 <<end>>
+start1 --> choice1
+choice1 --> fork1
+fork1 --> join2
+join2 --> end3
+@enduml
+''');
+      final byName = {for (final s in diagram.states) s.name: s};
+      expect(byName['start1']?.stereotype, 'start');
+      expect(byName['choice1']?.stereotype, 'choice');
+      expect(byName['fork1']?.stereotype, 'fork');
+      expect(byName['join2']?.stereotype, 'join');
+      expect(byName['end3']?.stereotype, 'end');
     });
 
     test('S22: hide empty description + multiple state descriptions', () {
