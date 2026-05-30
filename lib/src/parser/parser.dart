@@ -3505,7 +3505,8 @@ class Parser {
       throw ParserException(
           "Expected arrow after state name, got ${t.type}", t.line, t.column);
     }
-    _advance();
+    final arrowTok = _advance();
+    final dir = _classifyArrowDirection(arrowTok.lexeme);
     final to = _readStateRef();
     String? label;
     if (_check(TokenType.colon)) {
@@ -3520,7 +3521,23 @@ class Parser {
     if (!_isStatePseudoRef(to)) {
       addState(StateDecl(name: to));
     }
-    return StateTransition(from: from, to: to, label: label);
+    return StateTransition(from: from, to: to, label: label, direction: dir);
+  }
+
+  /// Resolve a state-transition arrow lexeme into a layout direction. Word
+  /// hints (`up`/`down`/`left`/`right`) win; otherwise a SHORT arrow (single
+  /// leading dash, e.g. `->`, `.>`) means horizontal/right and a LONG arrow
+  /// (`-->`, `..>`) means vertical/down.
+  StateArrowDirection _classifyArrowDirection(String lexeme) {
+    final l = lexeme.toLowerCase();
+    if (l.contains('up')) return StateArrowDirection.up;
+    if (l.contains('down')) return StateArrowDirection.down;
+    if (l.contains('left')) return StateArrowDirection.left;
+    if (l.contains('right')) return StateArrowDirection.right;
+    // Count leading dashes/dots before any letter or `>` to gauge length.
+    final dashes = RegExp(r'^[-.]+').firstMatch(l)?.group(0)?.length ?? 0;
+    if (dashes <= 1) return StateArrowDirection.right;
+    return StateArrowDirection.down;
   }
 
   bool _isStatePseudoRef(String ref) {

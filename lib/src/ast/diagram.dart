@@ -1088,15 +1088,23 @@ class StateDecl {
   String get label => displayName ?? name;
 }
 
+/// PlantUML state-transition layout direction derived from the arrow syntax.
+enum StateArrowDirection { up, down, left, right }
+
 class StateTransition {
   final String from;
   final String to;
   final String? label;
 
+  /// Resolved layout direction hint from the arrow form (null = no recoverable
+  /// hint; adapters treat as the vertical default).
+  final StateArrowDirection? direction;
+
   const StateTransition({
     required this.from,
     required this.to,
     this.label,
+    this.direction,
   });
 }
 

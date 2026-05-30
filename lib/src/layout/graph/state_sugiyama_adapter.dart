@@ -284,6 +284,12 @@ _ScopeResult _layoutScope(
   );
   final coords = result.coordinates;
 
+  // Mutable positions: horizontal (`left`/`right`) edges pull their dst into
+  // the src's row and place it on the direction-implied side.
+  final xByNode = Map<String, double>.from(coords.xByNode);
+  final yByNode = Map<String, double>.from(coords.yByNode);
+  _applyHorizontalPlacement(builder, xByNode, yByNode);
+
   final shapes = <SceneShape>[];
   final descendantRects = <String, Rect>{};
 
@@ -291,8 +297,8 @@ _ScopeResult _layoutScope(
   // Composite shells/headers and their translated interiors are emitted as
   // part of the node pass so they paint before routes (preserving z-order).
   for (final node in graph.nodes) {
-    final cx = coords.xByNode[node.id];
-    final cy = coords.yByNode[node.id];
+    final cx = xByNode[node.id];
+    final cy = yByNode[node.id];
     if (cx == null || cy == null) continue;
     final center = Offset(cx, cy);
     final info = builder.infoById[node.id]!;
@@ -355,11 +361,118 @@ _ScopeResult _layoutScope(
     _emitRoute(shapes, pts, edgeInfo, measurer);
   }
 
+  // --- Horizontal (left/right) routes --------------------------------------
+  // Routed as a straight segment between the two endpoint rects, clipped to
+  // each rect's boundary (punching through to a nested leaf when needed).
+  for (final h in builder.horizontalEdges) {
+    final srcRect = descendantRects[h.srcOriginal ?? h.src];
+    final dstRect = descendantRects[h.dstOriginal ?? h.dst];
+    if (srcRect == null || dstRect == null) continue;
+    final start = _clipPointIntoRect(dstRect.center, srcRect.center, srcRect);
+    final end = _clipPointIntoRect(srcRect.center, dstRect.center, dstRect);
+    final pts = <Offset>[start, end];
+    _emitRoute(
+      shapes,
+      pts,
+      _EdgeInfo(label: h.label, src: h.src, dst: h.dst),
+      measurer,
+    );
+  }
+
+  // Horizontal placement may have pushed content past the original layout
+  // bounds (or, for `left`, into negative x), so recompute the bounding box
+  // over all shapes and normalize the origin to (0,0).
+  if (builder.horizontalEdges.isEmpty) {
+    return _ScopeResult(
+      shapes: shapes,
+      size: Size(coords.totalWidth, coords.totalHeight),
+      descendantRects: descendantRects,
+    );
+  }
+  final bounds = _shapesBounds(shapes);
+  if (bounds == null) {
+    return _ScopeResult(
+      shapes: shapes,
+      size: Size(coords.totalWidth, coords.totalHeight),
+      descendantRects: descendantRects,
+    );
+  }
+  final shift = Offset(-bounds.left, -bounds.top);
+  final normShapes = <SceneShape>[
+    for (final s in shapes) _shiftShape(s, shift),
+  ];
+  final normRects = <String, Rect>{
+    for (final e in descendantRects.entries) e.key: e.value.shift(shift),
+  };
   return _ScopeResult(
-    shapes: shapes,
-    size: Size(coords.totalWidth, coords.totalHeight),
-    descendantRects: descendantRects,
+    shapes: normShapes,
+    size: bounds.size,
+    descendantRects: normRects,
   );
+}
+
+/// Axis-aligned bounding box over every shape's extent; null when [shapes] is
+/// empty or contributes no finite geometry.
+Rect? _shapesBounds(List<SceneShape> shapes) {
+  var minX = double.infinity;
+  var minY = double.infinity;
+  var maxX = double.negativeInfinity;
+  var maxY = double.negativeInfinity;
+  void include(Offset p) {
+    if (p.dx < minX) minX = p.dx;
+    if (p.dy < minY) minY = p.dy;
+    if (p.dx > maxX) maxX = p.dx;
+    if (p.dy > maxY) maxY = p.dy;
+  }
+
+  void includeRect(Rect r) {
+    include(r.topLeft);
+    include(r.bottomRight);
+  }
+
+  for (final s in shapes) {
+    switch (s) {
+      case SceneRoundedBox():
+        includeRect(s.rect);
+      case SceneBox():
+        includeRect(s.rect);
+      case SceneDiamond():
+        includeRect(s.rect);
+      case SceneCircle():
+        includeRect(Rect.fromCircle(center: s.center, radius: s.radius));
+      case SceneLine():
+        include(s.from);
+        include(s.to);
+      case SceneText():
+        include(s.offset);
+      default:
+        break;
+    }
+  }
+  if (!minX.isFinite || !minY.isFinite) return null;
+  return Rect.fromLTRB(minX, minY, maxX, maxY);
+}
+
+/// Places each horizontal (`left`/`right`) edge's destination in the SAME row
+/// as its source (dst.y := src.y) and directly adjacent on the implied side
+/// (right => dst right of src; left => dst left of src), so the rendered arrow
+/// is a short straight segment. Mutates [xByNode]/[yByNode] in place.
+void _applyHorizontalPlacement(
+  _ScopeBuilder builder,
+  Map<String, double> xByNode,
+  Map<String, double> yByNode,
+) {
+  for (final h in builder.horizontalEdges) {
+    final sx = xByNode[h.src];
+    final sy = yByNode[h.src];
+    if (sx == null || sy == null) continue;
+    final srcInfo = builder.infoById[h.src];
+    final dstInfo = builder.infoById[h.dst];
+    if (srcInfo == null || dstInfo == null) continue;
+    final gap = srcInfo.width / 2 + _nodeSpacing + dstInfo.width / 2;
+    yByNode[h.dst] = sy;
+    xByNode[h.dst] = h.rightward ? sx + gap : sx - gap;
+  }
 }
 
 /// Reconcile one end of a route. When [targetName] names a nested leaf reached
@@ -590,6 +703,26 @@ class _EdgeInfo {
   });
 }
 
+/// A horizontal (`->` / `-left->` / `-right->`) transition routed by the
+/// adapter after coordinates are assigned, rather than as a ranking edge.
+class _HorizontalEdge {
+  final String src;
+  final String dst;
+  final String? srcOriginal;
+  final String? dstOriginal;
+  final String? label;
+  /// True for `right` (dst to the RIGHT of src); false for `left`.
+  final bool rightward;
+  const _HorizontalEdge({
+    required this.src,
+    required this.dst,
+    this.srcOriginal,
+    this.dstOriginal,
+    this.label,
+    required this.rightward,
+  });
+}
+
 /// Builds the flat Sugiyama graph for ONE scope: leaf/pseudo/concurrent nodes
 /// plus recursively-embedded composite nodes, with edges lifted to the scope's
 /// direct children.
@@ -605,6 +738,10 @@ class _ScopeBuilder {
   final Map<String, _NodeInfo> infoById = <String, _NodeInfo>{};
   final Map<String, _EdgeInfo> edgeInfoById = <String, _EdgeInfo>{};
   final List<GraphEdge> _edges = <GraphEdge>[];
+
+  /// Horizontal (`left`/`right`) edges, routed after placement so they don't
+  /// force a layer difference between their endpoints.
+  final List<_HorizontalEdge> horizontalEdges = <_HorizontalEdge>[];
 
   /// Maps every descendant state name (at any depth) to the direct-child node
   /// id of this scope that encloses it. Direct children map to themselves.
@@ -720,8 +857,31 @@ class _ScopeBuilder {
     final to = _resolveEndpoint(t.to, source: false);
     if (from == null || to == null) return;
     if (from.directChild == to.directChild) return;
+    final dir = t.direction ?? StateArrowDirection.down;
+    // Horizontal edges are NON-RANKING: collect them for post-placement
+    // routing so they don't force a layer difference.
+    if (dir == StateArrowDirection.left || dir == StateArrowDirection.right) {
+      horizontalEdges.add(_HorizontalEdge(
+        src: from.directChild,
+        dst: to.directChild,
+        srcOriginal: from.nestedTarget,
+        dstOriginal: to.nestedTarget,
+        label: t.label,
+        rightward: dir == StateArrowDirection.right,
+      ));
+      return;
+    }
     final id = 'e${_edgeSeq++}';
-    _edges.add(GraphEdge(id: id, src: from.directChild, dst: to.directChild));
+    // `up` ranks the destination ABOVE the source: feed layering a reversed
+    // edge (so dst lands in an earlier layer) while routing keeps the visible
+    // arrowhead on the logical dst.
+    final reversed = dir == StateArrowDirection.up;
+    _edges.add(GraphEdge(
+      id: id,
+      src: from.directChild,
+      dst: to.directChild,
+      isReversed: reversed,
+    ));
     edgeInfoById[id] = _EdgeInfo(
       label: t.label,
       src: from.directChild,

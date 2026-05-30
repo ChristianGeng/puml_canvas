@@ -942,4 +942,121 @@ void main() {
       expect(onConfiguringBoundary, isTrue);
     });
   });
+
+  group('arrow direction', () {
+    SceneRoundedBox boxFor(Scene scene, String label) => scene.shapes
+        .whereType<SceneRoundedBox>()
+        .firstWhere((s) => s.label == label);
+
+    test('`A -> B` places B to the right of A in the same row', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A -> B\n'
+        'A --> [*]\n'
+        'B --> [*]\n'
+        '@enduml\n',
+      );
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+      final a = boxFor(scene, 'A');
+      final b = boxFor(scene, 'B');
+      expect(b.rect.center.dx, greaterThan(a.rect.center.dx));
+      expect((b.rect.center.dy - a.rect.center.dy).abs(), lessThan(1.0));
+    });
+
+    test('`A --> B` places B below A in the same column', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A --> B\n'
+        'B --> [*]\n'
+        '@enduml\n',
+      );
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+      final a = boxFor(scene, 'A');
+      final b = boxFor(scene, 'B');
+      expect(b.rect.center.dy, greaterThan(a.rect.center.dy));
+      expect((b.rect.center.dx - a.rect.center.dx).abs(), lessThan(1.0));
+    });
+
+    test('`A -up-> B` places B above A with the arrowhead on B', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A -up-> B\n'
+        'B --> [*]\n'
+        '@enduml\n',
+      );
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+      final a = boxFor(scene, 'A');
+      final b = boxFor(scene, 'B');
+      expect(b.rect.center.dy, lessThan(a.rect.center.dy));
+      // The rendered arrow (open head) for A->B terminates on/near B's rect.
+      final arrows = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head == ArrowHead.open)
+          .toList();
+      bool nearRect(Offset p, Rect r) =>
+          p.dx >= r.left - 1 &&
+          p.dx <= r.right + 1 &&
+          p.dy >= r.top - 1 &&
+          p.dy <= r.bottom + 1;
+      final touchesB = arrows.any((l) => nearRect(l.to, b.rect));
+      expect(touchesB, isTrue);
+    });
+
+    test('`A -left-> B` places B to the left of A', () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A -left-> B\n'
+        'A --> [*]\n'
+        'B --> [*]\n'
+        '@enduml\n',
+      );
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+      final a = boxFor(scene, 'A');
+      final b = boxFor(scene, 'B');
+      expect(b.rect.center.dx, lessThan(a.rect.center.dx));
+    });
+
+    test('repro: single-dash `->` puts State2 right of State1, all routes draw',
+        () {
+      final diagram = _parseStateDiagram(
+        '@startuml\n'
+        '[*] --> State1\n'
+        'State1 --> [*]\n'
+        'State1 : this is a string\n'
+        'State1 : this is another string\n'
+        'State1 -> State2\n'
+        'State2 --> [*]\n'
+        '@enduml\n',
+      );
+      final scene = layoutStateDiagramWithSugiyama(diagram, measurer);
+
+      // State1 renders as a boxed state whose description lines are present.
+      final texts = scene.shapes
+          .whereType<SceneText>()
+          .map((t) => t.text)
+          .toList();
+      expect(texts.contains('State1'), isTrue);
+      expect(texts.contains('this is a string'), isTrue);
+      expect(texts.contains('this is another string'), isTrue);
+
+      // State2 sits to the RIGHT of State1.
+      final state2 = boxFor(scene, 'State2');
+      // State1's title text x marks its column; find State1's enclosing box by
+      // the description text it carries.
+      final state1Title =
+          scene.shapes.whereType<SceneText>().firstWhere((t) => t.text == 'State1');
+      expect(state2.rect.center.dx, greaterThan(state1Title.offset.dx));
+
+      // Four routes: initial->State1, State1->[*], State1->State2, State2->[*].
+      final arrows = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head == ArrowHead.open)
+          .length;
+      expect(arrows, 4);
+    });
+  });
 }

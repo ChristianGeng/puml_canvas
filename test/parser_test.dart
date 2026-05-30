@@ -8211,6 +8211,32 @@ Bob -> Alice : ok
       expect(messages.single.to, 'Alice');
     });
   });
+
+  group('state transition arrow direction', () {
+    StateDiagram parseState(String source) {
+      final d = Parser().parse(Lexer().tokenize(source));
+      return d as StateDiagram;
+    }
+
+    StateTransition transitionFor(StateDiagram d, String from, String to) =>
+        d.transitions.firstWhere((t) => t.from == from && t.to == to);
+
+    test('classifies dash length and explicit direction words', () {
+      final d = parseState(
+        '@startuml\n'
+        '[*] --> A\n'
+        'A -> B\n'
+        'A --> C\n'
+        'A -up-> D\n'
+        'A -left-> E\n'
+        '@enduml\n',
+      );
+      expect(transitionFor(d, 'A', 'B').direction, StateArrowDirection.right);
+      expect(transitionFor(d, 'A', 'C').direction, StateArrowDirection.down);
+      expect(transitionFor(d, 'A', 'D').direction, StateArrowDirection.up);
+      expect(transitionFor(d, 'A', 'E').direction, StateArrowDirection.left);
+    });
+  });
 }
 
 class _StubMeasurer implements TextMeasurer {
