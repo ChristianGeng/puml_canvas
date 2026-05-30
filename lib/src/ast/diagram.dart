@@ -41,6 +41,15 @@ class SequenceDiagram extends Diagram {
   // [Message] (declared boxes/groups and activate/deactivate-only references
   // do not count as "linked"). Order-independent — applied at render time.
   final bool hideUnlinked;
+  // Set by the `hide footbox` directive. When true, layout skips the
+  // bottom (foot) participant boxes/symbols that mirror the header row at
+  // the end of the lifelines. Lifelines still terminate at the same Y.
+  final bool hideFootbox;
+  // Set by `skinparam actorStyle <value>` (e.g. `awesome`, `Hollow`). When
+  // null, actors render with the default stick-figure shape. Currently
+  // `awesome` is honoured visually (cartoonier figure); other values are
+  // stored but render identically to the default until implemented.
+  final String? actorStyle;
   // Set by the `mainframe <label>` directive. When non-null, layout wraps
   // the entire diagram in an outer rectangle with a folded-corner label tab
   // in the top-left containing this label (which honours inline markup like
@@ -56,6 +65,8 @@ class SequenceDiagram extends Diagram {
     this.aliasDisplayNames = const {},
     this.autoactivate = false,
     this.hideUnlinked = false,
+    this.hideFootbox = false,
+    this.actorStyle,
     this.mainframeLabel,
     this.decorations = const DiagramDecorations(),
   });
@@ -930,7 +941,25 @@ class Action extends ActivityNode {
   final String text;
   final ActivityNoteAttachment? note;
 
-  const Action({required this.text, this.note});
+  /// Optional `<<stereotype>>` attached either inline or on a following line.
+  /// Used by activity diagrams to select SDL shapes
+  /// (`<<input>>`, `<<output>>`, `<<task>>`, …) and UML signal/object node
+  /// variants (`<<object>>`, `<<sendSignal>>`, …). Visual rendering of the
+  /// stereotype-specific shape is not yet implemented; the value is preserved
+  /// so downstream consumers (and future renderers) can act on it.
+  final String? stereotype;
+
+  const Action({required this.text, this.note, this.stereotype});
+}
+
+/// Multi-way split block: `split` / `split again` / `end split`.
+/// Semantically identical to [ForkBlock] for parsing purposes; rendered with
+/// a diamond split-bar in PlantUML. Each entry of [branches] holds the
+/// activity nodes for that branch.
+class SplitBlock extends ActivityNode {
+  final List<List<ActivityNode>> branches;
+
+  const SplitBlock({this.branches = const []});
 }
 
 class IfBranch {
@@ -1060,6 +1089,9 @@ enum ComponentNodeKind {
   database,
   queue,
   storage,
+  port,
+  portIn,
+  portOut,
 }
 
 class ComponentNode {
@@ -1127,7 +1159,7 @@ class ComponentDiagram extends Diagram {
   });
 }
 
-enum TimingLaneKind { robust, concise, clock, binary }
+enum TimingLaneKind { robust, concise, clock, binary, analog, rectangle }
 
 class TimingLane {
   final String alias;

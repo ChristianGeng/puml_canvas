@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.12.0
+
+### Added
+
+- Sequence diagrams now support `hide footbox` and
+  `skinparam actorStyle awesome`; actor symbols can render the awesome
+  actor variant, and foot participant boxes can be suppressed while
+  preserving lifeline length.
+- Sequence separators and notes were refined: title separators now render
+  as a PlantUML-style double-line divider with clearer spacing, inline
+  `note left` / `note right` after a message anchors near that message,
+  and multi-line `... label ...` delay blocks are accepted.
+- Activity diagrams now preserve action stereotypes, parse `split` /
+  `split again` / `end split`, tolerate SDL / UML signal-object
+  stereotypes on actions, and accept Salt-style procedure-call activity
+  nodes and multi-line marker bodies.
+- Timing diagrams now accept richer time anchors (`@lane`, `@+N`,
+  `@-N`, `@H:M:S`, date anchors, arithmetic anchors), analog and
+  rectangle lane kinds, hidden-state shorthand, compact/style metadata,
+  cross-lane annotation arrows, and extended clock / state forms.
+- Gantt diagrams now accept natural project dates, `projectscale` /
+  `printscale` / `zoom` directives, date-range coloring, raw dependency
+  arrows, aliases, `requires` syntax, resource assignments, relative
+  starts / ends, explicit end dates, and chained `then` tasks.
+- Component / deployment parsing now accepts additional PlantUML forms:
+  multi-line bracketed descriptions, sprites and skinparam blocks as
+  no-op metadata, component/deployment inline styles, nested component
+  containers, ports (`port`, `portin`, `portout`), lollipop/interface
+  arrow variants, direction-hint arrows, and broad allowmixing matrices.
+- State, mindmap, WBS, YAML, network, and ArchiMate parsers gained
+  broader PlantUML compatibility coverage, including style/highlight
+  metadata, history pseudo-states, direction directives, boxless markers,
+  and ArchiMate include/macro-style sources.
+- Inline markup now accepts space-delimited `<color ...>` tags and emits
+  deterministic `[img]` placeholders for PlantUML image tags.
+- The named color table now includes additional CSS colors such as
+  `cadetblue`, `steelblue`, `royalblue`, `dodgerblue`, `skyblue`,
+  `turquoise`, `chocolate`, `crimson`, `tomato`, `coral`, `wheat`, and
+  `orchid`.
+- Golden and parser coverage was expanded for the new activity,
+  sequence, class, component/deployment, state, timing, Gantt, mindmap,
+  WBS, ArchiMate, YAML, network, and inline-markup cases.
+
+### Changed
+
+- Class diagrams now render kind badges in the title bar for supported
+  declaration kinds and draw an explicit divider between header and member
+  sections for crisper output.
+- The example app's sub-sample cards now use a taller preview area and
+  scrollable preview panes instead of a fixed interactive viewer, making
+  large sample diagrams easier to inspect.
+
+### Fixed
+
+- The lexer now treats bare semicolons as benign statement terminators,
+  supports escaped `\n` tokens in labels, accepts multi-line bracketed
+  description blocks, keeps semicolons inside `<code>` bodies from ending
+  marker labels, and recognizes additional timing / state shorthand forms.
+- The preprocessor now tolerates `!unquoted` / `!final` procedure and
+  function blocks, bare-identifier procedure names, and `!endfunction`
+  closures without aborting parsing.
+- Component, deployment, activity, timing, Gantt, state, mindmap, WBS,
+  and network regression cases now parse instead of throwing on common
+  PlantUML syntax that is currently rendered approximately or consumed as
+  metadata.
+
 ## 0.11.0
 
 ### Added

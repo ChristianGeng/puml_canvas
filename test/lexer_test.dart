@@ -152,11 +152,15 @@ void main() {
       });
     });
 
-    test('throws on unknown directive', () {
-      expect(
-        () => Lexer().tokenize('@bogus\n'),
-        throwsA(isA<LexerException>()),
-      );
+    test('emits @<name> as a timing-diagram lane-focus anchor', () {
+      // After the timing-diagram parser was extended to recognize labeled
+      // anchors / lane-focus anchors / arithmetic in the `@` lexeme, any
+      // `@<word>` that is not an explicit directive (e.g. `@startuml`) emits
+      // an `atTime` token whose lexeme is the trailing identifier. The
+      // timing parser uses this to switch the active lane focus.
+      final tokens = Lexer().tokenize('@bogus\n');
+      expect(tokens.first.type, TokenType.atTime);
+      expect(tokens.first.lexeme, 'bogus');
     });
 
     group('activation suffixes', () {

@@ -198,6 +198,11 @@ class ActivityLayout implements DiagramLayout {
         return _layoutRepeat(node, ctx, centerX, topY);
       case ForkBlock():
         return _layoutFork(node, ctx, centerX, topY);
+      case SplitBlock():
+        // `split` shares the multi-branch geometry of `fork`; reuse the same
+        // layout pass.
+        return _layoutFork(
+            ForkBlock(branches: node.branches), ctx, centerX, topY);
       case Partition():
         return _layoutPartition(node, ctx, centerX, topY);
       case Detach():
@@ -248,6 +253,8 @@ class ActivityLayout implements DiagramLayout {
         return Size(w, h);
       case ForkBlock():
         return _measureFork(node, measurer);
+      case SplitBlock():
+        return _measureFork(ForkBlock(branches: node.branches), measurer);
       case Partition():
         final bodySize = _measureSubtree(node.body, measurer);
         final w = bodySize.width + _partitionPadding * 2;

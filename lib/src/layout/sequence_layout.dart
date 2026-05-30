@@ -65,9 +65,19 @@ class SequenceLayout implements DiagramLayout {
       TextStyle(color: Color(0xFF000000), fontSize: 10, fontWeight: FontWeight.w600);
   static const _refBoxBodyStyle =
       TextStyle(color: Color(0xFF000000), fontSize: 11);
-  static const _separatorTitleHeight = 30.0;
+  // Title separator total advancement = topGap + boxHeight + bottomGap.
+  // The box is positioned so its top is at startY + topGap; the trailing
+  // bottomGap guarantees clear vertical space before the next event/arrow,
+  // preventing the previous overlap with the next message text.
   static const _separatorTitlePaddingX = 8.0;
   static const _separatorTitlePaddingY = 3.0;
+  static const _separatorTitleTopGap = 8.0;
+  static const _separatorTitleBottomGap = 20.0;
+  static const _separatorTitleBoxHeight = 18.0; // fontSize 12 + padY*2
+  static const _separatorTitleHeight = _separatorTitleTopGap +
+      _separatorTitleBoxHeight +
+      _separatorTitleBottomGap;
+  static const _separatorTitleDoubleLineOffset = 3.0;
   static const _separatorSkipHeight = 24.0;
   static const _separatorDashHeight = 12.0;
   static const _separatorDelayMin = 20.0;
@@ -349,6 +359,8 @@ class SequenceLayout implements DiagramLayout {
     // the participant boxes and before the participants/lifelines.
     shapes.addAll(eventBackgrounds);
 
+    final actorStyle = diagram.actorStyle;
+    final hideFootbox = diagram.hideFootbox;
     for (final p in participants) {
       final w = actorWidths[p.alias]!;
       final h = actorHeights[p.alias]!;
@@ -358,12 +370,16 @@ class SequenceLayout implements DiagramLayout {
       final topY = createY ?? topActorY;
       final topRect = Rect.fromLTWH(cx - w / 2, topY, w, h);
       final pFill = p.color ?? actorFill;
+      // Render the foot row only when neither destroyed nor suppressed via
+      // `hide footbox`. The lifeline still terminates at [bottomActorY] so
+      // the diagram extent is unchanged.
+      final emitFoot = destroyY == null && !hideFootbox;
       if (p.kind == ParticipantKind.participant) {
         final sectionSizes = richSectionSizes[p.alias];
         if (sectionSizes != null && p.labelSections != null) {
           _emitRichParticipant(shapes, topRect, p.labelSections!,
               sectionSizes, pFill, actorStroke, labelStyle, measurer);
-          if (destroyY == null) {
+          if (emitFoot) {
             _emitRichParticipant(
                 shapes,
                 Rect.fromLTWH(cx - w / 2, bottomActorY, w, h),
@@ -382,7 +398,7 @@ class SequenceLayout implements DiagramLayout {
             fill: pFill,
             stroke: actorStroke,
           ));
-          if (destroyY == null) {
+          if (emitFoot) {
             shapes.add(SceneBox(
               rect: Rect.fromLTWH(cx - w / 2, bottomActorY, w, h),
               label: p.label,
@@ -400,8 +416,9 @@ class SequenceLayout implements DiagramLayout {
           kind: p.kind,
           fill: pFill,
           stroke: actorStroke,
+          style: actorStyle,
         ));
-        if (destroyY == null) {
+        if (emitFoot) {
           shapes.add(SceneSymbol(
             rect: Rect.fromLTWH(cx - w / 2, bottomActorY, w, h),
             label: p.label,
@@ -409,6 +426,7 @@ class SequenceLayout implements DiagramLayout {
             kind: p.kind,
             fill: pFill,
             stroke: actorStroke,
+            style: actorStyle,
           ));
         }
       }
@@ -863,7 +881,18 @@ class SequenceLayout implements DiagramLayout {
           }
           final boxSize = Size(innerWidth + _notePaddingX * 2,
               size.height + _notePaddingY * 2);
-          final noteY = y + _noteVerticalGap;
+          // PlantUML convention: an inline `note right` / `note left` without
+          // `of <participant>` immediately following a message attaches at
+          // roughly the same Y as that message's arrow. Anchor it just below
+          // the arrow line instead of waiting for the full `_messageGap`.
+          final bool inlineAfterMessage =
+              event.participants.isEmpty && ctx.previousMessageStartY != null;
+          final double noteY;
+          if (inlineAfterMessage) {
+            noteY = ctx.previousMessageStartY! + _noteVerticalGap;
+          } else {
+            noteY = y + _noteVerticalGap;
+          }
           final rect = _resolveNoteRect(event, boxSize, noteY, ctx.centers);
           ctx.shapes.add(SceneNote(
             rect: rect,
@@ -874,7 +903,15 @@ class SequenceLayout implements DiagramLayout {
           ));
           if (rect.right > ctx.rightmost) ctx.rightmost = rect.right;
           if (rect.left < ctx.leftmost) ctx.leftmost = rect.left;
-          y += boxSize.height + _noteVerticalGap * 2;
+          if (inlineAfterMessage) {
+            // Ensure the next event clears the note's bottom edge while
+            // keeping the original advance when the message gap already
+            // extends past it.
+            final noteBottomY = rect.bottom + _noteVerticalGap;
+            if (noteBottomY > y) y = noteBottomY;
+          } else {
+            y += boxSize.height + _noteVerticalGap * 2;
+          }
         case RefBox():
           y = _emitRefBox(event, y, ctx);
         case Activate():
@@ -944,26 +981,49 @@ class SequenceLayout implements DiagramLayout {
             textSize.width + _separatorTitlePaddingX * 2;
         final boxHeight =
             textSize.height + _separatorTitlePaddingY * 2;
+        // Position the box near the top of the separator's allotted span so
+        // the bottom gap (_separatorTitleBottomGap) is preserved before the
+        // next event. The horizontal divider lines pass through the box's
+        // vertical centre.
+        final boxTop = startY + _separatorTitleTopGap;
+        final lineY = boxTop + boxHeight / 2;
         final midX = (ctx.diagramLeftX + ctx.diagramRightX) / 2;
         final boxLeft = midX - boxWidth / 2;
         final boxRight = midX + boxWidth / 2;
+        // Double-line divider (PlantUML convention): one line just above and
+        // one just below the box centre, both flanking the label box.
+        final upperY = lineY - _separatorTitleDoubleLineOffset / 2;
+        final lowerY = lineY + _separatorTitleDoubleLineOffset / 2;
         ctx.shapes.add(SceneLine(
-          from: Offset(ctx.diagramLeftX, centerY),
-          to: Offset(boxLeft, centerY),
+          from: Offset(ctx.diagramLeftX, upperY),
+          to: Offset(boxLeft, upperY),
           dashed: false,
           head: null,
           stroke: _separatorStroke,
         ));
         ctx.shapes.add(SceneLine(
-          from: Offset(boxRight, centerY),
-          to: Offset(ctx.diagramRightX, centerY),
+          from: Offset(ctx.diagramLeftX, lowerY),
+          to: Offset(boxLeft, lowerY),
+          dashed: false,
+          head: null,
+          stroke: _separatorStroke,
+        ));
+        ctx.shapes.add(SceneLine(
+          from: Offset(boxRight, upperY),
+          to: Offset(ctx.diagramRightX, upperY),
+          dashed: false,
+          head: null,
+          stroke: _separatorStroke,
+        ));
+        ctx.shapes.add(SceneLine(
+          from: Offset(boxRight, lowerY),
+          to: Offset(ctx.diagramRightX, lowerY),
           dashed: false,
           head: null,
           stroke: _separatorStroke,
         ));
         ctx.shapes.add(SceneBox(
-          rect: Rect.fromLTWH(
-              boxLeft, centerY - boxHeight / 2, boxWidth, boxHeight),
+          rect: Rect.fromLTWH(boxLeft, boxTop, boxWidth, boxHeight),
           fill: _separatorTitleFill,
           stroke: _separatorStroke,
           label: label.isEmpty ? null : label,

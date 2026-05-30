@@ -318,6 +318,22 @@ void main() {
       );
     });
 
+    testWidgets('sequence separator divider spacing', (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '== Initialization ==\n'
+        'Alice -> Bob: Authentication Request\n'
+        'Bob --> Alice: Authentication Response\n'
+        '== Repetition ==\n'
+        'Alice -> Bob: Another authentication Request\n'
+        'Alice <-- Bob: another authentication Response\n'
+        '@enduml\n',
+        'sequence_separator_divider_spacing',
+        size: const Size(640, 480),
+      );
+    });
+
     testWidgets('autonumber sequence', (tester) async {
       await expectPumlGolden(
         tester,
@@ -432,6 +448,24 @@ void main() {
         'Animal <|-- Dog\n'
         '@enduml\n',
         'class_diagram_basic',
+        size: const Size(640, 480),
+      );
+    });
+
+    testWidgets('class diagram inline members', (tester) async {
+      // Verbatim source for the inline-member rendering bug: classes are
+      // declared implicitly via the relationship line and members are added
+      // with the `ClassName : member` shorthand. Each box should display its
+      // title, a horizontal divider, and the listed members.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'Object <|-- ArrayList\n'
+        'Object : equals()\n'
+        'ArrayList : Object[] elementData\n'
+        'ArrayList : size()\n'
+        '@enduml\n',
+        'class_diagram_inline_members',
         size: const Size(640, 480),
       );
     });
@@ -1203,6 +1237,45 @@ void main() {
       );
     });
 
+    testWidgets('sequence combined creole and html markup', (tester) async {
+      // Mirrors the verbatim bug-report source: a single diagram that mixes
+      // creole shorthand (`**bold**`, `//italics//`, `""monospace""`,
+      // `--strike--`, `__under__`, `~~wave~~`) with HTML-like tags
+      // (`<back:cadetblue>`, `<size:18>`, `<color #hex>`, `<color name>`,
+      // `<u:red>`, `<s:red>...</strike>`, `<w:#hex>`, `<img:URL>`).
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'participant Alice\n'
+        'participant "The **Famous** Bob" as Bob\n'
+        'Alice -> Bob : hello --there--\n'
+        'Bob -> Alice : ok\n'
+        'note left\n'
+        'This is **bold**\n'
+        'This is //italics//\n'
+        'This is ""monospaced""\n'
+        'This is --stroked--\n'
+        'This is __underlined__\n'
+        'This is ~~waved~~\n'
+        'end note\n'
+        'Alice -> Bob : A //well formatted// message\n'
+        'note right of Alice\n'
+        'This is <back:cadetblue><size:18>displayed</size></back>\n'
+        '__left of__ Alice.\n'
+        'end note\n'
+        'note left of Bob\n'
+        '<u:red>This</u> is <color #118888>displayed</color>\n'
+        '**<color purple>left of</color> <s:red>Alice</strike> Bob**.\n'
+        'end note\n'
+        'note over Alice, Bob\n'
+        '<w:#FF33FF>This is hosted</w> by <img:https://plantuml.com/sourceforge.jpg>\n'
+        'end note\n'
+        '@enduml\n',
+        'sequence_combined_creole_html_markup',
+        size: const Size(700, 800),
+      );
+    });
+
     testWidgets('sequence partition as group', (tester) async {
       await expectPumlGolden(
         tester,
@@ -1421,6 +1494,26 @@ void main() {
         'Bob --> Alice: //This is the response %autonumber%//\n'
         '@enduml\n',
         'sequence_autonumber_note',
+        size: const Size(700, 500),
+      );
+    });
+
+    testWidgets('sequence inline note right position', (tester) async {
+      // Regression: a `note right` without `of <participant>` immediately
+      // following a message should attach near that message's arrow Y, not
+      // float halfway between consecutive arrows.
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        'autonumber 10\n'
+        'Alice -> Bob\n'
+        'note right\n'
+        'the %autonumber% works everywhere.\n'
+        'Here, its value is ** %autonumber% **\n'
+        'end note\n'
+        'Bob --> Alice: //This is the response %autonumber%//\n'
+        '@enduml\n',
+        'sequence_inline_note_right_position',
         size: const Size(700, 500),
       );
     });
@@ -1995,6 +2088,58 @@ void main() {
         '@enduml\n',
         'sequence_style_block_and_delay',
         size: const Size(400, 320),
+      );
+    });
+
+    testWidgets('activity diagram with SALT procedure-call nodes',
+        (tester) async {
+      await expectPumlGolden(
+        tester,
+        '@startuml\n'
+        '!unquoted procedure SALT(\$x)\n'
+        '"{{salt %invoke_procedure("_"+\$x) }}" as \$x\n'
+        '!endprocedure\n'
+        '\n'
+        '!procedure _choose()\n'
+        '{+\n'
+        '<b>an example\n'
+        'choose one option\n'
+        '()one\n'
+        '()two\n'
+        '[ok]\n'
+        '}\n'
+        '!endprocedure\n'
+        '\n'
+        '!procedure _wait()\n'
+        '{+\n'
+        '<b>please wait\n'
+        'operation in progress <&clock>\n'
+        '[cancel]\n'
+        '}\n'
+        '!endprocedure\n'
+        '\n'
+        '!procedure _success()\n'
+        '{+\n'
+        '<b>success\n'
+        'congratulations!\n'
+        '[ok]\n'
+        '}\n'
+        '!endprocedure\n'
+        '\n'
+        '!procedure _error()\n'
+        '{+\n'
+        '<b>error\n'
+        'failed, sorry\n'
+        '[ok]\n'
+        '}\n'
+        '!endprocedure\n'
+        '\n'
+        '(*) --> SALT(choose) -right-> SALT(wait)\n'
+        'wait -right-> SALT(success)\n'
+        'wait -down-> SALT(error)\n'
+        '@enduml\n',
+        'activity_salt_procedure_calls',
+        size: const Size(720, 480),
       );
     });
   });

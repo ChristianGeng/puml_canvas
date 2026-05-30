@@ -340,7 +340,7 @@ class _SubSampleCardState extends State<_SubSampleCard> {
           ),
           const Divider(height: 1),
           SizedBox(
-            height: 360,
+            height: 900,
             child: Row(
               children: [
                 Expanded(
@@ -368,10 +368,12 @@ class _SubSampleCardState extends State<_SubSampleCard> {
                   child: Container(
                     color: const Color(0xFFFAFAFA),
                     padding: const EdgeInsets.all(12),
-                    child: InteractiveViewer(
-                      minScale: 0.2,
-                      maxScale: 4,
-                      child: PumlView(source: _source),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.vertical,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: PumlView(source: _source),
+                      ),
                     ),
                   ),
                 ),

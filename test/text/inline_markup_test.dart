@@ -168,6 +168,69 @@ void main() {
       expect(_flatten(mono), '?->');
     });
 
+    test('<back:cadetblue>x</back> produces a background-color child', () {
+      final span =
+          parseInlineMarkup('<back:cadetblue>x</back>', baseStyle);
+      final inner = _firstChildSpan(span);
+      expect(inner.style?.backgroundColor, const Color(0xFF5F9EA0));
+      expect(_flatten(span), 'x');
+    });
+
+    test('<color #118888>x</color> with space delimiter parses', () {
+      // PlantUML accepts space-separated attribute syntax (`<color #118888>`)
+      // in addition to the colon form; both should yield a colored span.
+      final span =
+          parseInlineMarkup('<color #118888>x</color>', baseStyle);
+      final inner = _firstChildSpan(span);
+      expect(inner.style?.color, const Color(0xFF118888));
+      expect(_flatten(span), 'x');
+    });
+
+    test('<color purple>x</color> resolves named color via space syntax', () {
+      final span = parseInlineMarkup('<color purple>x</color>', baseStyle);
+      final inner = _firstChildSpan(span);
+      expect(inner.style?.color, const Color(0xFF800080));
+    });
+
+    test('<u:red>x</u> produces a colored underline', () {
+      final span = parseInlineMarkup('<u:red>x</u>', baseStyle);
+      final inner = _firstChildSpan(span);
+      expect(inner.style?.decoration, TextDecoration.underline);
+      expect(inner.style?.decorationColor, const Color(0xFFFF0000));
+    });
+
+    test('<s:red>x</strike> closes asymmetrically as a colored strike', () {
+      // The bug source uses `<s:red>Alice</strike>` — the close tag uses
+      // `strike` instead of `s` and must still terminate the coloredStrike
+      // span rather than passing through as literal text.
+      final span = parseInlineMarkup('<s:red>x</strike>', baseStyle);
+      final inner = _firstChildSpan(span);
+      expect(inner.style?.decoration, TextDecoration.lineThrough);
+      expect(inner.style?.decorationColor, const Color(0xFFFF0000));
+      expect(_flatten(span), 'x');
+    });
+
+    test('<w:#FF33FF>x</w> produces a wavy colored underline', () {
+      final span = parseInlineMarkup('<w:#FF33FF>x</w>', baseStyle);
+      final inner = _firstChildSpan(span);
+      expect(inner.style?.decoration, TextDecoration.underline);
+      expect(inner.style?.decorationStyle, TextDecorationStyle.wavy);
+      expect(inner.style?.decorationColor, const Color(0xFFFF33FF));
+    });
+
+    test('<img:URL> emits a deterministic [img] placeholder', () {
+      final span = parseInlineMarkup(
+        '<img:https://plantuml.com/sourceforge.jpg>',
+        baseStyle,
+      );
+      expect(_flatten(span), '[img]');
+    });
+
+    test('<img URL> (space form) also emits the [img] placeholder', () {
+      final span = parseInlineMarkup('<img sourceforge.jpg>', baseStyle);
+      expect(_flatten(span), '[img]');
+    });
+
     test('""verbatim"" alongside **bold** in the same label', () {
       // Mirrors the labels in the found/lost messages source: the verbatim
       // span and a separate bold span both survive parsing.

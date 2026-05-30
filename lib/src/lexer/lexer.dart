@@ -75,7 +75,61 @@ class Lexer {
           indentedTreeEndKeyword = null;
           final idx = raw.toLowerCase().indexOf(endKeyword);
           emit(endType, endKeyword, col + idx);
-        } else if (trimmed.isNotEmpty) {
+          col += raw.length;
+          i = end;
+          continue;
+        }
+        // Multi-line `<marker>:body...;` accumulation. Detect a leading
+        // `+`/`-`/`*` marker followed by `:` (with optional `[#color]` between
+        // them) whose closing `;` is NOT on the same line. Concatenate
+        // subsequent lines (joined with `\n`) into the same text token until we
+        // hit one whose last non-whitespace character is `;`. This lets the
+        // parser handle Creole/HTML markup, lists, headings, and horizontal
+        // rules inside `**:..;` bodies as opaque label content.
+        if (trimmed.isNotEmpty && _isMultilineMarkerBodyOpen(trimmed)) {
+          final buf = StringBuffer(trimmed);
+          col += raw.length;
+          i = end;
+          // Track whether we're currently inside a `<code>...</code>` (or
+          // similar verbatim) block. A `;` at the end of a line inside such a
+          // block must NOT terminate the multi-line body — only a line that
+          // is exactly `;` (after trimming) or a line that ends with `;`
+          // outside any verbatim block terminates accumulation.
+          var codeDepth = _verbatimDepthDelta(trimmed);
+          while (i < source.length && source[i] == '\n') {
+            i++;
+            line++;
+            col = 1;
+            // Accumulate until we see a terminator line.
+            var innerEnd = i;
+            while (innerEnd < source.length && source[innerEnd] != '\n') {
+              innerEnd++;
+            }
+            final innerRaw = source.substring(i, innerEnd);
+            final innerTrim = innerRaw.trim();
+            if (innerTrim.toLowerCase() == indentedTreeEndKeyword) {
+              // Body unterminated at end-of-diagram — emit what we have and
+              // let the end keyword be handled on the next outer iteration.
+              break;
+            }
+            buf.write('\n');
+            buf.write(innerTrim);
+            col += innerRaw.length;
+            i = innerEnd;
+            // A lone `;` line always terminates. Otherwise only terminate on
+            // a `;`-ending line when we are NOT inside a verbatim block.
+            if (innerTrim == ';') {
+              break;
+            }
+            codeDepth += _verbatimDepthDelta(innerTrim);
+            if (codeDepth <= 0 && innerTrim.endsWith(';')) {
+              break;
+            }
+          }
+          emit(TokenType.text, buf.toString(), 1);
+          continue;
+        }
+        if (trimmed.isNotEmpty) {
           emit(TokenType.text, trimmed, col);
         }
         col += raw.length;
@@ -218,6 +272,19 @@ class Lexer {
         continue;
       }
 
+      // PlantUML accepts `;` as an optional statement terminator on many
+      // constructs (e.g. activity arrow labels `-> text;`, stray line
+      // terminators). The colon-scanner already absorbs `;` as text for
+      // `:foo;` actions and the `#color;key:value` inline-style lexer
+      // consumes its own internal `;`. Anywhere else, a bare `;` is benign
+      // punctuation that we drop as whitespace so downstream parsers see a
+      // clean token stream.
+      if (c == ';') {
+        i++;
+        col++;
+        continue;
+      }
+
       if (c == '/' && i + 1 < source.length && source[i + 1] == "'") {
         final startLine = line;
         final startCol = col;
@@ -306,6 +373,16 @@ class Lexer {
           col += arrowLex.length;
           continue;
         }
+        // Accept `\n` literal as an escaped-newline token. PlantUML embeds
+        // `\n` inside bracketed names / labels to force a line break.
+        // Parsers that care convert the lexeme to a real newline; others
+        // can join it as a no-op space.
+        if (i + 1 < source.length && source[i + 1] == 'n') {
+          emit(TokenType.text, r'\n', startCol);
+          i += 2;
+          col += 2;
+          continue;
+        }
         throw LexerException("Unexpected '\\'", line, col);
       }
 
@@ -319,15 +396,41 @@ class Lexer {
 
       if (c == '@') {
         final startCol = col;
-        if (i + 1 < source.length && _isDigit(source[i + 1])) {
+        // Timing-diagram anchor forms (captured as a single `atTime` lexeme so
+        // the parser sees one token regardless of inner punctuation):
+        //   @<digits>[:<digits>[:<digits>]]     time / H:M:S
+        //   @<digits>/<digits>/<digits>         date YYYY/MM/DD
+        //   @<digits>[+-]<...>                  arithmetic
+        //   @-<digits> / @+<digits>             negative/positive relative
+        //   @:<label>[+-N]                      labeled anchor
+        //   @<ident>[+-N]                       lane-focus / named anchor
+        // Anything starting with `@start...`/`@end...` (a letter immediately
+        // after `@`) is treated as a directive keyword by the fallthrough
+        // below.
+        if (i + 1 < source.length &&
+            (_isDigit(source[i + 1]) ||
+                source[i + 1] == ':' ||
+                source[i + 1] == '-' ||
+                source[i + 1] == '+')) {
           i++;
           col++;
-          final digitStart = i;
-          while (i < source.length && _isDigit(source[i])) {
-            i++;
-            col++;
+          final lexStart = i;
+          while (i < source.length) {
+            final ch = source[i];
+            if (_isDigit(ch) ||
+                ch == ':' ||
+                ch == '/' ||
+                ch == '+' ||
+                ch == '-' ||
+                ch == '.' ||
+                _isIdentChar(ch)) {
+              i++;
+              col++;
+              continue;
+            }
+            break;
           }
-          emit(TokenType.atTime, source.substring(digitStart, i), startCol);
+          emit(TokenType.atTime, source.substring(lexStart, i), startCol);
           continue;
         }
         final start = i;
@@ -500,6 +603,23 @@ class Lexer {
           // directives. Emit as a generic identifier so the parser can consume
           // it as part of the `hide`/`remove` rest-of-line.
           emit(TokenType.identifier, word, startCol);
+        } else if (word.length > 1 && !word.startsWith('@start') &&
+            !word.startsWith('@end')) {
+          // Timing-diagram lane-focus anchor: `@<laneName>` selects the lane
+          // for the relative-time statements that follow. The lexeme drops the
+          // leading `@` so the parser can use it as an alias reference (the
+          // original case is preserved). Any arithmetic suffix (`+N`/`-N`) is
+          // captured as part of the same atTime lexeme.
+          var rest = source.substring(start + 1, i);
+          while (i < source.length &&
+              (source[i] == '+' || source[i] == '-' ||
+                  source[i] == '*' ||
+                  _isDigit(source[i]) || _isIdentChar(source[i]))) {
+            rest += source[i];
+            i++;
+            col++;
+          }
+          emit(TokenType.atTime, rest, startCol);
         } else {
           throw LexerException("Unknown directive '$word'", line, startCol);
         }
@@ -579,6 +699,75 @@ class Lexer {
           col += arrowLex.length;
           continue;
         }
+        // PlantUML multi-line bracketed description body: a `[` followed only
+        // by whitespace and a newline opens a free-form text block that
+        // extends to the matching closing `]`. Absorb the body verbatim as a
+        // single `text` token so embedded Creole separators (`----`, `====`,
+        // `....`) and inline markup (`<b>`, `<color:...>`) survive without
+        // tripping the normal punctuation scanner. The parser then sees:
+        // leftBracket, text, rightBracket, which it already handles via the
+        // multi-line bracket block path.
+        var k = i + 1;
+        while (k < source.length &&
+            (source[k] == ' ' || source[k] == '\t')) {
+          k++;
+        }
+        if (k < source.length && (source[k] == '\n' || source[k] == '\r')) {
+          emit(TokenType.leftBracket, '[', startCol);
+          i = k;
+          // Advance over the trailing whitespace + newline ourselves so the
+          // body capture starts on the next line.
+          while (i < source.length && source[i] != '\n') {
+            if (source[i] == '\r') {
+              i++;
+            } else {
+              i++;
+            }
+          }
+          if (i < source.length && source[i] == '\n') {
+            i++;
+            line++;
+            col = 1;
+          }
+          final bodyStart = i;
+          // Walk lines until we find a line whose first non-whitespace char
+          // is `]` (the closing marker). Allow any inner content verbatim,
+          // including blank lines and embedded `[` (won't open a nested block
+          // here — the whole body is opaque).
+          while (i < source.length) {
+            // Check if current line starts with `]` (after optional indent).
+            var ls = i;
+            while (ls < source.length &&
+                (source[ls] == ' ' || source[ls] == '\t')) {
+              ls++;
+            }
+            if (ls < source.length && source[ls] == ']') {
+              // Emit captured body (trim trailing newline) as a text token.
+              final raw = source.substring(bodyStart, i);
+              if (raw.isNotEmpty) {
+                emit(TokenType.text, raw, 1);
+              }
+              col = (ls - i) + 1;
+              i = ls;
+              emit(TokenType.rightBracket, ']', col);
+              i++;
+              col++;
+              break;
+            }
+            // Advance to end of line.
+            while (i < source.length && source[i] != '\n') {
+              i++;
+            }
+            if (i < source.length && source[i] == '\n') {
+              i++;
+              line++;
+              col = 1;
+            } else {
+              break;
+            }
+          }
+          continue;
+        }
         emit(TokenType.leftBracket, '[', col);
         i++;
         col++;
@@ -647,6 +836,20 @@ class Lexer {
       }
 
       if (c == ')') {
+        // PlantUML chained-lollipop arrow starting with `)`: `)-0-(0`,
+        // `)-(0-`, `)-0)-`. Try arrow scan first; fall back to plain
+        // rightParen.
+        if (i + 1 < source.length &&
+            (source[i + 1] == '-' || source[i + 1] == '.')) {
+          final startCol = col;
+          final arrowLex = _scanArrow(source, i);
+          if (arrowLex != null) {
+            emit(TokenType.arrow, arrowLex, startCol);
+            i += arrowLex.length;
+            col += arrowLex.length;
+            continue;
+          }
+        }
         emit(TokenType.rightParen, ')', col);
         i++;
         col++;
@@ -843,6 +1046,28 @@ class Lexer {
           col++;
           continue;
         }
+        // Activity-diagram bullet/stereotype shortcut at line start:
+        // `-<<stereotype>>...` is a `-`-prefixed action whose leading
+        // stereotype rides the same line. Emit `-` as a `minusMinus` token
+        // so the activity parser's bullet path picks it up. Without this,
+        // the lexer would throw and reject the otherwise legal source.
+        if (_isLineStart(tokens) &&
+            i + 1 < source.length &&
+            source[i + 1] == '<') {
+          emit(TokenType.minusMinus, '-', startCol);
+          i++;
+          col++;
+          continue;
+        }
+        // Timing-diagram `{-}` shorthand: a `-` token between braces is a
+        // hidden-state marker. Emit as an identifier so the timing-state
+        // reader can incorporate it into the brace block.
+        if (i + 1 < source.length && source[i + 1] == '}') {
+          emit(TokenType.identifier, '-', startCol);
+          i++;
+          col++;
+          continue;
+        }
         throw LexerException("Unexpected '-'", line, col);
       }
 
@@ -879,6 +1104,45 @@ class Lexer {
               emit(TokenType.dotDotDot, '...', col);
               i += 3;
               col += 3;
+            } else if (raw.isEmpty && i < source.length && source[i] == '\n') {
+              // Multi-line delay form:
+              //   ...
+              //   Some ~~text~~
+              //   ...
+              // Conservative: consume the next single non-empty line as the
+              // delay label only when the line *after* that is a standalone
+              // `...`. This avoids swallowing valid statements after a bare
+              // `...` separator (`...\n[-> Bob\n...`).
+              final midStart = i + 1;
+              var midEnd = midStart;
+              while (midEnd < source.length && source[midEnd] != '\n') {
+                midEnd++;
+              }
+              final midText = source.substring(midStart, midEnd).trim();
+              // Sniff for the closing `...` on the very next line.
+              final afterMid = midEnd + 1;
+              var closeEnd = afterMid;
+              while (closeEnd < source.length && source[closeEnd] != '\n') {
+                closeEnd++;
+              }
+              final closeText =
+                  source.substring(afterMid, closeEnd).trim();
+              if (midText.isNotEmpty && closeText == '...') {
+                emit(TokenType.text, midText, 1);
+                // Advance to the start of the closing `...` (skip any
+                // leading whitespace on that line).
+                var k = afterMid;
+                while (k < closeEnd &&
+                    (source[k] == ' ' || source[k] == '\t')) {
+                  k++;
+                }
+                i = k;
+                line += 2;
+                col = (k - afterMid) + 1;
+                emit(TokenType.dotDotDot, '...', col);
+                i += 3;
+                col += 3;
+              }
             }
           }
           continue;
@@ -903,6 +1167,26 @@ class Lexer {
         if (i + 1 < source.length &&
             (source[i + 1] == ' ' || source[i + 1] == '\t')) {
           emit(TokenType.arrow, '.', startCol);
+          i++;
+          col++;
+          continue;
+        }
+        // Trailing `.` after an identifier (followed by whitespace, newline or
+        // EOF): absorb the dot into the preceding identifier (`Proc.`, `etc.`).
+        if (tokens.isNotEmpty &&
+            tokens.last.type == TokenType.identifier &&
+            (i + 1 >= source.length ||
+                source[i + 1] == ' ' ||
+                source[i + 1] == '\t' ||
+                source[i + 1] == '\n' ||
+                source[i + 1] == '\r')) {
+          final prev = tokens.removeLast();
+          tokens.add(Token(
+            TokenType.identifier,
+            '${prev.lexeme}.',
+            prev.line,
+            prev.column,
+          ));
           i++;
           col++;
           continue;
@@ -965,6 +1249,18 @@ class Lexer {
             col++;
             continue;
           }
+          // PlantUML state-diagram history pseudo-state `[H*]`: the `*` follows
+          // an identifier that itself follows a `[` (e.g. `[H*]`, `State3[H*]`).
+          // Emit as an identifier so the bracketed name parses cleanly. The
+          // closing `]` keeps the construct unambiguous.
+          if (tokens.length >= 2 &&
+              tokens.last.type == TokenType.identifier &&
+              tokens[tokens.length - 2].type == TokenType.leftBracket) {
+            emit(TokenType.identifier, '*', startCol);
+            i++;
+            col++;
+            continue;
+          }
           // `remove *` (and `hide *` / `show *` / `restore *`) — wildcard
           // selector for class-diagram directives. Emit as identifier so the
           // parser's rest-of-line consumer can swallow it.
@@ -1003,6 +1299,22 @@ class Lexer {
           col++;
           continue;
         }
+        // Timing-diagram relative-time anchor at line start: `+<digits>`
+        // selects the current lane's last anchor + N. Emit as an identifier
+        // with a `+`-prefixed lexeme so the timing parser can decode it.
+        if (_isLineStart(tokens) &&
+            i + 1 < source.length &&
+            _isDigit(source[i + 1])) {
+          final start = i;
+          i++;
+          col++;
+          while (i < source.length && _isDigit(source[i])) {
+            i++;
+            col++;
+          }
+          emit(TokenType.identifier, source.substring(start, i), startCol);
+          continue;
+        }
         throw LexerException("Unexpected '+'", line, col);
       }
 
@@ -1012,6 +1324,80 @@ class Lexer {
           i++;
           col++;
           continue;
+        }
+        // PlantUML wavy-line relation arrow: `~~`, `~~>`, `~~~~`, etc. Treat
+        // as a dashed/wavy connector arrow for relation lines (e.g. component
+        // diagram `node1 ~~ node4`). Scan a run of `~` plus an optional `>`
+        // head so the parser sees a single arrow token. Also supports a
+        // direction-hint with embedded lollipop (`~up(0)~>`, `~le(0)~>`),
+        // and a trailing `(` lollipop marker (`#~~(`).
+        final startCol = col;
+        if (i + 1 < source.length && source[i + 1] == '~') {
+          var j = i + 1;
+          while (j < source.length && source[j] == '~') {
+            j++;
+          }
+          if (j < source.length && source[j] == '>') {
+            j++;
+            if (j < source.length && source[j] == '>') j++;
+          } else if (j < source.length && source[j] == '(') {
+            // Trailing lollipop marker `~~(` or `~~(0)`.
+            j++;
+            while (j < source.length && _isDigit(source[j])) {
+              j++;
+            }
+            if (j < source.length && source[j] == ')') j++;
+          }
+          emit(TokenType.arrow, source.substring(i, j), startCol);
+          col += j - i;
+          i = j;
+          continue;
+        }
+        // Single `~` followed by a direction-hint and lollipop:
+        // `~up(0)~>`, `~le(0)~>`, `~ri(0)~>`, `~do(0)~>`.
+        {
+          var j = i + 1;
+          var matched = false;
+          for (final dir in const [
+            'left', 'right', 'up', 'down', 'le', 'ri', 'do'
+          ]) {
+            if (j + dir.length < source.length &&
+                source.substring(j, j + dir.length) == dir &&
+                (source[j + dir.length] == '(' ||
+                    source[j + dir.length] == '~' ||
+                    _isDigit(source[j + dir.length]))) {
+              j += dir.length;
+              matched = true;
+              break;
+            }
+          }
+          if (matched) {
+            if (j < source.length && source[j] == '(') {
+              var k = j + 1;
+              while (k < source.length && _isDigit(source[k])) {
+                k++;
+              }
+              if (k < source.length && source[k] == ')') {
+                j = k + 1;
+              }
+            } else if (j < source.length && _isDigit(source[j])) {
+              while (j < source.length && _isDigit(source[j])) {
+                j++;
+              }
+              if (j < source.length && source[j] == ')') j++;
+            }
+            while (j < source.length && source[j] == '~') {
+              j++;
+            }
+            if (j < source.length && source[j] == '>') {
+              j++;
+              if (j < source.length && source[j] == '>') j++;
+            }
+            emit(TokenType.arrow, source.substring(i, j), startCol);
+            col += j - i;
+            i = j;
+            continue;
+          }
         }
         throw LexerException("Unexpected '~'", line, col);
       }
@@ -1055,7 +1441,12 @@ class Lexer {
             col++;
           }
           if (lineText.startsWith('procedure') ||
+              lineText.startsWith('unquoted procedure') ||
+              lineText.startsWith('final procedure') ||
               lineText.startsWith('function') ||
+              lineText.startsWith('unquoted function') ||
+              lineText.startsWith('final function') ||
+              lineText.startsWith('return function') ||
               lineText.startsWith('definelong')) {
             while (i < source.length) {
               if (source[i] == '\n') {
@@ -1092,6 +1483,24 @@ class Lexer {
       if (c == '=') {
         final startCol = col;
         if (i + 1 < source.length && source[i + 1] == '=') {
+          // `==` only acts as a section-divider marker at line start. Mid-line
+          // `==` (e.g. `node1 == node5` in a component diagram) is a bold
+          // connector arrow — scan as such so the relation parser sees one
+          // arrow token between the two endpoints.
+          if (!_isLineStart(tokens)) {
+            var j = i + 1;
+            while (j < source.length && source[j] == '=') {
+              j++;
+            }
+            if (j < source.length && source[j] == '>') {
+              j++;
+              if (j < source.length && source[j] == '>') j++;
+            }
+            emit(TokenType.arrow, source.substring(i, j), startCol);
+            col += j - i;
+            i = j;
+            continue;
+          }
           emit(TokenType.doubleEquals, '==', startCol);
           i += 2;
           col += 2;
@@ -1281,6 +1690,35 @@ class Lexer {
           col += arrowLex.length;
           continue;
         }
+        // PlantUML state-diagram border-style modifier: `##color`,
+        // `##[dashed]color`, `##[bold]`, `##[dotted]green`, or bare `##`.
+        // Absorb the whole construct into a single hashColor lexeme so the
+        // parser can treat it the same way as a `#color` background.
+        if (i + 1 < source.length && source[i + 1] == '#') {
+          final start = i;
+          i += 2;
+          col += 2;
+          // Optional `[modifier]` bracketed style hint.
+          if (i < source.length && source[i] == '[') {
+            i++;
+            col++;
+            while (i < source.length && source[i] != ']' && source[i] != '\n') {
+              i++;
+              col++;
+            }
+            if (i < source.length && source[i] == ']') {
+              i++;
+              col++;
+            }
+          }
+          // Optional trailing color name / hex.
+          while (i < source.length && _isIdentChar(source[i])) {
+            i++;
+            col++;
+          }
+          emit(TokenType.hashColor, source.substring(start, i), startCol);
+          continue;
+        }
         // Visibility prefix on class-header keyword at line start:
         // `#class "X" { }`. Drop the `#` and let the keyword lex normally.
         if (_isLineStart(tokens) && _isVisibilityPrefixedHeader(source, i)) {
@@ -1311,6 +1749,35 @@ class Lexer {
           i++;
           col++;
           while (i < source.length && _isIdentChar(source[i])) {
+            i++;
+            col++;
+          }
+        }
+        // PlantUML gradient color suffix on a `#<color>` token:
+        // `#red-green`, `#color1/color2`, `#color1|color2`. Absorb the
+        // separator + second name so the gradient stays one hashColor token.
+        // Rendering as a true gradient is deferred; downstream solid-color
+        // resolution picks the first name.
+        if (i < source.length &&
+            (source[i] == '-' || source[i] == '/' || source[i] == '|') &&
+            i + 1 < source.length &&
+            _isIdentStart(source[i + 1])) {
+          i++;
+          col++;
+          while (i < source.length && _isIdentChar(source[i])) {
+            i++;
+            col++;
+          }
+        }
+        // PlantUML hex-escape suffix on a `#<color>` token used in note
+        // background colors: `#blue\9932CC`. Absorb `\<hexdigits>` so the
+        // whole construct stays a single hashColor lexeme.
+        if (i + 1 < source.length &&
+            source[i] == r'\' &&
+            _isHexDigit(source[i + 1])) {
+          i++;
+          col++;
+          while (i < source.length && _isHexDigit(source[i])) {
             i++;
             col++;
           }
@@ -1366,6 +1833,24 @@ class Lexer {
           continue;
         }
       }
+      // PlantUML chained-lollipop component arrows starting with a bare digit
+      // or closing paren: `0)-(0-(0`, `)-0-(0`. Try the arrow scanner only
+      // when the next char is a `)` or `-` to avoid swallowing plain numbers.
+      if ((c == '0' || c == ')') &&
+          i + 1 < source.length &&
+          (source[i + 1] == ')' ||
+              source[i + 1] == '-' ||
+              source[i + 1] == '.' ||
+              source[i + 1] == '(')) {
+        final startCol = col;
+        final arrowLex = _scanArrow(source, i);
+        if (arrowLex != null) {
+          emit(TokenType.arrow, arrowLex, startCol);
+          i += arrowLex.length;
+          col += arrowLex.length;
+          continue;
+        }
+      }
 
       if (_isIdentStart(c)) {
         final startCol = col;
@@ -1378,6 +1863,18 @@ class Lexer {
             continue;
           }
           if (ch == '-' &&
+              i + 1 < source.length &&
+              _isIdentStart(source[i + 1])) {
+            i++;
+            col++;
+            continue;
+          }
+          // PlantUML gradient colors: `Color1/Color2`, `Color1|Color2` (and
+          // `Color1-Color2`, already covered above). Absorb the separator
+          // and second name so the value lexes as one identifier. Rendering
+          // a true gradient is deferred; downstream resolves to the first
+          // color via `tryParseColor`.
+          if ((ch == '/' || ch == '|') &&
               i + 1 < source.length &&
               _isIdentStart(source[i + 1])) {
             i++;
@@ -1682,6 +2179,75 @@ class Lexer {
     return tokens.last.type == TokenType.newline;
   }
 
+  /// True when [trimmed] is an opening line of a WBS/mindmap multi-line body
+  /// marker (`<+/-/*>+[#color]?:body`) whose closing `;` is NOT on the same
+  /// line. The caller is responsible for accumulating subsequent lines until
+  /// the closing `;` is reached.
+  static bool _isMultilineMarkerBodyOpen(String trimmed) {
+    if (trimmed.isEmpty) return false;
+    final first = trimmed[0];
+    if (first != '+' && first != '-' && first != '*') return false;
+    var k = 0;
+    while (k < trimmed.length &&
+        (trimmed[k] == '+' || trimmed[k] == '-' || trimmed[k] == '*')) {
+      k++;
+    }
+    if (k == 0) return false;
+    // Optional `_` boxless suffix (`++_:body`).
+    if (k < trimmed.length && trimmed[k] == '_') k++;
+    // Skip whitespace between marker run and `[#color]?` / `:`.
+    while (k < trimmed.length &&
+        (trimmed[k] == ' ' || trimmed[k] == '\t')) {
+      k++;
+    }
+    // Optional `[#color]` inline color before `:`.
+    if (k < trimmed.length && trimmed[k] == '[') {
+      final close = trimmed.indexOf(']', k);
+      if (close < 0) return false;
+      k = close + 1;
+      while (k < trimmed.length &&
+          (trimmed[k] == ' ' || trimmed[k] == '\t')) {
+        k++;
+      }
+    }
+    if (k >= trimmed.length || trimmed[k] != ':') return false;
+    // Opening colon present; multi-line body is "open" if the line does NOT
+    // end with `;` (after trimming).
+    return !trimmed.endsWith(';');
+  }
+
+  /// Net change to verbatim-block nesting depth contributed by [trimmed].
+  /// Counts case-insensitive `<code>` / `</code>` (and similar `<pre>`) tags.
+  /// Used by the `**:..;` multi-line body accumulator so that a stray `;`
+  /// inside a verbatim block (e.g. `void f1();`) does not prematurely
+  /// terminate body accumulation.
+  static int _verbatimDepthDelta(String trimmed) {
+    if (trimmed.isEmpty) return 0;
+    final lower = trimmed.toLowerCase();
+    var delta = 0;
+    const openTags = ['<code>', '<pre>'];
+    const closeTags = ['</code>', '</pre>'];
+    for (final tag in openTags) {
+      var idx = 0;
+      while (true) {
+        final hit = lower.indexOf(tag, idx);
+        if (hit < 0) break;
+        delta++;
+        idx = hit + tag.length;
+      }
+    }
+    for (final tag in closeTags) {
+      var idx = 0;
+      while (true) {
+        final hit = lower.indexOf(tag, idx);
+        if (hit < 0) break;
+        delta--;
+        idx = hit + tag.length;
+      }
+    }
+    return delta;
+  }
+
   /// True when the just-emitted `{` (last token in [tokens]) belongs to a
   /// single-line class-body declaration of the form
   /// `[<kind>] [name] [<<stereo>>] [as alias] { ... }`. Walks backward from
@@ -1789,16 +2355,8 @@ class Lexer {
     }
     if (k >= n || source[k] == '\n') return null;
     if (source[k] != '-' && source[k] != '<') return null;
-    var sawParen = false;
-    for (var p = k; p < n; p++) {
-      final ch = source[p];
-      if (ch == '\n') break;
-      if (ch == '(') {
-        sawParen = true;
-        break;
-      }
-    }
-    if (!sawParen) return null;
+    // Don't require a parenthesised target — allow bare identifier or
+    // bracketed component target too (e.g. `:actor: -0)- foo`).
     return innerColon;
   }
 
@@ -1820,6 +2378,13 @@ class Lexer {
   static bool _isDigit(String c) {
     final code = c.codeUnitAt(0);
     return code >= 0x30 && code <= 0x39;
+  }
+
+  static bool _isHexDigit(String c) {
+    final code = c.codeUnitAt(0);
+    return (code >= 0x30 && code <= 0x39) ||
+        (code >= 0x41 && code <= 0x46) ||
+        (code >= 0x61 && code <= 0x66);
   }
 
   static const _crowFootLeftEnds = ['||', '|o', '}o', '}|'];
@@ -1930,6 +2495,31 @@ class Lexer {
         sawDots = true;
         k++;
       }
+      // PlantUML direction-hint segment inside an arrow body: `*-down-`,
+      // `.up.|>`, `o-left->`. After the leading body run, consume an
+      // optional `up`/`down`/`left`/`right` (or 2-letter abbreviation)
+      // followed by more body chars.
+      if ((sawDashes || sawDots) && k < n) {
+        for (final dir in const [
+          'left', 'right', 'up', 'down', 'le', 'ri', 'do'
+        ]) {
+          if (k + dir.length < n &&
+              source.substring(k, k + dir.length) == dir &&
+              (source[k + dir.length] == '-' ||
+                  source[k + dir.length] == '.')) {
+            k += dir.length;
+            while (k < n && (source[k] == '-' || source[k] == '\\' || source[k] == '/')) {
+              sawDashes = true;
+              k++;
+            }
+            while (k < n && source[k] == '.') {
+              sawDots = true;
+              k++;
+            }
+            break;
+          }
+        }
+      }
       if (k < n && source[k] == '[') {
         final close = source.indexOf(']', k + 1);
         if (close < 0) return null;
@@ -1969,15 +2559,59 @@ class Lexer {
     if (first == '-') {
       var j = i + 1;
       // PlantUML direction-hint arrows: `-left->`, `-right->`, `-up->`,
-      // `-down->`. After the initial `-`, consume the direction keyword if
-      // present, leaving `j` at the trailing `-` so the existing dash-run
-      // logic continues normally.
-      for (final dir in const ['left', 'right', 'up', 'down']) {
+      // `-down->`. Also accepts 2-letter abbreviations `-le->`, `-ri->`,
+      // `-up->`, `-do->`. After the initial `-`, consume the direction keyword
+      // if present. The keyword may be followed by `-`, `[`, `.`, or a
+      // parenthesised lollipop digit `(0)`. Also accepts `-le0`/`-ri0` form
+      // (digit directly without parens) for `:actor: -ri0)- foo` shape.
+      for (final dir in const [
+        'left', 'right', 'up', 'down', 'le', 'ri', 'do'
+      ]) {
         if (j + dir.length < n &&
             source.substring(j, j + dir.length) == dir &&
-            source[j + dir.length] == '-') {
+            (source[j + dir.length] == '-' ||
+                source[j + dir.length] == '[' ||
+                source[j + dir.length] == '.' ||
+                source[j + dir.length] == '(' ||
+                _isDigit(source[j + dir.length]))) {
           j += dir.length;
           break;
+        }
+      }
+      // Optional embedded lollipop after direction-hint OR as a middle marker
+      // (`-(0)-`, `-(0)->`, `-0)-`). Consume `(0)` / `(N)` / `0)` / `0` so the
+      // rest of the arrow body scan continues at the trailing `-`. If the
+      // construct is followed by a trailing dash run with no head glyph,
+      // accept the whole thing as a valid middle-marker arrow.
+      var lollipopConsumed = false;
+      if (j < n && source[j] == '(') {
+        var k = j + 1;
+        while (k < n && _isDigit(source[k])) {
+          k++;
+        }
+        if (k > j + 1 && k < n && source[k] == ')') {
+          j = k + 1;
+          lollipopConsumed = true;
+        }
+      }
+      if (lollipopConsumed) {
+        // Trailing dash run -> middle-marker arrow, e.g. `-(0)-`, `-(N)-`.
+        if (j < n && source[j] == '-') {
+          while (j < n && source[j] == '-') {
+            j++;
+          }
+          // If a head glyph follows the trailing dash, fall through to the
+          // normal head consumption logic; otherwise return the lexeme.
+          if (j >= n ||
+              (source[j] != '>' &&
+                  source[j] != '|' &&
+                  source[j] != '*' &&
+                  source[j] != 'o' &&
+                  source[j] != '+' &&
+                  source[j] != '#' &&
+                  source[j] != '^')) {
+            return source.substring(start, j);
+          }
         }
       }
       // PlantUML use-case / class diagrams allow elongated dashed bodies like
@@ -2021,9 +2655,24 @@ class Lexer {
       }
       if (j < n && source[j] == '|') {
         j++;
+        // PlantUML deployment heads `--||>` (double pipe with arrow).
+        if (j < n && source[j] == '|') j++;
         if (j < n && source[j] == '>') {
           j++;
           return source.substring(start, j);
+        }
+        return null;
+      }
+      // PlantUML deployment head `--:|>` (colon prefix on a pipe-arrow head).
+      if (j < n && source[j] == ':') {
+        j++;
+        if (j < n && source[j] == '|') {
+          j++;
+          if (j < n && source[j] == '|') j++;
+          if (j < n && source[j] == '>') {
+            j++;
+            return source.substring(start, j);
+          }
         }
         return null;
       }
@@ -2032,10 +2681,72 @@ class Lexer {
         j = consumeLostEnd(j);
         return source.substring(start, j);
       }
+      // PlantUML cloud / component lollipop arrows that wrap a number or
+      // parenthesised number as a MIDDLE marker with a trailing dash run:
+      //   `-0-`, `-0)-`, `-(0-`, `-(0)-`  (cloud lollipop forms)
+      // The marker can also be terminal (no trailing dashes), in which case
+      // it acts as a head decoration: `--0`, `--^`, `--+`, `--#`, `--(0`.
+      if (j < n && source[j] == '0') {
+        var k = j + 1;
+        if (k < n && source[k] == ')') k++;
+        // Trailing dash run -> middle-of-arrow form.
+        if (k < n && source[k] == '-') {
+          while (k < n && source[k] == '-') {
+            k++;
+          }
+          return source.substring(start, k);
+        }
+        // Terminal head decoration form: `--0`, `--0)`.
+        k = j + 1;
+        k = consumeLostEnd(k);
+        return source.substring(start, k);
+      }
+      // PlantUML artifact / component head decorations after a dashed/dotted
+      // body: `--+`, `--#`, `--^`. Consume the single head glyph as
+      // part of the arrow lexeme so the relation parser sees one token.
+      // For `+`, only treat as a head when not followed by another `+` —
+      // `--++` is a sequence-diagram inline-activation suffix (`--` then
+      // `++`) which must NOT be eaten here.
+      if (j < n &&
+          ((source[j] == '+' && (j + 1 >= n || source[j + 1] != '+')) ||
+              source[j] == '#' ||
+              source[j] == '^' ||
+              source[j] == '@')) {
+        j++;
+        j = consumeLostEnd(j);
+        return source.substring(start, j);
+      }
       // PlantUML lollipop interface marker as a trailing head: `-()`, `--()`,
-      // `..()`. Consume the `()` pair so the whole construct is one arrow.
+      // `..()`, or `--(0` (numbered lollipop). Consume the `()` pair so the
+      // whole construct is one arrow; also accept the parenthesised numbered
+      // form (`-(0-`, `-(0)-`, `--(0`).
       if (j + 1 < n && source[j] == '(' && source[j + 1] == ')') {
         return source.substring(start, j + 2);
+      }
+      // PlantUML lollipop "start" marker `--(` (open paren with no following
+      // digit or close): accept as a single arrow lexeme so `f --( b` parses
+      // as relation rather than splitting `--` and stranding the `(` as a
+      // leftParen token that downstream relation parsers misread as an
+      // ellipse-name opener.
+      if (j < n &&
+          source[j] == '(' &&
+          (j + 1 >= n || (source[j + 1] != ')' && !_isDigit(source[j + 1])))) {
+        return source.substring(start, j + 1);
+      }
+      if (j + 1 < n && source[j] == '(' && _isDigit(source[j + 1])) {
+        var k = j + 2;
+        while (k < n && _isDigit(source[k])) {
+          k++;
+        }
+        if (k < n && source[k] == ')') k++;
+        // If followed by trailing dashes, this is a middle-of-arrow marker
+        // (`-(0-`, `-(0)-`): consume the dash run as the arrow tail.
+        if (k < n && source[k] == '-') {
+          while (k < n && source[k] == '-') {
+            k++;
+          }
+        }
+        return source.substring(start, k);
       }
       // Half-arrow bodies like `-\` or `-/` end with the slash/backslash itself.
       if (j > i + 1 && j - 1 < n && (source[j - 1] == '\\' || source[j - 1] == '/')) {
@@ -2059,6 +2770,44 @@ class Lexer {
         if (j < n && (source[j] == 'o' || source[j] == 'x')) j++;
         j = consumeLostEnd(j);
         return source.substring(start, j);
+      }
+      // PlantUML direction-hint dashed arrow body: `.up.|>`, `.down.>`,
+      // `.left.>`, `.right.>`. After the leading `.`, recognize a
+      // direction keyword followed by another `.` run (then the standard
+      // head consumption logic continues below).
+      for (final dir in const [
+        'left', 'right', 'up', 'down', 'le', 'ri', 'do'
+      ]) {
+        if (j + dir.length < n &&
+            source.substring(j, j + dir.length) == dir &&
+            source[j + dir.length] == '.') {
+          j += dir.length;
+          // Consume the trailing dot run; fall through to head scan.
+          while (j < n && source[j] == '.') {
+            j++;
+          }
+          if (j < n && source[j] == '>') {
+            j++;
+            if (j < n && source[j] == '>') j++;
+            if (j < n && (source[j] == 'o' || source[j] == 'x')) j++;
+            j = consumeLostEnd(j);
+            return source.substring(start, j);
+          }
+          if (j < n && source[j] == '|') {
+            j++;
+            if (j < n && source[j] == '>') {
+              j++;
+              return source.substring(start, j);
+            }
+            return null;
+          }
+          if (j < n && (source[j] == '*' || source[j] == 'o')) {
+            j++;
+            j = consumeLostEnd(j);
+            return source.substring(start, j);
+          }
+          return null;
+        }
       }
       if (j >= n || source[j] != '.') return null;
       j++;
@@ -2092,6 +2841,30 @@ class Lexer {
       }
       return null;
     }
+    // PlantUML chained-lollipop arrows starting with a bare digit or a
+    // closing paren: `0)-(0-(0`, `)-0-(0`, `0)-`. Walk a permissive
+    // run of `0`, `(`, `)`, `-`, `.` chars; stop at whitespace/EOL/identifier.
+    if (first == '0' || first == ')') {
+      var j = i + 1;
+      while (j < n) {
+        final ch = source[j];
+        if (ch == '0' ||
+            ch == '(' ||
+            ch == ')' ||
+            ch == '-' ||
+            ch == '.') {
+          j++;
+          continue;
+        }
+        break;
+      }
+      // Must contain at least one body separator to count as an arrow.
+      final lex = source.substring(start, j);
+      if (lex.contains('-') || lex.contains('.')) {
+        return lex;
+      }
+      return null;
+    }
     if (first == '*' ||
         first == 'o' ||
         first == '#' ||
@@ -2118,9 +2891,62 @@ class Lexer {
           return source.substring(start, j + inner.length);
         }
       }
+      // PlantUML hash-prefix wavy arrow (`#~~`, `#~~(`, `#~~>`, `#~~>>`).
+      // The `#` indicates a styled connector and the `~~` body is a wavy line.
+      if (first == '#' && j < n && source[j] == '~') {
+        var k = j;
+        while (k < n && source[k] == '~') {
+          k++;
+        }
+        if (k > j + 1) {
+          // Trailing lollipop `(` or `(0)`.
+          if (k < n && source[k] == '(') {
+            k++;
+            while (k < n && _isDigit(source[k])) {
+              k++;
+            }
+            if (k < n && source[k] == ')') k++;
+            return source.substring(start, k);
+          }
+          if (k < n && source[k] == '>') {
+            k++;
+            if (k < n && source[k] == '>') k++;
+            return source.substring(start, k);
+          }
+          return source.substring(start, k);
+        }
+      }
       final after = consumeBody(j);
       if (after == null) return null;
       j = after;
+      // PlantUML middle marker `0)` / `(0)` inside body, e.g. `*-0)-+`.
+      // After the initial body consumption, if a `0)` or `(0)` is followed
+      // by more body chars and a head, fold it into the lexeme.
+      if (j < n && source[j] == '0') {
+        var k = j + 1;
+        if (k < n && source[k] == ')') k++;
+        // Trailing body chars after the lollipop.
+        if (k < n && (source[k] == '-' || source[k] == '.')) {
+          while (k < n && (source[k] == '-' || source[k] == '.')) {
+            k++;
+          }
+          j = k;
+        }
+      } else if (j < n && source[j] == '(') {
+        var k = j + 1;
+        while (k < n && _isDigit(source[k])) {
+          k++;
+        }
+        if (k > j + 1 && k < n && source[k] == ')') {
+          k++;
+          if (k < n && (source[k] == '-' || source[k] == '.')) {
+            while (k < n && (source[k] == '-' || source[k] == '.')) {
+              k++;
+            }
+            j = k;
+          }
+        }
+      }
       if (j < n && source[j] == '>') {
         j++;
         // Double-head `>>` (thin / async) — `o->>`, `x->>`.
@@ -2146,18 +2972,50 @@ class Lexer {
         j = consumeLostEnd(j);
         return source.substring(start, j);
       }
+      // Single-glyph head terminators `+`, `#`, `^` (e.g. `*-0)-+`).
+      if (j < n &&
+          (source[j] == '+' || source[j] == '#' || source[j] == '^')) {
+        j++;
+        j = consumeLostEnd(j);
+        return source.substring(start, j);
+      }
       return source.substring(start, j);
     }
     if (first == '<') {
       var j = i + 1;
       if (j < n && source[j] == '-') {
         var k = j;
-        while (k < n && (source[k] == '-' || source[k] == '.' ||
-            source[k] == '\\' || source[k] == '/')) {
-          k++;
+        // PlantUML bidirectional arrows tolerate optional embedded lollipop
+        // markers in the body: `<-0->`, `<-(0)->`, `<-(0)-->`. Walk through
+        // any mix of dashes, dots, slashes plus a `0` or `(<digits>)` lump.
+        while (k < n) {
+          final ch = source[k];
+          if (ch == '-' || ch == '.' || ch == '\\' || ch == '/') {
+            k++;
+            continue;
+          }
+          if (ch == '0') {
+            k++;
+            if (k < n && source[k] == ')') k++;
+            continue;
+          }
+          if (ch == '(') {
+            var m = k + 1;
+            while (m < n && _isDigit(source[m])) {
+              m++;
+            }
+            if (m > k + 1 && m < n && source[m] == ')') {
+              k = m + 1;
+              continue;
+            }
+            break;
+          }
+          break;
         }
         if (k < n && source[k] == '>') {
           var m = k + 1;
+          // Double-head bidirectional `<-->>` or `<<-->>`.
+          if (m < n && source[m] == '>') m++;
           if (m < n && (source[m] == 'o' || source[m] == 'x')) m++;
           // Bidirectional with lost-endpoint marker (`<->?`, `<->o?`, etc.).
           // The arrow is structurally bidirectional but with an anonymous

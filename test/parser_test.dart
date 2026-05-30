@@ -1869,6 +1869,28 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
         expect(d.hideUnlinked, isFalse);
       });
 
+      test('hide footbox sets the hideFootbox flag', () {
+        final d = parseSequence('@startuml\n'
+            'actor Alice\n'
+            'actor Bob\n'
+            'Alice -> Bob : hello\n'
+            'hide footbox\n'
+            '@enduml\n');
+        expect(d.hideFootbox, isTrue);
+      });
+
+      test('actorStyle awesome is captured on the diagram', () {
+        final d = parseSequence('@startuml\n'
+            'skinparam actorStyle awesome\n'
+            'actor Alice\n'
+            'actor Bob\n'
+            'Alice -> Bob : hello\n'
+            'hide footbox\n'
+            '@enduml\n');
+        expect(d.actorStyle, 'awesome');
+        expect(d.hideFootbox, isTrue);
+      });
+
       test('linkedAliases includes only Message endpoints', () {
         final d = parseSequence('@startuml\n'
             'hide unlinked\n'
@@ -3870,6 +3892,21 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       expect(d.classes.map((c) => c.name),
           containsAll(['C1', 'C2', 'C3']));
     });
+
+    test('accepts gradient colors on class and package (source 69)', () {
+      final d = parseClass('@startuml\n'
+          'skinparam backgroundcolor AntiqueWhite/Gold\n'
+          'skinparam classBackgroundColor Wheat|CornflowerBlue\n'
+          'class Foo #red-green\n'
+          'note left of Foo\n'
+          '  this is my note\n'
+          'end note\n'
+          'package example #GreenYellow/LightGoldenRodYellow {\n'
+          '  class Dummy\n'
+          '}\n'
+          '@enduml\n');
+      expect(d.classes.map((c) => c.name), containsAll(['Foo', 'Dummy']));
+    });
   });
 
   group('object diagram', () {
@@ -4246,6 +4283,50 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       final actors =
           d.nodes.where((n) => n.kind == UseCaseNodeKind.actor).toList();
       expect(actors, hasLength(4));
+    });
+
+    test('parses every PlantUML element-type keyword as <kind> <name>', () {
+      // Verifies that every PlantUML element-shape keyword can be used in the
+      // canonical `<kind> <name>` form within a single use case / mixed
+      // diagram. The use-case AST currently coerces non-actor/usecase shapes
+      // to actor-kind nodes (rendering-shape mapping is deferred); the test
+      // only asserts that the parse succeeds and 30 nodes are declared.
+      final d = parseUseCase('@startuml\n'
+          'action action\n'
+          'actor actor\n'
+          'actor/ "actor/"\n'
+          'agent agent\n'
+          'artifact artifact\n'
+          'boundary boundary\n'
+          'card card\n'
+          'circle circle\n'
+          'cloud cloud\n'
+          'collections collections\n'
+          'component component\n'
+          'control control\n'
+          'database database\n'
+          'entity entity\n'
+          'file file\n'
+          'folder folder\n'
+          'frame frame\n'
+          'hexagon hexagon\n'
+          'interface interface\n'
+          'label label\n'
+          'node node\n'
+          'package package\n'
+          'person person\n'
+          'process process\n'
+          'queue queue\n'
+          'rectangle rectangle\n'
+          'stack stack\n'
+          'storage storage\n'
+          'usecase usecase\n'
+          'usecase/ "usecase/"\n'
+          '@enduml\n');
+      // 28 shapes map to nodes; `rectangle` and `package` lower to boundaries
+      // (no node), so 30 declarations -> 28 nodes + 2 boundaries.
+      expect(d.nodes, hasLength(28));
+      expect(d.boundaries, hasLength(2));
     });
 
     test('parses rectangle boundary with contained use cases', () {
@@ -4823,6 +4904,21 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       expect(d.nodes[2], isA<StopNode>());
     });
 
+    test('parses `- text` bullet shortcut as Action nodes', () {
+      final d = parseActivity('@startuml\n'
+          '- Action 1\n'
+          '- Action 2\n'
+          '- Action 3\n'
+          '@enduml\n');
+      expect(d.nodes, hasLength(3));
+      for (final n in d.nodes) {
+        expect(n, isA<Action>());
+      }
+      expect((d.nodes[0] as Action).text, 'Action 1');
+      expect((d.nodes[1] as Action).text, 'Action 2');
+      expect((d.nodes[2] as Action).text, 'Action 3');
+    });
+
     test('skips common diagram decorations before activity nodes', () {
       final d = parseActivity('@startuml\n'
           'title Release Pipeline\n'
@@ -5176,6 +5272,186 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       final d = Parser().parse(tokens);
       expect(d, isA<StateDiagram>());
     });
+
+    test('S1 frame container flattens into state diagram', () {
+      final d = parseState('@startuml\n'
+          'frame frame {\n'
+          '  state a\n'
+          '}\n'
+          'state b\n'
+          'a --> b\n'
+          'b--> [*]\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name), containsAll(['a', 'b']));
+      expect(d.transitions, hasLength(2));
+    });
+
+    test('S2 mainframe directive is consumed', () {
+      final d = parseState('@startuml\n'
+          'mainframe mainframe\n'
+          'state a\n'
+          'state b\n'
+          'a --> b\n'
+          'b--> [*]\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name), containsAll(['a', 'b']));
+    });
+
+    test('S3 hide empty description + member descriptions', () {
+      final d = parseState('@startuml\n'
+          'hide empty description\n'
+          'state s0\n'
+          'state "This is the State 1" as s1 {\n'
+          '  s1: State description\n'
+          '  state s2\n'
+          '  state s3: long descr.\n'
+          '  state s4\n'
+          '  s4: long descr.\n'
+          '}\n'
+          '[*] -> s0\n'
+          's0 --> s2\n'
+          's2 -> s3\n'
+          's3 -> s4\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name), contains('s1'));
+    });
+
+    test('S4 state descriptions with quoted literal on same line', () {
+      final d = parseState('@startuml\n'
+          'state alias1 : ""state alias1""\n'
+          'state "alias2" : ""state "alias2"""\n'
+          'state "long name" as alias3 : ""state "long name" as alias3""\n'
+          'state alias4 as "long name" : ""state alias4 as "long name"""\n'
+          'alias1 -> alias2\n'
+          'alias2 -> alias3\n'
+          'alias3 -> alias4\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name), contains('alias1'));
+      expect(d.states.map((s) => s.name), contains('alias3'));
+      expect(d.states.map((s) => s.name), contains('alias4'));
+    });
+
+    test('S5 state descriptions on separate lines', () {
+      final d = parseState('@startuml\n'
+          'state alias1\n'
+          'state "alias2"\n'
+          'state "long name" as alias3\n'
+          'state alias4 as "long name"\n'
+          'alias1 : ""state alias1""\n'
+          'alias2 : ""state "alias2"""\n'
+          'alias3 : ""state "long name" as alias3""\n'
+          'alias4 : ""state alias4 as "long name"""\n'
+          'alias1 -> alias2\n'
+          'alias2 -> alias3\n'
+          'alias3 -> alias4\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name), contains('alias1'));
+      expect(d.states.map((s) => s.name), contains('alias3'));
+      expect(d.states.map((s) => s.name), contains('alias4'));
+    });
+
+    test('S6 inline #color;line:X;text:Y styles on state', () {
+      final d = parseState('@startuml\n'
+          'state s1 : s1 description\n'
+          'state s2 #pink;line:red;line.bold;text:red : s2 description\n'
+          'state s3 #palegreen;line:green;line.dashed;text:green : s3 description\n'
+          'state s4 #aliceblue;line:blue;line.dotted;text:blue : s4 description\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name),
+          containsAll(['s1', 's2', 's3', 's4']));
+    });
+
+    test('S7 gradient colors + nested composite states with inline styles',
+        () {
+      final d = parseState('@startuml\n'
+          'state FooGradient #red-green;line:00FFFF\n'
+          'state FooDashed #red|green;line.dashed;line:blue {\n'
+          '}\n'
+          'state FooDotted #line.dotted;line:blue {\n'
+          '}\n'
+          'state FooBold #line.bold {\n'
+          '}\n'
+          'state Foo1 #line.dotted;line:green {\n'
+          '  state inner1 #line.dotted;line:yellow\n'
+          '}\n'
+          'state out #line.dotted;line:gold\n'
+          'state Foo2 #line.bold;line:green {\n'
+          '  state inner2 #line.dotted;line:yellow\n'
+          '}\n'
+          'inner1 -> inner2\n'
+          'out -> inner2\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name), contains('FooGradient'));
+      expect(d.states.map((s) => s.name), contains('Foo1'));
+      expect(d.states.map((s) => s.name), contains('Foo2'));
+    });
+
+    test('S8 ##color border modifier syntax', () {
+      final d = parseState('@startuml\n'
+          'state FooGradient #red-green ##00FFFF\n'
+          'state FooDashed #red|green ##[dashed]blue {\n'
+          '}\n'
+          'state FooDotted ##[dotted]blue {\n'
+          '}\n'
+          'state FooBold ##[bold] {\n'
+          '}\n'
+          'state Foo1 ##[dotted]green {\n'
+          '  state inner1 ##[dotted]yellow\n'
+          '}\n'
+          'state out ##[dotted]gold\n'
+          'state Foo2 ##[bold]green {\n'
+          '  state inner2 ##[dotted]yellow\n'
+          '}\n'
+          'inner1 -> inner2\n'
+          'out -> inner2\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name), contains('FooGradient'));
+      expect(d.states.map((s) => s.name), contains('FooBold'));
+    });
+
+    test('S9 skinparam State block + state descriptions', () {
+      final d = parseState('@startuml\n'
+          'skinparam State {\n'
+          '  AttributeFontColor blue\n'
+          '  AttributeFontName serif\n'
+          '  AttributeFontSize 9\n'
+          '  AttributeFontStyle italic\n'
+          '  BackgroundColor palegreen\n'
+          '  BorderColor violet\n'
+          '  EndColor gold\n'
+          '  FontColor red\n'
+          '  FontName Sansserif\n'
+          '  FontSize 15\n'
+          '  FontStyle bold\n'
+          '  StartColor silver\n'
+          '}\n'
+          'state A : a a a\\na\n'
+          'state B : b b b\\nb\n'
+          '[*] -> A : start\n'
+          'A -> B : a2b\n'
+          'B -> [*] : end\n'
+          '@enduml\n');
+      expect(d.states.map((s) => s.name), containsAll(['A', 'B']));
+    });
+
+    test('S10 composite states with #color and -[hidden]-> arrows', () {
+      final d = parseState('@startuml\n'
+          'state CurrentSite #pink {\n'
+          '  state HardwareSetup #lightblue {\n'
+          '    state Site #brown\n'
+          '    Site -[hidden]-> Controller\n'
+          '    Controller -[hidden]-> Devices\n'
+          '  }\n'
+          '  state PresentationSetup{\n'
+          '    Groups -[hidden]-> PlansAndGraphics\n'
+          '  }\n'
+          '  state Trends #FFFF77\n'
+          '  state Schedule #magenta\n'
+          '  state AlarmSupression\n'
+          '}\n'
+          '@enduml\n');
+      expect(d.states.single.name, 'CurrentSite');
+    });
   });
 
   group('component diagram', () {
@@ -5379,6 +5655,52 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
           '@enduml\n');
       final d = Parser().parse(tokens);
       expect(d, isA<ComponentDiagram>());
+    });
+
+    test('parses bracketed forms incl. \\n in name', () {
+      // Bug 62: line-start `[Name]`, `[Name] as Alias`, `component Name`,
+      // and `component [Name] as Alias` all parse, with `\n` literal
+      // converted to a real newline inside the bracketed name.
+      final d = parseComponent('@startuml\n'
+          '[First component]\n'
+          '[Another component] as Comp2\n'
+          'component Comp3\n'
+          'component [Last\\ncomponent] as Comp4\n'
+          '@enduml\n');
+      expect(d.nodes.map((n) => n.alias).toList(),
+          ['First component', 'Comp2', 'Comp3', 'Comp4']);
+      final comp4 = d.nodes.firstWhere((n) => n.alias == 'Comp4');
+      expect(comp4.label, 'Last\ncomponent');
+    });
+
+    test('parses \$-prefixed names and remove directive', () {
+      // Bug 63: `$` identifier-start, standalone bare reference, and
+      // `remove <name>` directives all parse without error.
+      final d = parseComponent('@startuml\n'
+          'component [\$C1]\n'
+          'component [\$C2]\n'
+          '\$C2\n'
+          'component [\$C2] as dollarC2\n'
+          'remove \$C1\n'
+          'remove \$C2\n'
+          'remove dollarC2\n'
+          '@enduml\n');
+      // Components with bracketed `$C1`, `$C2` and aliased `dollarC2`.
+      final aliases = d.nodes.map((n) => n.alias).toSet();
+      expect(aliases.contains('\$C1'), isTrue);
+      expect(aliases.contains('\$C2'), isTrue);
+      expect(aliases.contains('dollarC2'), isTrue);
+    });
+
+    test('parses backward interface arrows with bracketed source', () {
+      // Bug 64: `<--` and `<-` arrows with bare interface identifiers on
+      // the left and bracketed components on the right parse as a
+      // component diagram (not sequence).
+      final d = parseComponent('@startuml\n'
+          'Interface1 <-- [Component]\n'
+          'Interface2 <- [Component]\n'
+          '@enduml\n');
+      expect(d.relations, hasLength(2));
     });
 
     test('bracketed shorthand routes to component diagram', () {
@@ -5608,6 +5930,727 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       final d = Parser().parse(tokens);
       expect(d, isA<TimingDiagram>());
     });
+
+    // Sources 66.1-66.11 from the timing-diagram regression set. Each test
+    // pins down the minimum-viable contract: the source parses without
+    // throwing. Visual rendering of the new constructs is deferred.
+    test('66.1 clock with period, labeled anchors and arithmetic', () {
+      const src = '@startuml\n'
+          'clock clk with period 1\n'
+          'binary "enable" as EN\n'
+          'concise "dataBus" as db\n'
+          '@0 as :start\n'
+          '@5 as :en_high\n'
+          '@10 as :en_low\n'
+          '@:en_high-2 as :en_highMinus2\n'
+          '@:start\n'
+          'EN is low\n'
+          'db is "0x0000"\n'
+          '@:en_high\n'
+          'EN is high\n'
+          '@:en_low\n'
+          'EN is low\n'
+          '@:en_highMinus2\n'
+          'db is "0xf23a"\n'
+          '@:en_high+6\n'
+          'db is "0x0000"\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.2 relative +N anchors within @<lane> focus', () {
+      const src = '@startuml\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          '@WB\n'
+          '0 is idle\n'
+          '+200 is Proc.\n'
+          '+100 is Waiting\n'
+          '@WU\n'
+          '0 is Waiting\n'
+          '+500 is ok\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.3 multi-value {low,high} state', () {
+      const src = '@startuml\n'
+          'clock "Clock" as C with period 2\n'
+          'binary "Enable" as EN\n'
+          '@0\n'
+          'EN is low\n'
+          '@1\n'
+          'EN is high\n'
+          '@3\n'
+          'EN is low\n'
+          '@5\n'
+          'EN is {low,high}\n'
+          '@10\n'
+          'EN is low\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.4 negative time anchor @-200', () {
+      const src = '@startuml\n'
+          'robust "R-Deci" as RD\n'
+          'concise "R-Algo-0" as RA0\n'
+          'robust "R-Algo-1" as RA1\n'
+          '@200\n'
+          'RD is 0\n'
+          'RA0 is 0\n'
+          '@-200\n'
+          'RD is 1\n'
+          'RA0 is 3\n'
+          '@100\n'
+          'RD is 0\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.5 H:M:S time format with note-on-state', () {
+      const src = '@startuml\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          '@1:15:00\n'
+          'WU is Idle\n'
+          'WB is Idle\n'
+          '@1:16:30\n'
+          'WU is Waiting : some note\n'
+          'WB is Processing : some other note\n'
+          '@1:17:30\n'
+          'WB is Waiting\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.6 date format anchors with scale/manual/use directives', () {
+      const src = '@startuml\n'
+          'scale 31536000 as 40 pixels\n'
+          'manual time-axis\n'
+          'use date format "yy-MM"\n'
+          'concise "OpenGL Desktop" as OD\n'
+          '@1992/01/01\n'
+          'OD is {hidden}\n'
+          '@1992/06/30\n'
+          'OD is 1.0\n'
+          '@1997/03/04\n'
+          'OD is 1.1\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.7 note top/bottom of <lane>', () {
+      const src = '@startuml\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          '@0\n'
+          'WU is Idle\n'
+          'WB is Idle\n'
+          '@100\n'
+          'WU is Waiting\n'
+          'WB is Processing\n'
+          r'note top of WU : first note\non several\nlines'
+          '\n'
+          r'note bottom of WU : second note\non several\nlines'
+          '\n'
+          '@300\n'
+          'WB is Waiting\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.8 highlight ranges and cross-lane annotation arrows', () {
+      const src = '@startuml\n'
+          'scale 5 as 150 pixels\n'
+          'clock clk with period 1\n'
+          'binary "enable" as en\n'
+          'concise "dataBus" as db\n'
+          'concise "address bus" as addr\n'
+          '@0\n'
+          'en is low\n'
+          'db is "0x0"\n'
+          'addr is "0x03f4"\n'
+          '@5 as :write_beg\n'
+          'en is high\n'
+          'db is "0xf23a"\n'
+          'addr is "0x0300"\n'
+          '@10 as :write_end\n'
+          'en is low\n'
+          '@15 as :read_beg\n'
+          'addr is "0x0301"\n'
+          '@20 as :read_end\n'
+          'en is high\n'
+          'highlight :write_beg to :write_end #Gold:Write\n'
+          'highlight :read_beg to :read_end #lightBlue:Read\n'
+          'db@:write_beg-1 <-> @:write_end : setup time\n'
+          'db@:write_beg-1 -> addr@:write_end+1 : hold\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.9 mode compact directive', () {
+      const src = '@startuml\n'
+          'mode compact\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          'robust "Web Browser2" as WB2\n'
+          '@0\n'
+          'WU is Waiting\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('66.10 analog lane type', () {
+      const src = '@startuml\n'
+          'title Between 0-max (by default)\n'
+          'analog "Analog" as A\n'
+          '@0\n'
+          'A is 350\n'
+          '@100\n'
+          'A is 450\n'
+          '@300\n'
+          'A is 350\n'
+          '@enduml\n';
+      final d = parseTiming(src);
+      expect(d.lanes.single.kind, TimingLaneKind.analog);
+    });
+
+    test('66.11 analog with cross-lane arrows', () {
+      const src = '@startuml\n'
+          'analog "Vcore" as VDD\n'
+          'analog "VCC" as VCC\n'
+          '@0\n'
+          'VDD is 0\n'
+          'VCC is 3\n'
+          '@2\n'
+          'VDD is 0\n'
+          '@3\n'
+          'VDD is 6\n'
+          'VCC is 6\n'
+          'VDD@1 -> VCC@2 : "test"\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T1 rectangle lane type parses', () {
+      const src = '@startuml\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          'rectangle "Rect. Web User" as RWU\n'
+          '@0\n'
+          'WU is Idle\n'
+          'RWU is Idle\n'
+          'WB is Idle\n'
+          '@100\n'
+          'WU is Waiting\n'
+          'RWU is Waiting\n'
+          'WB is Processing\n'
+          '@300\n'
+          'WB is Waiting\n'
+          '@enduml\n';
+      final d = parseTiming(src);
+      expect(d.lanes, hasLength(3));
+      expect(d.lanes[2].kind, TimingLaneKind.rectangle);
+      expect(d.lanes[2].alias, 'RWU');
+    });
+
+    test('T2 clock with period N pulse M offset O parses', () {
+      const src = '@startuml\n'
+          'clock "Clock_0" as C0 with period 50\n'
+          'clock "Clock_1" as C1 with period 50 pulse 15 offset 10\n'
+          'binary "Binary" as B\n'
+          '@0\n'
+          'B is high\n'
+          '@enduml\n';
+      final d = parseTiming(src);
+      expect(d.lanes, hasLength(3));
+      expect(d.lanes[0].kind, TimingLaneKind.clock);
+      expect(d.lanes[0].clockPeriod, 50);
+      expect(d.lanes[1].kind, TimingLaneKind.clock);
+      expect(d.lanes[1].clockPeriod, 50);
+    });
+
+    test('T4 decimal time anchors parse', () {
+      const src = '@startuml\n'
+          'binary "enable" as EN\n'
+          '@3 as :start\n'
+          '@5.5 as :en_high\n'
+          '@10 as :en_low\n'
+          '@:en_high-2 as :en_highMinus2\n'
+          '@:start\n'
+          'EN is low\n'
+          '@:en_high+1.2\n'
+          'EN is high\n'
+          '@10.5\n'
+          'EN is low\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T5 has value enumeration parses', () {
+      const src = '@startuml\n'
+          'robust "Signal1" as S1\n'
+          'robust "Signal2" as S2\n'
+          'S1 has 0,1,2,hello\n'
+          'S2 has 0,1,2\n'
+          '@0\n'
+          'S1 is 0\n'
+          'S2 is 0\n'
+          '@100\n'
+          'S1 is {0,1} #SlateGrey\n'
+          'S2 is {0,1}\n'
+          '@200\n'
+          'S1 is 1\n'
+          'S2 is 0\n'
+          '@300\n'
+          'S1 is hello\n'
+          'S2 is {0,2}\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T6 {-} shorthand and {hidden} parse', () {
+      const src = '@startuml\n'
+          'concise "Web User" as WU\n'
+          '@0\n'
+          'WU is {-}\n'
+          '@100\n'
+          'WU is A1\n'
+          '@200\n'
+          'WU is {-}\n'
+          '@300\n'
+          'WU is {hidden}\n'
+          '@400\n'
+          'WU is A3\n'
+          '@500\n'
+          'WU is {-}\n'
+          '@enduml\n';
+      final d = parseTiming(src);
+      // `{-}` should be normalized to `{hidden}`.
+      final hiddenChanges = d.events
+          .whereType<StateChange>()
+          .where((e) => e.state == '{hidden}')
+          .toList();
+      expect(hiddenChanges, hasLength(4));
+    });
+
+    test('T3 cross-lane message mid-lane parses', () {
+      const src = '@startuml\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          'rectangle "Rect. Web User" as RWU\n'
+          '@0\n'
+          'WU is Idle\n'
+          'RWU is Idle\n'
+          'WB is Idle\n'
+          '@100\n'
+          'WU -> WB : URL\n'
+          'WU is Waiting\n'
+          'RWU is Waiting\n'
+          'WB is Processing\n'
+          '@300\n'
+          'WB is Waiting\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T7 @lane focus with integer anchors and {hidden} parses', () {
+      const src = '@startuml\n'
+          'scale 1 as 50 pixels\n'
+          'concise state0\n'
+          'concise substate1\n'
+          'robust bit2\n'
+          'bit2 has HIGH,LOW\n'
+          '@state0\n'
+          '0 is 18_start\n'
+          '6 is s_dPause\n'
+          '8 is 10_data\n'
+          '14 is {hidden}\n'
+          '@substate1\n'
+          '0 is sSeq\n'
+          '4 is sPause\n'
+          '6 is {hidden}\n'
+          '8 is dSeq\n'
+          '12 is dPause\n'
+          '14 is {hidden}\n'
+          '@bit2\n'
+          '0 is HIGH\n'
+          '2 is LOW\n'
+          '4 is {hidden}\n'
+          '8 is HIGH\n'
+          '10 is LOW\n'
+          '12 is {hidden}\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T8 <-> annotation arrows with {label} and relative anchor parse',
+        () {
+      const src = '@startuml\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          'WB is Initializing\n'
+          'WU is Absent\n'
+          '@WB\n'
+          '0 is idle\n'
+          '+200 is Processing\n'
+          '+100 is Waiting\n'
+          'WB@0 <-> @50 : {50 ms lag}\n'
+          '@WU\n'
+          '0 is Waiting\n'
+          '+500 is ok\n'
+          '@200 <-> @+150 : {150 ms}\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T9 inline styles on is value and highlight ranges parse', () {
+      const src = '@startuml\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          '@0\n'
+          'WU is Idle\n'
+          'WB is Idle\n'
+          '@100\n'
+          'WU -> WB : URL\n'
+          'WU is Waiting #LightCyan;line:Aqua\n'
+          '@200\n'
+          'WB is Proc.\n'
+          '@300\n'
+          'WU -> WB@350 : URL2\n'
+          'WB is Waiting\n'
+          '@+200\n'
+          'WU is ok\n'
+          '@+200\n'
+          'WB is Idle\n'
+          'highlight 200 to 450 #Gold;line:DimGrey : This is my caption\n'
+          'highlight 600 to 700 : This is another\\nhighlight\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T10 title/header/footer/legend/caption alongside timing parse', () {
+      const src = '@startuml\n'
+          'Title This is my title\n'
+          'header: some header\n'
+          'footer: some footer\n'
+          'legend\n'
+          'Some legend\n'
+          'end legend\n'
+          'caption some caption\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          '@0\n'
+          'WU is Idle\n'
+          'WB is Idle\n'
+          '@100\n'
+          'WU is Waiting\n'
+          'WB is Processing\n'
+          '@300\n'
+          'WB is Waiting\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    // Sources T11-T22 cover advanced timing-diagram constructs from the
+    // regression set. Each pins down the minimum-viable contract: the source
+    // parses without throwing. Visual rendering of the new constructs is
+    // deferred.
+    test('T11 HTTP cache detailed timing with @+N cross-lane target parses',
+        () {
+      const src = '@startuml\n'
+          'concise "Client" as Client\n'
+          'concise "Server" as Server\n'
+          'concise "Response freshness" as Cache\n'
+          'Server is idle\n'
+          'Client is idle\n'
+          '@Client\n'
+          '0 is send\n'
+          'Client -> Server@+25 : GET\n'
+          '+25 is await\n'
+          '+75 is recv\n'
+          '+25 is idle\n'
+          '+25 is send\n'
+          'Client -> Server@+25 : GET\\nIf-Modified-Since: 150\n'
+          '+25 is await\n'
+          '+50 is recv\n'
+          '+25 is idle\n'
+          '@100 <-> @275 : no need to re-request from server\n'
+          '@Server\n'
+          '25 is recv\n'
+          '+25 is work\n'
+          '+25 is send\n'
+          'Server -> Client@+25 : 200 OK\\nExpires: 275\n'
+          '+25 is idle\n'
+          '+75 is recv\n'
+          '+25 is send\n'
+          'Server -> Client@+25 : 304 Not Modified\n'
+          '+25 is idle\n'
+          '@Cache\n'
+          '75 is fresh\n'
+          '+200 is stale\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T12 inline color on initial state parses', () {
+      const src = '@startuml\n'
+          'concise "LR" as LR\n'
+          'concise "ST" as ST\n'
+          'LR is AtPlace #palegreen\n'
+          'ST is AtLoad #gray\n'
+          '@LR\n'
+          '0 is Lowering\n'
+          '100 is Lowered #pink\n'
+          '350 is Releasing\n'
+          '@ST\n'
+          '200 is Moving\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T13 <-> annotation arrows (regression) parses', () {
+      const src = '@startuml\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          'WB is Initializing\n'
+          'WU is Absent\n'
+          '@WB\n'
+          '0 is idle\n'
+          '+200 is Processing\n'
+          '+100 is Waiting\n'
+          'WB@0 <-> @50 : {50 ms lag}\n'
+          '@WU\n'
+          '0 is Waiting\n'
+          '+500 is ok\n'
+          '@200 <-> @+150 : {150 ms}\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T14 <style> block with nested element rules parses', () {
+      const src = '@startuml\n'
+          '<style>\n'
+          'timingDiagram {\n'
+          '  document {\n'
+          '    BackGroundColor SandyBrown\n'
+          '  }\n'
+          '  constraintArrow {\n'
+          '    LineStyle 2-1\n'
+          '    LineThickness 3\n'
+          '    LineColor Blue\n'
+          '  }\n'
+          '}\n'
+          '</style>\n'
+          'robust "Web Browser" as WB\n'
+          'concise "Web User" as WU\n'
+          'WB is Initializing\n'
+          'WU is Absent\n'
+          '@WB\n'
+          '0 is idle\n'
+          '+200 is Processing\n'
+          '+100 is Waiting\n'
+          'WB@0 <-> @50 : {50 ms lag}\n'
+          '@WU\n'
+          '0 is Waiting\n'
+          '+500 is ok\n'
+          '@200 <-> @+150 : {150 ms}\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T15 <style> with .class and <<class>> reference on lane parses', () {
+      const src = '@startuml\n'
+          '<style>\n'
+          'timingDiagram {\n'
+          '  .red {\n'
+          '    LineColor red\n'
+          '  }\n'
+          '  .blue {\n'
+          '    LineColor blue\n'
+          '    LineThickness 5\n'
+          '  }\n'
+          '}\n'
+          '</style>\n'
+          'clock clk with period 1\n'
+          'binary "Input Signal 1" as IS1\n'
+          'binary "Input Signal 2" as IS2 <<blue>>\n'
+          'binary "Output Signal 1" as OS1 <<red>>\n'
+          '@0\n'
+          'IS1 is low\n'
+          'IS2 is high\n'
+          'OS1 is low\n'
+          '@2\n'
+          'OS1 is high\n'
+          '@4\n'
+          'OS1 is low\n'
+          '@5\n'
+          'IS1 is high\n'
+          'OS1 is high\n'
+          '@6\n'
+          'IS2 is low\n'
+          '@10\n'
+          'IS1 is low\n'
+          'OS1 is low\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T16 compact modifier prefix on lane declaration parses', () {
+      const src = '@startuml\n'
+          'compact robust "Web Browser" as WB\n'
+          'compact concise "Web User" as WU\n'
+          'robust "Web Browser2" as WB2\n'
+          '@0\n'
+          'WU is Waiting\n'
+          'WB is Idle\n'
+          'WB2 is Idle\n'
+          '@200\n'
+          'WB is Proc.\n'
+          '@300\n'
+          'WB is Waiting\n'
+          'WB2 is Waiting\n'
+          '@500\n'
+          'WU is ok\n'
+          '@700\n'
+          'WB is Idle\n'
+          '@enduml\n';
+      final d = parseTiming(src);
+      expect(d.lanes, hasLength(3));
+      expect(d.lanes[0].alias, 'WB');
+      expect(d.lanes[1].alias, 'WU');
+      expect(d.lanes[2].alias, 'WB2');
+    });
+
+    test('T17 analog "X" between A and B as Y parses', () {
+      const src = '@startuml\n'
+          'title Between min-max\n'
+          'analog "Analog" between 350 and 450 as A\n'
+          '@0\n'
+          'A is 350\n'
+          '@100\n'
+          'A is 450\n'
+          '@300\n'
+          'A is 350\n'
+          '@enduml\n';
+      final d = parseTiming(src);
+      expect(d.lanes.single.kind, TimingLaneKind.analog);
+      expect(d.lanes.single.alias, 'A');
+    });
+
+    test('T18 analog between with negative bounds + ticks + pixels height '
+        'parses', () {
+      const src = '@startuml\n'
+          'analog "Vcore" as VDD\n'
+          'analog "VCC" between -4.5 and 6.5 as VCC\n'
+          'VCC ticks num on multiple 3\n'
+          'VCC is 200 pixels height\n'
+          '@0\n'
+          'VDD is 0\n'
+          'VCC is 3\n'
+          '@2\n'
+          'VDD is 0\n'
+          '@3\n'
+          'VDD is 6\n'
+          'VCC is 6\n'
+          'VDD@1 -> VCC@2 : "test"\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T19 has comma-separated enumeration of values parses', () {
+      const src = '@startuml\n'
+          'robust "Flow rate" as rate\n'
+          'rate has high,low,none\n'
+          '@0\n'
+          'rate is high\n'
+          '@5\n'
+          'rate is none\n'
+          '@6\n'
+          'rate is low\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T20 has "label" as alias enumeration parses', () {
+      const src = '@startuml\n'
+          'robust "Flow rate" as rate\n'
+          'rate has "35 gpm" as high\n'
+          'rate has "15 gpm" as low\n'
+          'rate has "0 gpm" as none\n'
+          '@0\n'
+          'rate is high\n'
+          '@5\n'
+          'rate is none\n'
+          '@6\n'
+          'rate is low\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T21 @clk*N clock multiplier anchor parses', () {
+      const src = '@startuml\n'
+          'clock "clk" as clk with period 50\n'
+          'concise "Signal1" as S1\n'
+          'robust "Signal2" as S2\n'
+          'binary "Signal3" as S3\n'
+          '@clk*0\n'
+          'S1 is 0\n'
+          'S2 is 0\n'
+          '@clk*1\n'
+          'S1 is 1\n'
+          'S3 is high\n'
+          '@clk*2\n'
+          'S3 is down\n'
+          '@clk*3\n'
+          'S1 is 1\n'
+          'S2 is 1\n'
+          'S3 is 1\n'
+          '@clk*4\n'
+          'S3 is down\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
+
+    test('T22 inline `: description` after state and top-level <-> '
+        'annotation parses', () {
+      const src = '@startuml\n'
+          'binary "Binary Serial Data" as D\n'
+          'robust "Robust" as R\n'
+          'concise "Concise" as C\n'
+          '@-3\n'
+          'D is low: idle\n'
+          'R is lo: idle\n'
+          'C is 1: idle\n'
+          '@-1\n'
+          'D is high: start\n'
+          'R is hi: start\n'
+          'C is 0: start\n'
+          '@0\n'
+          'D is low: 1 lsb\n'
+          'R is lo: 1 lsb\n'
+          'C is 1: lsb\n'
+          '@1\n'
+          'D is high: 0\n'
+          'R is hi: 0\n'
+          'C is 0\n'
+          '@6\n'
+          'D is low: 1\n'
+          'R is lo: 1\n'
+          'C is 1\n'
+          '@7\n'
+          'D is high: 0 msb\n'
+          'R is hi: 0 msb\n'
+          'C is 0: msb\n'
+          '@8\n'
+          'D is low: stop\n'
+          'R is lo: stop\n'
+          'C is 1: stop\n'
+          '@0 <-> @8 : Serial data bits for ASCII "A" (Little Endian)\n'
+          '@enduml\n';
+      expect(() => parseTiming(src), returnsNormally);
+    });
   });
 
   group('mindmap diagram', () {
@@ -5665,11 +6708,38 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       expect(node.color, const Color(0xFFFF0000));
     });
 
-    test('rejects multiple roots', () {
-      expect(
-        () => parseMindmap('@startmindmap\n* One\n* Two\n@endmindmap\n'),
-        throwsA(isA<ParserException>()),
-      );
+    test('accepts multiple depth-1 nodes by attaching to first root', () {
+      // PlantUML mindmap sources in the wild sometimes use bare `*` for every
+      // level, relying on document order rather than marker depth to convey
+      // hierarchy. The mindmap parser is intentionally lenient here (matching
+      // the WBS parser): additional depth-1 nodes become children of the
+      // initial root rather than triggering a "may have only one root node"
+      // error.
+      final d = parseMindmap('@startmindmap\n* One\n* Two\n@endmindmap\n');
+      expect(d.root, isNotNull);
+      expect(d.root!.text, 'One');
+      expect(d.root!.children.map((c) => c.text), ['Two']);
+    });
+
+    test('accepts flat depth-1 mindmap with styled nodes', () {
+      // Verbatim reproduction of a user-reported source that previously failed
+      // with "Mindmap may have only one root node". After the lenient fix
+      // (W2), the source parses without throwing.
+      const source = '@startmindmap\n'
+          '<style>\n'
+          'mindmapDiagram {\n'
+          '.green { BackgroundColor lightgreen }\n'
+          '.rose { BackgroundColor #FFBBCC }\n'
+          '.your_style_name { BackgroundColor lightblue }\n'
+          '}\n'
+          '</style>\n'
+          '* root node\n'
+          '* some first level node <<green>>\n'
+          '* second level node <<rose>>\n'
+          '* another second level node <<your_style_name>>\n'
+          '* another first level node <<green>>\n'
+          '@endmindmap\n';
+      expect(() => parseMindmap(source), returnsNormally);
     });
   });
 
@@ -5715,11 +6785,45 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       expect(root.children[2].children, isEmpty);
     });
 
-    test('rejects multiple roots', () {
-      expect(
-        () => parseWbs('@startwbs\n* One\n* Two\n@endwbs\n'),
-        throwsA(isA<ParserException>()),
-      );
+    test('accepts multiple depth-1 nodes by attaching to first root', () {
+      // PlantUML WBS sources in the wild sometimes use bare `*` (or `+`)
+      // for every level, relying on document order rather than marker depth
+      // to convey hierarchy. The WBS parser is intentionally lenient here:
+      // additional depth-1 nodes become children of the initial root rather
+      // than triggering a "may have only one root node" error.
+      final d = parseWbs('@startwbs\n* One\n* Two\n@endwbs\n');
+      expect(d.root, isNotNull);
+      expect(d.root!.text, 'One');
+      expect(d.root!.children.map((c) => c.text), ['Two']);
+    });
+
+    test('parses +/- depth markers (PlantUML WBS syntax)', () {
+      const source = '@startwbs\n'
+          '+ New Job\n'
+          '++ Decide on Job Requirements\n'
+          '+++ Identity gaps\n'
+          '+++ Review JDs\n'
+          '++++ Sign-Up for courses\n'
+          '++++ Volunteer\n'
+          '++++ Reading\n'
+          '++- Checklist\n'
+          '+++- Responsibilities\n'
+          '+++- Location\n'
+          '++ CV Upload Done\n'
+          '+++ CV Updated\n'
+          '++++ Spelling & Grammar\n'
+          '++++ Check dates\n'
+          '---- Skills\n'
+          '+++ Recruitment sites chosen\n'
+          '@endwbs\n';
+      final d = parseWbs(source);
+      final root = d.root!;
+      expect(root.text, 'New Job');
+      expect(root.depth, 1);
+
+      int count(MindmapNode n) =>
+          1 + n.children.fold<int>(0, (a, c) => a + count(c));
+      expect(count(root), 16);
     });
   });
 
@@ -6044,6 +7148,56 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       final ref = root.entries[1].value as DataScalar;
       expect(ref.kind, ScalarKind.null_);
     });
+
+    test('accepts <style> block and #highlight directives', () {
+      final d = parseYaml('@startyaml\n'
+          '<style>\n'
+          '.h1 {\n'
+          '  BackGroundColor green\n'
+          '  FontColor white\n'
+          '  FontStyle italic\n'
+          '}\n'
+          '.h2 {\n'
+          '  BackGroundColor red\n'
+          '  FontColor white\n'
+          '  FontStyle italic\n'
+          '}\n'
+          '</style>\n'
+          '#highlight "french-hens" <<h1>>\n'
+          '#highlight "xmas-fifth-day" / "partridges" <<h2>>\n'
+          'doe: "a deer, a female deer"\n'
+          'ray: "a drop of golden sun"\n'
+          'pi: 3.14159\n'
+          'xmas: true\n'
+          'french-hens: 3\n'
+          'calling-birds:\n'
+          '  - huey\n'
+          '  - dewey\n'
+          '  - louie\n'
+          '  - fred\n'
+          'xmas-fifth-day:\n'
+          '  calling-birds: four\n'
+          '  french-hens: 3\n'
+          '  golden-rings: 5\n'
+          'partridges:\n'
+          '  count: 1\n'
+          '  location: "a pear tree"\n'
+          'turtle-doves: two\n'
+          '@endyaml\n');
+      expect(d.format, DataFormat.yaml);
+      final root = d.root as DataObject;
+      expect(root.entries.map((e) => e.key), [
+        'doe',
+        'ray',
+        'pi',
+        'xmas',
+        'french-hens',
+        'calling-birds',
+        'xmas-fifth-day',
+        'partridges',
+        'turtle-doves',
+      ]);
+    });
   });
 
   group('salt diagram', () {
@@ -6224,6 +7378,32 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       final s = d.items[1] as GanttSection;
       expect(s.title, 'Milestone');
     });
+
+    test('parses requires syntax with days/weeks and compound durations', () {
+      final d = parseGantt('@startgantt\n'
+          '[Prototype design] requires 15 days\n'
+          '[Test prototype] requires 10 days\n'
+          '-- All example --\n'
+          '[Task 1 (1 day)] requires 1 day\n'
+          '[T2 (5 days)] requires 5 days\n'
+          '[T3 (1 week)] requires 1 week\n'
+          '[T4 (1 week and 4 days)] requires 1 week and 4 days\n'
+          '[T5 (2 weeks)] requires 2 weeks\n'
+          '@endgantt\n');
+      final tasks = d.items.whereType<GanttTask>().toList();
+      final sections = d.items.whereType<GanttSection>().toList();
+      expect(tasks, hasLength(7));
+      expect(sections, hasLength(1));
+      expect(sections.single.title, 'All example');
+      expect(tasks[0].name, 'Prototype design');
+      expect(tasks[0].duration, const Duration(days: 15));
+      expect(tasks[1].duration, const Duration(days: 10));
+      expect(tasks[2].duration, const Duration(days: 1));
+      expect(tasks[3].duration, const Duration(days: 5));
+      expect(tasks[4].duration, const Duration(days: 7));
+      expect(tasks[5].duration, const Duration(days: 11));
+      expect(tasks[6].duration, const Duration(days: 14));
+    });
   });
 
   group('network diagram', () {
@@ -6369,6 +7549,52 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       expect(d.networks[1].name, 'internal');
       expect(d.networks[1].nodes.map((n) => n.name),
           ['web01', 'web02', 'db01', 'db02']);
+    });
+
+    test('parses !include directives, multi-address values and '
+        'description attributes', () {
+      final d = parseNwdiag('@startnwdiag\n'
+          '!include <office/Servers/application_server>\n'
+          '!include <office/Servers/database_server>\n'
+          'nwdiag {\n'
+          '  network dmz {\n'
+          '    address = "210.x.x.x/24"\n'
+          '    // set multiple addresses (using comma)\n'
+          '    web01 [address = "210.x.x.1, 210.x.x.20", '
+          'description = "<\$application_server>\\n web01"]\n'
+          '    web02 [address = "210.x.x.2", '
+          'description = "<\$application_server>\\n web02"];\n'
+          '  }\n'
+          '  network internal {\n'
+          '    address = "172.x.x.x/24";\n'
+          '    web01 [address = "172.x.x.1"];\n'
+          '    web02 [address = "172.x.x.2"];\n'
+          '    db01 [address = "172.x.x.100", '
+          'description = "<\$database_server>\\n db01"];\n'
+          '    db02 [address = "172.x.x.101", '
+          'description = "<\$database_server>\\n db02"];\n'
+          '  }\n'
+          '}\n'
+          '@endnwdiag\n');
+      expect(d.networks, hasLength(2));
+      final dmz = d.networks[0];
+      expect(dmz.name, 'dmz');
+      expect(dmz.address, '210.x.x.x/24');
+      expect(dmz.nodes.map((n) => n.name), ['web01', 'web02']);
+      // Multi-address values are preserved verbatim as a single string.
+      expect(dmz.nodes[0].address, '210.x.x.1, 210.x.x.20');
+      expect(dmz.nodes[1].address, '210.x.x.2');
+      final internal = d.networks[1];
+      expect(internal.name, 'internal');
+      expect(internal.address, '172.x.x.x/24');
+      expect(internal.nodes.map((n) => n.name),
+          ['web01', 'web02', 'db01', 'db02']);
+      expect(internal.nodes.map((n) => n.address), [
+        '172.x.x.1',
+        '172.x.x.2',
+        '172.x.x.100',
+        '172.x.x.101',
+      ]);
     });
   });
 
@@ -6881,6 +8107,24 @@ N1 .. Repository
       final m = d.events.single as Message;
       expect(m.duration, isNull);
       expect(m.synchronized, isFalse);
+    });
+  });
+
+  group('multi-line delay block', () {
+    test('parses `...\\nSome ~~text~~\\n...` form without lexer error', () {
+      const src = '''
+@startuml
+participant Alice
+participant "The **Famous** Bob" as Bob
+Alice -> Bob : hello --there--
+...
+Some ~~long delay~~
+...
+Bob -> Alice : ok
+@enduml
+''';
+      // Just assert it parses; structure of the delay is not asserted here.
+      expect(() => parseSequence(src), returnsNormally);
     });
   });
 

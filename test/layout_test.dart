@@ -926,13 +926,17 @@ void main() {
             .toList();
         expect(labelBoxes, hasLength(1));
         final centerY = labelBoxes.single.rect.center.dy;
+        // The title separator is rendered as a double horizontal line (one
+        // line just above and one just below the box centre), so flanking
+        // lines sit within a few pixels of the box centre rather than exactly
+        // on it.
         final flanks = scene.shapes
             .whereType<SceneLine>()
             .where((l) =>
                 !l.dashed &&
                 l.head == null &&
-                (l.from.dy - centerY).abs() < 0.5 &&
-                (l.to.dy - centerY).abs() < 0.5)
+                (l.from.dy - centerY).abs() < 4 &&
+                (l.to.dy - centerY).abs() < 4)
             .toList();
         expect(flanks.length, greaterThanOrEqualTo(2));
       });
@@ -1531,8 +1535,9 @@ void main() {
         measurer,
       );
       final texts = scene.shapes.whereType<SceneText>().toList();
-      // header name + 2 visibility chars + 2 body strings = 5
-      expect(texts, hasLength(5));
+      // header name + kind-badge glyph ("C") + 2 visibility chars + 2 body
+      // strings = 6
+      expect(texts, hasLength(6));
     });
 
     test('two classes side-by-side do not overlap', () {

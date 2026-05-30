@@ -46,14 +46,30 @@ class Parser {
   // Monotonic counter used to mint unique placeholder aliases for anonymous
   // "found" / "lost" message endpoints. Reset per parse() invocation.
   int _externalEndpointCounter = 0;
+  // Monotonic counter used to mint unique placeholder aliases for empty
+  // bracket components (`[ ]`). Reset per parse() invocation.
+  int _anonBracketCounter = 0;
   bool _autoactivate = false;
   // Set by `hide unlinked` at top-level sequence scope. Order-independent —
   // applied as a filter on participantsInOrder() at render time.
   bool _hideUnlinked = false;
+  // Set by `hide footbox` at top-level sequence scope. Order-independent —
+  // suppresses the bottom (foot) participant boxes/symbols at render time.
+  bool _hideFootbox = false;
+  // Set by `skinparam actorStyle <value>` at top-level sequence scope.
+  // Layout/renderer use this to switch actor visuals (e.g. `awesome` paints
+  // a cartoonier figure instead of the default stick figure).
+  String? _actorStyle;
   // Set by `ignore newpage` at top-level sequence scope. When true,
   // subsequent `newpage` / `newpage <title>` directives are consumed but
   // produce no NewPage event — the diagram renders as a single page.
   bool _ignoreNewpage = false;
+  // Set by `_tryConsumeAllowmixing()` whenever the `allowmixing` directive
+  // is seen at line start. Used by host parsers (notably class diagram) to
+  // accept-and-skip mixed-element declarations (component / use-case shape
+  // keywords like `actor`, `actor/`, `usecase/`, `agent`, `card`, ...) that
+  // they don't natively model. Resets per `parse()` invocation.
+  bool _allowMixing = false;
   // Set by the `mainframe <label>` directive at top-level sequence scope.
   // Layout consumes this to wrap the diagram in a UML frame with a folded-
   // corner tab in the top-left. Inline markup (e.g. `**bold**`) is honoured
@@ -70,6 +86,11 @@ class Parser {
   // `_parseNote` to resolve `note across` / `hnote across` shorthand to the
   // current first..last participant span.
   final Set<String> _declaredAliases = <String>{};
+  // Inline member declarations of the form `ClassName : member` collected
+  // during class-diagram parsing. Merged into the corresponding ClassDecl's
+  // `members` list at the end of the parse. Reset per `parse()` invocation.
+  final Map<String, List<ClassMember>> _classInlineMembers =
+      <String, List<ClassMember>>{};
 
   Diagram parse(List<Token> tokens) {
     _tokens = tokens;
@@ -79,12 +100,17 @@ class Parser {
     _pendingMessageAliases.clear();
     _lastForwardMessage = null;
     _externalEndpointCounter = 0;
+    _anonBracketCounter = 0;
     _autoactivate = false;
     _hideUnlinked = false;
+    _hideFootbox = false;
+    _actorStyle = null;
     _ignoreNewpage = false;
+    _allowMixing = false;
     _mainframeLabel = null;
     _callStack.clear();
     _declaredAliases.clear();
+    _classInlineMembers.clear();
 
     _skipNewlines();
     if (_check(TokenType.startMindmap)) {
@@ -149,11 +175,25 @@ class Parser {
     if (_hasUnambiguousClassMarker()) {
       return _parseClassDiagram();
     }
-    if (_looksLikeUseCaseDiagram()) {
-      return _parseUseCaseDiagram();
-    }
+    // State-diagram markers (`[*]`, `state`/`State` keyword) are very strong
+    // signals — give state detection priority over use-case detection so
+    // sources that mix `[*]` pseudo-states with direction-hint arrows or
+    // arrow-style modifiers (`-[#color]->`) don't get misrouted.
     if (_looksLikeStateDiagram()) {
       return _parseStateDiagram();
+    }
+    // When the source has an unambiguous component-/deployment-diagram
+    // keyword at line start (e.g. `artifact`, `cloud`, `node`, `card`,
+    // `agent`, `stack`, `sprite`, `hexagon`, or a typed-container keyword
+    // like `database`/`queue`/`storage`), the component-diagram detector
+    // takes priority over the use-case detector. This prevents a stray
+    // `rectangle` declaration (which is overloaded between the two diagram
+    // families) from routing a deployment source to the use-case parser.
+    if (_hasUnambiguousComponentMarker() && _looksLikeComponentDiagram()) {
+      return _parseComponentDiagram();
+    }
+    if (_looksLikeUseCaseDiagram()) {
+      return _parseUseCaseDiagram();
     }
     // A bare `json` keyword inside `@startuml ... @enduml` declares an
     // inline JSON-rendered block. Route to the JSON diagram parser before
@@ -224,6 +264,8 @@ class Parser {
       aliasDisplayNames: Map.unmodifiable(_pendingMessageAliases),
       autoactivate: _autoactivate,
       hideUnlinked: _hideUnlinked,
+      hideFootbox: _hideFootbox,
+      actorStyle: _actorStyle,
       mainframeLabel: _mainframeLabel,
       decorations: _decorations.build(),
     );
@@ -246,18 +288,23 @@ class Parser {
 
   /// Parses a sequence-scope `hide` / `show` directive line.
   ///
-  /// Only `hide unlinked` currently has an effect — it sets the
-  /// [_hideUnlinked] flag, which the layout uses to drop participants that
-  /// no message references. All other `hide`/`show` variants (e.g.
-  /// `hide footbox`, `show Alice`) are accepted but currently no-ops; we
-  /// consume the rest of the line so they parse without error.
+  /// `hide unlinked` sets [_hideUnlinked], which the layout uses to drop
+  /// participants that no message references. `hide footbox` sets
+  /// [_hideFootbox], which suppresses the bottom row of participant
+  /// boxes/symbols at render time. Other variants (e.g. `show Alice`) are
+  /// accepted but currently no-ops; we consume the rest of the line so they
+  /// parse without error.
   void _parseHideShow() {
     final keyword = _advance().lexeme; // 'hide' or 'show'
-    if (keyword == 'hide' &&
-        _check(TokenType.identifier) &&
-        _peek().lexeme == 'unlinked') {
-      _advance();
-      _hideUnlinked = true;
+    if (keyword == 'hide' && _check(TokenType.identifier)) {
+      final word = _peek().lexeme;
+      if (word == 'unlinked') {
+        _advance();
+        _hideUnlinked = true;
+      } else if (word == 'footbox') {
+        _advance();
+        _hideFootbox = true;
+      }
     }
     _consumeRestOfLine();
   }
@@ -327,6 +374,45 @@ class Parser {
       _parseSkinparamBlock(first);
       return;
     }
+    // PlantUML supports per-stereotype overrides at the top level:
+    // `skinparam <key><<Stereo>> <value>` and the multi-line block form
+    // `skinparam <key><<Stereo>> { ... }`. We don't model per-stereotype
+    // skin overrides yet, so consume the stereotype tag, then either skip
+    // the rest of the line or, if a `{` block opens, brace-balance-skip
+    // until the matching `}`.
+    if (_check(TokenType.stereotype)) {
+      _advance();
+      // Optional second stereotype (e.g. `skinparam r<<a>><<b>> { ... }`).
+      while (_check(TokenType.stereotype)) {
+        _advance();
+      }
+      if (_check(TokenType.leftBrace)) {
+        var depth = 0;
+        while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
+          if (_check(TokenType.leftBrace)) {
+            depth++;
+            _advance();
+            continue;
+          }
+          if (_check(TokenType.rightBrace)) {
+            depth--;
+            _advance();
+            if (depth == 0) break;
+            continue;
+          }
+          _advance();
+        }
+        if (_check(TokenType.newline)) _advance();
+        return;
+      }
+      while (!_check(TokenType.newline) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        _advance();
+      }
+      if (_check(TokenType.newline)) _advance();
+      return;
+    }
     _applySkinparam(first, _readSkinparamValue());
     if (_check(TokenType.newline)) _advance();
   }
@@ -393,6 +479,9 @@ class Parser {
 
     SkinParams? update;
     switch (lower) {
+      case 'actorstyle':
+        _actorStyle = value.lexeme;
+        return;
       case 'backgroundcolor':
         final c = parseColor();
         if (c != null) update = SkinParams(backgroundColor: c);
@@ -1196,24 +1285,38 @@ class Parser {
           rawLines.add(current.toString().trim());
           current = StringBuffer();
         }
-        while (!_check(TokenType.rightBracket) &&
-            !_check(TokenType.eof) &&
-            !_check(TokenType.endUml)) {
-          if (_check(TokenType.newline)) {
-            _advance();
-            flush();
-            continue;
+        // Lexer-absorbed multi-line bracket body: a single text token whose
+        // lexeme contains embedded newlines. Split on `\n` and feed each line
+        // into the raw-lines list directly so the rich-label decoder below
+        // sees the same per-line structure as the legacy token-walking path.
+        if (_check(TokenType.text) &&
+            _pos + 1 < _tokens.length &&
+            _tokens[_pos + 1].type == TokenType.rightBracket &&
+            _peek().lexeme.contains('\n')) {
+          final body = _advance().lexeme;
+          for (final line in body.split('\n')) {
+            rawLines.add(line.trim());
           }
-          final t = _advance();
-          if (current.isNotEmpty) current.write(' ');
-          // Re-quote string literals so `""` markers in rich labels survive.
-          if (t.type == TokenType.stringLiteral) {
-            current.write('"${t.lexeme}"');
-          } else {
-            current.write(t.lexeme);
+        } else {
+          while (!_check(TokenType.rightBracket) &&
+              !_check(TokenType.eof) &&
+              !_check(TokenType.endUml)) {
+            if (_check(TokenType.newline)) {
+              _advance();
+              flush();
+              continue;
+            }
+            final t = _advance();
+            if (current.isNotEmpty) current.write(' ');
+            // Re-quote string literals so `""` markers in rich labels survive.
+            if (t.type == TokenType.stringLiteral) {
+              current.write('"${t.lexeme}"');
+            } else {
+              current.write(t.lexeme);
+            }
           }
+          if (current.isNotEmpty) flush();
         }
-        if (current.isNotEmpty) flush();
         if (_check(TokenType.rightBracket)) _advance();
 
         final sections = <ParticipantLabelSection>[];
@@ -2392,6 +2495,17 @@ class Parser {
           return true;
         }
       }
+      // Bullet shortcut: `- text` at the start of a line is an action node
+      // (equivalent to `:text;`). The lexer emits `minusMinus` with lexeme
+      // `-` for a single dash followed by whitespace.
+      if (atLineStart &&
+          t.type == TokenType.minusMinus &&
+          t.lexeme == '-' &&
+          next.type != TokenType.newline &&
+          next.type != TokenType.endUml &&
+          next.type != TokenType.eof) {
+        return true;
+      }
       if (atLineStart && t.type == TokenType.identifier) {
         final nextIsNewlineOrEnd = next.type == TokenType.newline ||
             next.type == TokenType.endUml ||
@@ -2406,6 +2520,9 @@ class Parser {
             (nextIsNewlineOrEnd ||
                 (next.type == TokenType.identifier &&
                     next.lexeme == 'while'))) {
+          return true;
+        }
+        if (t.lexeme == 'repeatwhile') {
           return true;
         }
         if (t.lexeme == 'fork' && nextIsNewlineOrEnd) {
@@ -2429,6 +2546,11 @@ class Parser {
         _skipNewlines();
         continue;
       }
+      if (_check(TokenType.stereotype)) {
+        _attachPendingStereotype(nodes);
+        _skipNewlines();
+        continue;
+      }
       final node = _parseActivityNode();
       if (node != null) nodes.add(node);
       _skipNewlines();
@@ -2440,9 +2562,37 @@ class Parser {
     );
   }
 
+  /// Consume a stand-alone `<<stereotype>>` token and attach the stereotype
+  /// name to the most recently parsed [Action] in [nodes], when there is one.
+  /// PlantUML lets SDL/UML stereotypes appear on the line after `:action;`
+  /// to select an alternative node shape (`<<input>>`, `<<sendSignal>>`,
+  /// ...). When no preceding action is available the token is silently
+  /// consumed for parser robustness.
+  void _attachPendingStereotype(List<ActivityNode> nodes) {
+    final stereo = _advance().lexeme;
+    if (nodes.isEmpty) return;
+    final last = nodes.last;
+    if (last is Action && last.stereotype == null) {
+      nodes[nodes.length - 1] =
+          Action(text: last.text, note: last.note, stereotype: stereo);
+    }
+  }
+
   ActivityNode? _parseActivityNode() {
     if (_check(TokenType.colon)) {
       return _parseAction();
+    }
+    if (_check(TokenType.minusMinus) && _peek().lexeme == '-') {
+      return _parseBulletAction();
+    }
+    // PlantUML activity diagrams allow a stand-alone arrow label between two
+    // nodes: `-> some text;`. The label has no source identifier — it
+    // annotates the implicit transition from the previously parsed node to
+    // the next one. We currently consume the line for parser robustness; the
+    // label text is not yet rendered.
+    if (_check(TokenType.arrow)) {
+      _skipUntilNewline();
+      return null;
     }
     if (_isKeyword('start')) {
       _advance();
@@ -2467,6 +2617,9 @@ class Parser {
     }
     if (_isKeyword('fork')) {
       return _parseForkBlock();
+    }
+    if (_isKeyword('split')) {
+      return _parseSplitBlock();
     }
     if (_isKeyword('partition')) {
       return _parsePartition();
@@ -2503,6 +2656,33 @@ class Parser {
       text = text.substring(0, text.length - 1).trimRight();
     }
     return Action(text: text);
+  }
+
+  /// Parses a bullet shortcut action: `- text` at the start of a line.
+  /// Equivalent to `:text;` in standard activity syntax. The leading `-` was
+  /// lexed as a single-character `minusMinus` token. A leading
+  /// `<<stereotype>>` token (e.g. `-<<icon>>...`) is lifted onto the
+  /// resulting [Action.stereotype] field rather than concatenated into the
+  /// label.
+  Action _parseBulletAction() {
+    _advance(); // consume the leading `-`
+    String? stereotype;
+    if (_check(TokenType.stereotype)) {
+      stereotype = _advance().lexeme;
+    }
+    final parts = <String>[];
+    while (!_check(TokenType.newline) &&
+        !_check(TokenType.endUml) &&
+        !_check(TokenType.eof)) {
+      // A trailing stereotype on the same bullet line also rides as
+      // metadata on the action rather than as text.
+      if (_check(TokenType.stereotype)) {
+        stereotype ??= _advance().lexeme;
+        continue;
+      }
+      parts.add(_advance().lexeme);
+    }
+    return Action(text: parts.join(' ').trim(), stereotype: stereotype);
   }
 
   IfBlock _parseIfBlock() {
@@ -2561,6 +2741,22 @@ class Parser {
         condition = _advance().lexeme;
       }
       if (_check(TokenType.rightParen)) _advance();
+    }
+    // Optional `is (value)` clause that labels the THEN branch with the
+    // matched value: `if (color?) is (red) then`. The value text may contain
+    // inline color markup such as `<color:red>red`, which the lexer captures
+    // verbatim as the parenthesized text token. We currently consume but do
+    // not retain the value — the label is informational and not yet
+    // surfaced in the activity AST.
+    if (_isKeyword('is')) {
+      _advance();
+      if (_check(TokenType.leftParen)) {
+        _advance();
+        if (_check(TokenType.text)) {
+          _advance();
+        }
+        if (_check(TokenType.rightParen)) _advance();
+      }
     }
     String? thenLabel;
     if (_isKeyword('then')) {
@@ -2624,14 +2820,19 @@ class Parser {
 
   RepeatBlock _parseRepeatBlock() {
     _advance();
-    final body = _parseActivityBlock(
-        () => _isKeyword('repeat') && _peekAhead(1, 'while'));
+    final body = _parseActivityBlock(() =>
+        (_isKeyword('repeat') && _peekAhead(1, 'while')) ||
+        _isKeyword('repeatwhile'));
     String? whileCondition;
     String? isLabel;
     String? notLabel;
-    if (_isKeyword('repeat') && _peekAhead(1, 'while')) {
+    // Accept both the two-token form `repeat while ( ... )` and the single
+    // compound identifier `repeatwhile ( ... )` that PlantUML also permits.
+    if ((_isKeyword('repeat') && _peekAhead(1, 'while')) ||
+        _isKeyword('repeatwhile')) {
+      final isCompound = _isKeyword('repeatwhile');
       _advance();
-      _advance();
+      if (!isCompound) _advance();
       if (_check(TokenType.leftParen)) {
         _advance();
         if (_check(TokenType.text)) {
@@ -2696,6 +2897,36 @@ class Parser {
 
   bool _isEndFork() => _isKeyword('end') && _peekAhead(1, 'fork');
 
+  /// Parses a `split` / `split again` / `end split` multi-way branch block.
+  /// Mirrors [_parseForkBlock] but uses the split-specific terminators and
+  /// returns a [SplitBlock]. Each branch is a sub-flow whose nodes may be
+  /// followed by stand-alone `<<stereotype>>` tokens; those are attached by
+  /// the shared [_parseActivityBlock] path.
+  SplitBlock _parseSplitBlock() {
+    _advance();
+    final branches = <List<ActivityNode>>[];
+    branches.add(_parseActivityBlock(() =>
+        (_isKeyword('split') && _peekAhead(1, 'again')) || _isEndSplit()));
+    while (_isKeyword('split') && _peekAhead(1, 'again')) {
+      _advance();
+      _advance();
+      branches.add(_parseActivityBlock(() =>
+          (_isKeyword('split') && _peekAhead(1, 'again')) || _isEndSplit()));
+    }
+    if (!_isEndSplit()) {
+      final t = _peek();
+      throw ParserException(
+          "Expected 'end split' to close split block, got '${t.lexeme}'",
+          t.line,
+          t.column);
+    }
+    _advance();
+    _advance();
+    return SplitBlock(branches: List.unmodifiable(branches));
+  }
+
+  bool _isEndSplit() => _isKeyword('end') && _peekAhead(1, 'split');
+
   Partition _parsePartition() {
     _advance();
     String name = '';
@@ -2725,6 +2956,11 @@ class Parser {
     _skipNewlines();
     while (
         !_check(TokenType.endUml) && !_check(TokenType.eof) && !terminator()) {
+      if (_check(TokenType.stereotype)) {
+        _attachPendingStereotype(body);
+        _skipNewlines();
+        continue;
+      }
       final node = _parseActivityNode();
       if (node != null) body.add(node);
       _skipNewlines();
@@ -2751,7 +2987,8 @@ class Parser {
     for (var k = _pos; k < _tokens.length; k++) {
       final t = _tokens[k];
       if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
-      if (t.type == TokenType.identifier && t.lexeme == 'state') {
+      if (t.type == TokenType.identifier &&
+          (t.lexeme == 'state' || t.lexeme == 'State')) {
         return true;
       }
       if (t.type == TokenType.leftBracket) {
@@ -2819,10 +3056,10 @@ class Parser {
         while (!_check(TokenType.rightBrace) &&
             !_check(TokenType.eof) &&
             !_check(TokenType.endUml)) {
-          if (_isKeyword('state')) {
+          if (_isKeyword('state') || _isKeyword('State')) {
             addState(_parseStateDecl());
           } else if (_isKeyword('note')) {
-            _skipUntilNewline();
+            _skipNoteBlock();
           } else if (_check(TokenType.leftBrace)) {
             _consumeBraceBlock();
           } else {
@@ -2835,12 +3072,36 @@ class Parser {
         _skipNewlines();
         continue;
       }
-      if (_isKeyword('state')) {
+      if (_isKeyword('state') || _isKeyword('State')) {
         addState(_parseStateDecl());
       } else if (_isKeyword('note')) {
-        _skipUntilNewline();
+        _skipNoteBlock();
       } else if (_isKeyword('hide') || _isKeyword('show')) {
         _consumeRestOfLine();
+      } else if (_isKeyword('scale')) {
+        // PlantUML viewport directive `scale 600 width` / `scale 0.5` /
+        // `scale max 1024*768`. Consume the rest of the line; rendering
+        // honors only the diagram bounds today.
+        _consumeRestOfLine();
+      } else if (_check(TokenType.arrow)) {
+        // Stray arrow at the start of a line (e.g. `->o f : <>->o g`). These
+        // appear in sources where the label uses arrow glyphs that the lexer
+        // happily tokenizes as a leading arrow. We have no LHS state to bind
+        // to, so consume the rest of the line gracefully.
+        _consumeRestOfLine();
+      } else if (_isKeyword('mainframe')) {
+        // `mainframe <label>` is a PlantUML decorator that wraps the
+        // diagram in a UML frame with a folded-corner label. Inside a
+        // state diagram we currently consume-and-ignore: the lexer emits
+        // `identifier(mainframe)` + optional `text(label)`, which we drop.
+        _advance();
+        if (_check(TokenType.text)) _advance();
+      } else if (_isStateContainerHeader()) {
+        // `frame X { ... }`, `folder X { ... }`, etc. wrap a state-diagram
+        // region. Consume the keyword + optional label, then recurse into
+        // the brace body so the contained `state` / transitions still land
+        // in the surrounding diagram.
+        _consumeStateContainerInto(addState, transitions);
       } else {
         final t = _parseStateTransitionOrRef(addState);
         if (t != null) transitions.add(t);
@@ -2860,15 +3121,34 @@ class Parser {
     String name;
     String? displayName;
     if (_check(TokenType.stringLiteral)) {
-      displayName = _advance().lexeme;
-      _expectKeyword('as');
-      name = _expect(TokenType.identifier).lexeme;
-    } else if (_check(TokenType.identifier)) {
       final first = _advance().lexeme;
       if (_isKeyword('as')) {
         _advance();
         displayName = first;
         name = _expect(TokenType.identifier).lexeme;
+      } else {
+        // `state "alias2"` with no `as`: the quoted string is both the
+        // visible label and the state's canonical name. Strip leading /
+        // trailing whitespace for the name only (display preserves the
+        // literal).
+        displayName = first;
+        name = first.trim();
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        // `state alias4 as "long name"` (reverse alias form): the identifier
+        // is the canonical name and the following string literal is the
+        // display label. The classic `state alias as Ident` is the other
+        // branch.
+        if (_check(TokenType.stringLiteral)) {
+          name = first;
+          displayName = _advance().lexeme;
+        } else {
+          displayName = first;
+          name = _expect(TokenType.identifier).lexeme;
+        }
       } else {
         name = first;
       }
@@ -2880,6 +3160,23 @@ class Parser {
 
     if (_check(TokenType.stereotype)) {
       _advance();
+    }
+    // PlantUML inline state styling: `#color[;key:value]...` for the
+    // background and `##[modifier]color` for the border. Both lex to a
+    // single hashColor token; we accept any number in either order and
+    // defer the visual application to a future pass.
+    while (_check(TokenType.hashColor)) {
+      _advance();
+    }
+    // Optional trailing description: `state Foo : text`. The lexer emits
+    // `colon` + `text` for whatever follows the colon (everything up to
+    // the next newline). Accept and currently discard — the display name
+    // is still derived from the alias form when provided.
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        _advance();
+      }
     }
 
     final nested = <StateDecl>[];
@@ -2920,7 +3217,8 @@ class Parser {
       while (!_check(TokenType.rightBrace) &&
           !_check(TokenType.eof) &&
           !_check(TokenType.endUml)) {
-        if (_check(TokenType.minusMinus)) {
+        if (_check(TokenType.minusMinus) ||
+            _check(TokenType.doublePipe)) {
           _advance();
           hasRegions = true;
           regions.add(List<StateDecl>.from(currentRegion));
@@ -2928,10 +3226,10 @@ class Parser {
           _skipNewlines();
           continue;
         }
-        if (_isKeyword('state')) {
+        if (_isKeyword('state') || _isKeyword('State')) {
           addNested(_parseStateDecl());
         } else if (_isKeyword('note')) {
-          _skipUntilNewline();
+          _skipNoteBlock();
         } else if (_isKeyword('hide') || _isKeyword('show')) {
           _consumeRestOfLine();
         } else {
@@ -2959,9 +3257,104 @@ class Parser {
     );
   }
 
+  /// True when the current token is a `frame` / `folder` / etc. container
+  /// keyword used to visually group a region inside a state diagram. These
+  /// containers carry no state-diagram semantics on their own — we accept
+  /// them so that mixed PlantUML sources still parse.
+  bool _isStateContainerHeader() {
+    if (!_check(TokenType.identifier)) return false;
+    const containerKws = {'frame', 'folder', 'package', 'node', 'cloud'};
+    return containerKws.contains(_peek().lexeme);
+  }
+
+  /// Consumes a `frame X { ... }` style container at state-diagram scope by
+  /// flattening its body into the surrounding diagram. The keyword and any
+  /// optional label/string are skipped; if a brace block follows, contained
+  /// state declarations and transitions are added to the outer collections.
+  void _consumeStateContainerInto(
+    void Function(StateDecl) addState,
+    List<StateTransition> transitions,
+  ) {
+    _advance(); // consume container keyword
+    // Optional label (identifier and/or quoted string), and optional
+    // `as <alias>` rename — we only care about reaching the body.
+    while (_check(TokenType.identifier) ||
+        _check(TokenType.stringLiteral) ||
+        _check(TokenType.stereotype) ||
+        _check(TokenType.hashColor)) {
+      _advance();
+    }
+    if (!_check(TokenType.leftBrace)) return;
+    _advance();
+    _skipNewlines();
+    while (!_check(TokenType.rightBrace) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      if (_isKeyword('state') || _isKeyword('State')) {
+        addState(_parseStateDecl());
+      } else if (_isKeyword('note')) {
+        _skipNoteBlock();
+      } else if (_isKeyword('hide') || _isKeyword('show')) {
+        _consumeRestOfLine();
+      } else if (_isStateContainerHeader()) {
+        _consumeStateContainerInto(addState, transitions);
+      } else if (_check(TokenType.leftBrace)) {
+        _consumeBraceBlock();
+      } else {
+        final t = _parseStateTransitionOrRef(addState);
+        if (t != null) transitions.add(t);
+      }
+      _skipNewlines();
+    }
+    if (_check(TokenType.rightBrace)) _advance();
+  }
+
   StateTransition? _parseStateTransitionOrRef(
       void Function(StateDecl) addState) {
     final from = _readStateRef();
+    // `name : description` form — a member-style state description that
+    // attaches to an already-declared (or implicitly-declared) state. The
+    // description currently has no AST slot; we accept and discard so the
+    // surrounding diagram parses without error.
+    if (_check(TokenType.colon)) {
+      _advance();
+      if (_check(TokenType.text)) {
+        _advance();
+      }
+      if (from != '[*]') {
+        addState(StateDecl(name: from));
+      }
+      return null;
+    }
+    // PlantUML bare state declaration with a stereotype but no `state` keyword
+    // (e.g. `end <<end>>`). Accept the stereotype and any trailing line-tail
+    // styling as an implicit state declaration so the surrounding diagram
+    // parses cleanly. Visual rendering of the stereotype is deferred.
+    if (_check(TokenType.stereotype)) {
+      _advance();
+      while (_check(TokenType.hashColor)) {
+        _advance();
+      }
+      if (_check(TokenType.colon)) {
+        _advance();
+        if (_check(TokenType.text)) _advance();
+      }
+      if (from != '[*]') {
+        addState(StateDecl(name: from));
+      }
+      return null;
+    }
+    // PlantUML bare state declaration without keyword or stereotype
+    // (e.g. `State S1` parsed token-by-token, ends at newline). Accept it as
+    // an implicit state declaration so the surrounding diagram still parses.
+    if (_check(TokenType.newline) ||
+        _check(TokenType.eof) ||
+        _check(TokenType.endUml)) {
+      if (from != '[*]') {
+        addState(StateDecl(name: from));
+      }
+      return null;
+    }
     if (!_check(TokenType.arrow)) {
       final t = _peek();
       throw ParserException(
@@ -2988,12 +3381,25 @@ class Parser {
   String _readStateRef() {
     if (_check(TokenType.leftBracket)) {
       _advance();
-      if (!_check(TokenType.identifier) || _peek().lexeme != '*') {
+      // PlantUML state pseudo-states inside brackets: `[*]` initial/final,
+      // `[H]` shallow history, `[H*]` deep history. Accept any identifier
+      // followed by an optional `*` (already merged into the identifier by
+      // the lexer for the history form) and return a canonicalized name so
+      // the diagram parses cleanly. Visual differentiation is deferred.
+      if (!_check(TokenType.identifier)) {
         final t = _peek();
         throw ParserException(
-            "Expected '*' inside '[]', got '${t.lexeme}'", t.line, t.column);
+            "Expected identifier inside '[]', got '${t.lexeme}'",
+            t.line,
+            t.column);
       }
-      _advance();
+      final inner = _advance().lexeme;
+      // Allow `[H*]` where the lexer kept `*` as a separate identifier token.
+      String tail = '';
+      if (_check(TokenType.identifier) && _peek().lexeme == '*') {
+        _advance();
+        tail = '*';
+      }
       if (!_check(TokenType.rightBracket)) {
         final t = _peek();
         throw ParserException(
@@ -3002,10 +3408,30 @@ class Parser {
             t.column);
       }
       _advance();
-      return '[*]';
+      return '[$inner$tail]';
     }
     if (_check(TokenType.identifier)) {
-      return _advance().lexeme;
+      final name = _advance().lexeme;
+      // PlantUML chained history reference: `StateName[H]`, `StateName[H*]`.
+      // The bracketed history marker attaches to the preceding state name; we
+      // currently keep the base name as the canonical identifier and skip
+      // over the bracket suffix so the surrounding transition parses.
+      if (_check(TokenType.leftBracket)) {
+        final save = _pos;
+        _advance();
+        if (_check(TokenType.identifier)) {
+          _advance();
+          if (_check(TokenType.identifier) && _peek().lexeme == '*') {
+            _advance();
+          }
+          if (_check(TokenType.rightBracket)) {
+            _advance();
+            return name;
+          }
+        }
+        _pos = save;
+      }
+      return name;
     }
     final t = _peek();
     throw ParserException(
@@ -3030,13 +3456,46 @@ class Parser {
       // relation line is a strong use-case-/class-diagram indicator since
       // sequence diagrams never use directional hint arrows. Route to use
       // case so the existing direction-aware layout handles the source.
+      //
+      // Exception: if the same logical line carries a bracketed component
+      // (`[Name]`) on either side of the arrow, the line is a component-
+      // diagram relation — defer to the component-diagram detector so that
+      // `[Component] -left-> left` etc. don't get misrouted.
       if (t.type == TokenType.arrow && _isDirectionHintArrow(t.lexeme)) {
-        return true;
+        var lineHasBracketComponent = false;
+        for (var b = k - 1; b >= 0; b--) {
+          final tb = _tokens[b];
+          if (tb.type == TokenType.newline) break;
+          if (tb.type == TokenType.leftBracket ||
+              tb.type == TokenType.rightBracket) {
+            lineHasBracketComponent = true;
+            break;
+          }
+        }
+        if (!lineHasBracketComponent) {
+          for (var f = k + 1; f < _tokens.length; f++) {
+            final tf = _tokens[f];
+            if (tf.type == TokenType.newline ||
+                tf.type == TokenType.eof ||
+                tf.type == TokenType.endUml) {
+              break;
+            }
+            if (tf.type == TokenType.leftBracket) {
+              lineHasBracketComponent = true;
+              break;
+            }
+          }
+        }
+        if (!lineHasBracketComponent) return true;
       }
       // `left to right direction` / `top to bottom direction` at the start
       // of a line is a use-case-/component-diagram directive. Route to use
       // case so the directive is consumed cleanly and any inline relations
       // (including direction-hint arrows) parse without error.
+      //
+      // Exception: if a later line contains a bracketed component (`[Name]`)
+      // the source is a component diagram — defer to the component-diagram
+      // detector which also consumes the directive cleanly.
       if (atLineStart &&
           t.type == TokenType.identifier &&
           (t.lexeme == 'left' || t.lexeme == 'top') &&
@@ -3048,7 +3507,23 @@ class Parser {
               _tokens[k + 2].lexeme == 'bottom') &&
           _tokens[k + 3].type == TokenType.identifier &&
           _tokens[k + 3].lexeme == 'direction') {
-        return true;
+        var hasBracketComponent = false;
+        for (var j = k + 4; j < _tokens.length; j++) {
+          final tj = _tokens[j];
+          if (tj.type == TokenType.endUml || tj.type == TokenType.eof) break;
+          if (tj.type == TokenType.leftBracket) {
+            // Skip state pseudo-state literal `[*]`.
+            if (j + 2 < _tokens.length &&
+                _tokens[j + 1].type == TokenType.identifier &&
+                _tokens[j + 1].lexeme == '*' &&
+                _tokens[j + 2].type == TokenType.rightBracket) {
+              continue;
+            }
+            hasBracketComponent = true;
+            break;
+          }
+        }
+        if (!hasBracketComponent) return true;
       }
       // PlantUML "phantom" / hidden-node marker: a trailing `/` immediately
       // after the `usecase`/`actor` keyword (e.g. `usecase/ UC3`,
@@ -3071,8 +3546,17 @@ class Parser {
       // requiring an explicit `usecase`/`rectangle` keyword.
       if (t.type == TokenType.leftParen) {
         var j = k + 1;
-        if (j < _tokens.length && _tokens[j].type == TokenType.text) j++;
-        if (j < _tokens.length && _tokens[j].type == TokenType.rightParen) {
+        var sawInner = false;
+        if (j < _tokens.length && _tokens[j].type == TokenType.text) {
+          j++;
+          sawInner = true;
+        }
+        // Require non-empty parentheses to qualify as a use-case ellipse.
+        // Empty `()` is a component-diagram interface shorthand and must not
+        // route the source to the use-case parser.
+        if (sawInner &&
+            j < _tokens.length &&
+            _tokens[j].type == TokenType.rightParen) {
           // Walk forwards/backwards on this logical line to confirm an arrow
           // sits adjacent to this ellipse.
           for (var b = k - 1; b >= 0; b--) {
@@ -3278,7 +3762,7 @@ class Parser {
         _consumeRestOfLine();
         return;
       }
-      if (_isKeyword('package')) {
+      if (_isKeyword('package') || _isKeyword('together')) {
         _parseClassPackage(classes, relationships, freeNotes,
             () => attachedNoteCounter++);
         return;
@@ -3292,6 +3776,22 @@ class Parser {
         // Unrecognised note form (e.g. `note on link …`, `note left:` without
         // a target). Consume gracefully so the rest of the diagram parses.
         _skipNoteBlock();
+        return;
+      }
+      // Under `allowmixing`, accept the `actor/` and `usecase/` phantom-shape
+      // declarations before the class-header dispatch so the slash isn't
+      // mistaken for a relationship operator. Also accept any host mixed
+      // element keyword that ISN'T already a class header (otherwise
+      // class-only headers like `entity`, `interface`, `circle` would lose
+      // their dedicated parse paths).
+      if (_allowMixing && _isHostMixedSlashedKeyword()) {
+        _consumeHostMixedElementDecl();
+        return;
+      }
+      if (_allowMixing &&
+          _isHostMixedElementKeyword() &&
+          !_isClassHeaderKeyword()) {
+        _consumeHostMixedElementDecl();
         return;
       }
       if (_isClassHeaderKeyword()) {
@@ -3347,6 +3847,24 @@ class Parser {
         if (declared.contains(ref) || noteAliases.contains(ref)) continue;
         classes.add(ClassDecl(name: ref));
         declared.add(ref);
+      }
+    }
+    // Merge any inline `ClassName : member` declarations onto the matching
+    // ClassDecl. We rebuild the decl with a combined `members` list (preserving
+    // any block-form members already parsed) so renderers see the full set.
+    if (_classInlineMembers.isNotEmpty) {
+      for (var i = 0; i < classes.length; i++) {
+        final c = classes[i];
+        final extras = _classInlineMembers[c.name];
+        if (extras == null || extras.isEmpty) continue;
+        classes[i] = ClassDecl(
+          name: c.name,
+          kind: c.kind,
+          members: List.unmodifiable([...c.members, ...extras]),
+          instanceOf: c.instanceOf,
+          stereotype: c.stereotype,
+          generics: c.generics,
+        );
       }
     }
     return ClassDiagram(
@@ -3414,12 +3932,69 @@ class Parser {
     }
   }
 
+  /// Consumes an optional `between A and B` y-axis range clause used in
+  /// `analog "X" between -4.5 and 6.5 as VCC`. Tolerates negative-number
+  /// identifiers and decimal values. Visual axis scaling is deferred.
+  void _consumeOptionalAnalogBetween() {
+    if (!_isKeyword('between')) return;
+    _advance();
+    // Consume the lower bound (identifier such as `-4.5`, `350`).
+    if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+      _advance();
+    }
+    if (_isKeyword('and')) {
+      _advance();
+      if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
+        _advance();
+      }
+    }
+  }
+
   /// Consumes a mixed-element top-level declaration inside a host parser
   /// that doesn't natively model the element kind (e.g. `node`, `cloud`,
   /// `agent`, `database` inside a use case diagram under `allowmixing`).
   /// The form is `<keyword> <identifier-or-string> [as <alias>]`. If the
   /// declaration opens a brace-balanced container body, it is consumed too.
   /// A coerced [UseCaseNode] is added so downstream relations resolve.
+  // PlantUML element-type keywords that can introduce a `<kind> <name>`
+  // declaration in component / use case / mixed diagrams. Used by the
+  // use case parser to lower every such shape to an actor-kind node so the
+  // alias enters the node list (rendering-shape mapping is deferred). The
+  // four keywords already handled specially (`actor`, `usecase`, `rectangle`,
+  // `package`) are intentionally omitted here so they keep their dedicated
+  // parse paths.
+  static const _mixedElementKeywords = {
+    'action',
+    'agent',
+    'artifact',
+    'boundary',
+    'card',
+    'circle',
+    'cloud',
+    'collections',
+    'component',
+    'control',
+    'database',
+    'entity',
+    'file',
+    'folder',
+    'frame',
+    'hexagon',
+    'interface',
+    'label',
+    'node',
+    'person',
+    'process',
+    'queue',
+    'stack',
+    'storage',
+  };
+
+  bool _isMixedElementKeyword() {
+    if (!_check(TokenType.identifier)) return false;
+    return _mixedElementKeywords.contains(_peek().lexeme);
+  }
+
   void _consumeMixedTopLevelDecl(void Function(UseCaseNode) addNode) {
     _advance(); // consume keyword
     String? label;
@@ -3434,7 +4009,8 @@ class Parser {
       final first = _advance().lexeme;
       if (_isKeyword('as')) {
         _advance();
-        if (_check(TokenType.identifier)) {
+        if (_check(TokenType.identifier) ||
+            _check(TokenType.stringLiteral)) {
           alias = _advance().lexeme;
           label = first;
         }
@@ -3443,6 +4019,12 @@ class Parser {
       }
     }
     if (_check(TokenType.hashColor)) _advance();
+    // PlantUML allows a trailing multi-line `[ ... ]` block as a free-form
+    // description body on shape declarations (`folder name [\n...\n]`,
+    // `node name [\n...\n]`, etc.). Consume it as a no-op so the line parses.
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
+    }
     _skipNewlines();
     if (_check(TokenType.leftBrace)) {
       _consumeBraceBlock();
@@ -3456,6 +4038,101 @@ class Parser {
     }
   }
 
+  // Element-type keywords that may appear under `allowmixing` in a HOST
+  // class / sequence / state / etc. diagram and should be accept-and-skipped
+  // there. Superset of `_mixedElementKeywords` because the host diagram has
+  // no native modeling for many of these (`actor`, `usecase`, `rectangle`,
+  // `package`, `state` are all valid mixed shapes too in this context).
+  static const _hostMixedElementKeywords = {
+    'action',
+    'actor',
+    'agent',
+    'artifact',
+    'boundary',
+    'card',
+    'circle',
+    'cloud',
+    'collections',
+    'component',
+    'control',
+    'database',
+    'entity',
+    'file',
+    'folder',
+    'frame',
+    'hexagon',
+    'interface',
+    'label',
+    'node',
+    'package',
+    'person',
+    'process',
+    'queue',
+    'rectangle',
+    'stack',
+    'state',
+    'storage',
+    'usecase',
+  };
+
+  bool _isHostMixedElementKeyword() {
+    if (!_check(TokenType.identifier)) return false;
+    return _hostMixedElementKeywords.contains(_peek().lexeme);
+  }
+
+  /// True when the current token is one of `actor` or `usecase` followed
+  /// immediately by `/` — the "phantom" / hidden variants `actor/` and
+  /// `usecase/` used in use-case / mixed diagrams.
+  bool _isHostMixedSlashedKeyword() {
+    if (!_check(TokenType.identifier)) return false;
+    final lex = _peek().lexeme;
+    if (lex != 'actor' && lex != 'usecase') return false;
+    if (_pos + 1 >= _tokens.length) return false;
+    return _tokens[_pos + 1].type == TokenType.slash;
+  }
+
+  /// Accept-and-skip a mixed-element declaration in a host (non-component /
+  /// non-use-case) diagram under `allowmixing`. Handles:
+  ///   `<kw> <ident> [as <alias>]` and quoted-string variants
+  ///   `<kw>/ <ident-or-string>` (phantom forms `actor/`, `usecase/`)
+  ///   trailing inline-style `#color;line:X;text:Y` and `<<stereotype>>`
+  ///   optional `{ ... }` body (consumed brace-balanced)
+  void _consumeHostMixedElementDecl() {
+    _advance(); // consume keyword
+    if (_check(TokenType.slash)) {
+      _advance(); // consume `/`
+    }
+    if (_check(TokenType.stringLiteral)) {
+      _advance();
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier) ||
+            _check(TokenType.stringLiteral)) {
+          _advance();
+        }
+      }
+    } else if (_check(TokenType.identifier)) {
+      _advance();
+      if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier) ||
+            _check(TokenType.stringLiteral)) {
+          _advance();
+        }
+      }
+    }
+    while (_check(TokenType.hashColor) || _check(TokenType.stereotype)) {
+      _advance();
+    }
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
+    }
+    _skipNewlines();
+    if (_check(TokenType.leftBrace)) {
+      _consumeBraceBlock();
+    }
+  }
+
   /// Consumes the `allowmixing` directive line as a no-op. PlantUML uses it to
   /// permit mixing element types (e.g. actor + json + class) in one diagram.
   /// Our parsers accept the directive but currently rely on the caller's host
@@ -3464,6 +4141,7 @@ class Parser {
     if (_isKeyword('allowmixing')) {
       _advance();
       _consumeRestOfLine();
+      _allowMixing = true;
       return true;
     }
     return false;
@@ -3545,6 +4223,11 @@ class Parser {
     if (_check(TokenType.stereotype)) {
       _advance();
     }
+    // Optional background color: `package X #color { ... }` or gradient
+    // forms `#color1/color2` (already absorbed as a single hashColor token).
+    if (_check(TokenType.hashColor)) {
+      _advance();
+    }
     if (!_check(TokenType.leftBrace)) {
       _consumeRestOfLine();
       return;
@@ -3563,7 +4246,7 @@ class Parser {
         _skipNewlines();
         continue;
       }
-      if (_isKeyword('package')) {
+      if (_isKeyword('package') || _isKeyword('together')) {
         _parseClassPackage(classes, relationships, freeNotes, nextAttachedId);
         _skipNewlines();
         continue;
@@ -3674,7 +4357,11 @@ class Parser {
         _tokens[_pos + 1].type == TokenType.rightParen) {
       return true;
     }
-    if (_check(TokenType.generics) && _peek().lexeme.isEmpty) {
+    if (_check(TokenType.generics) &&
+        (_peek().lexeme == '<>' || _peek().lexeme.isEmpty)) {
+      // `<> name` — PlantUML diamond-shape class declaration. Also matches
+      // a bare `<>` token whose inner is empty (lexer represents `<>` as a
+      // generics token with empty body).
       return true;
     }
     if (!_check(TokenType.identifier)) return false;
@@ -3697,7 +4384,37 @@ class Parser {
       'stereotype',
       'struct',
     };
-    return headers.contains(_peek().lexeme);
+    if (!headers.contains(_peek().lexeme)) return false;
+    // Ambiguity: shape keywords like `diamond`, `circle`, `object` may also be
+    // used as user-chosen class identifiers in relationship lines (e.g.
+    // `diamond - "from 0..*" Station`). For SHAPE-ish keywords only, if the
+    // next token is a relationship operator, treat the line as a relationship.
+    // Core declaration keywords (`class`, `interface`, `enum`, `abstract`,
+    // `annotation`, `record`, `entity`, `exception`) always start a header
+    // regardless of what follows (e.g. `class "Foo" {}` has stringLiteral
+    // after `class` — that's the display name, not multiplicity).
+    const shapeishHeaders = {
+      'diamond',
+      'circle',
+      'object',
+      'stereotype',
+      'struct',
+      'protocol',
+      'metaclass',
+      'dataclass',
+      'map',
+    };
+    if (!shapeishHeaders.contains(_peek().lexeme)) return true;
+    if (_pos + 1 < _tokens.length) {
+      final next = _tokens[_pos + 1].type;
+      if (next == TokenType.arrow ||
+          next == TokenType.minusMinus ||
+          next == TokenType.dotDotDot ||
+          next == TokenType.colon) {
+        return false;
+      }
+    }
+    return true;
   }
 
   ClassDecl _parseClassDecl() {
@@ -3708,7 +4425,8 @@ class Parser {
       _advance();
       _advance();
       kind = ClassKind.circle;
-    } else if (_check(TokenType.generics) && _peek().lexeme == '<>') {
+    } else if (_check(TokenType.generics) &&
+        (_peek().lexeme == '<>' || _peek().lexeme.isEmpty)) {
       _advance();
       kind = ClassKind.diamond;
     } else {
@@ -3798,6 +4516,13 @@ class Parser {
     // Consume optional `$tag` suffix on the class declaration (e.g.
     // `class C1 $tag13`). Visual / semantic tag handling is deferred.
     while (_check(TokenType.identifier) && _peek().lexeme.startsWith('\$')) {
+      _advance();
+    }
+    // Consume optional trailing background color: `class Foo #red`,
+    // `class Foo #red-green` (gradient). The lexer absorbs gradient forms
+    // (`#a/b`, `#a|b`, `#a-b`) into a single hashColor token. Color is
+    // captured but visual rendering is deferred.
+    if (_check(TokenType.hashColor)) {
       _advance();
     }
 
@@ -4018,15 +4743,24 @@ class Parser {
       arrowToken = _advance();
     } else if (_check(TokenType.colon)) {
       // Inline member declaration: `ClassName : member`. Consume the colon
-      // and the text token (if any) — visual member rendering for this
-      // shorthand is deferred. We still register the implicit class so it
-      // shows up in the AST.
+      // and the text token (if any). The member is parsed via the same
+      // `_parseMemberLine` path used for block-form members and queued in
+      // `_classInlineMembers` so it can be merged onto the (possibly
+      // implicit) `ClassDecl` at the end of the parse. The class itself is
+      // also registered as an implicit declaration if it hasn't been seen.
       _advance();
-      if (_check(TokenType.text)) _advance();
+      String? memberText;
+      if (_check(TokenType.text)) memberText = _advance().lexeme;
       if (classes != null && declaredNames != null) {
         if (!declaredNames.contains(from)) {
           classes.add(ClassDecl(name: from));
           declaredNames.add(from);
+        }
+      }
+      if (memberText != null) {
+        final parsed = _parseMemberLine(memberText, ClassKind.class_);
+        if (parsed != null) {
+          _classInlineMembers.putIfAbsent(from, () => <ClassMember>[]).add(parsed);
         }
       }
       return;
@@ -4346,8 +5080,65 @@ class Parser {
     );
   }
 
+  /// Returns true when the source has at least one component-/deployment-
+  /// only keyword at line start (e.g. `artifact`, `cloud`, `card`, `agent`,
+  /// `stack`, `sprite`, `hexagon`) and no use-case-only marker (`usecase`,
+  /// `actor`) at line start anywhere in the source. Used to override
+  /// use-case detection when an overloaded keyword (like `rectangle`) shows
+  /// up later in the source alongside clear component-only signals.
+  bool _hasUnambiguousComponentMarker() {
+    // Keywords that only appear in deployment / component diagrams (no
+    // overlap with use-case-diagram syntax).
+    const componentOnlyKeywords = {
+      'artifact',
+      'cloud',
+      'card',
+      'agent',
+      'stack',
+      'sprite',
+      'hexagon',
+      'file',
+      'database',
+      'queue',
+      'storage',
+      'component',
+      'Component',
+    };
+    const useCaseOnlyKeywords = {'usecase', 'actor'};
+    var atLineStart = true;
+    var sawComponentMarker = false;
+    for (var k = _pos; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.endUml || t.type == TokenType.eof) break;
+      if (t.type == TokenType.newline) {
+        atLineStart = true;
+        continue;
+      }
+      if (atLineStart && t.type == TokenType.identifier) {
+        if (useCaseOnlyKeywords.contains(t.lexeme)) {
+          // Mixed-source guard: any line-start use-case keyword means we
+          // should defer to the use-case parser's normal routing logic.
+          return false;
+        }
+        if (componentOnlyKeywords.contains(t.lexeme)) {
+          sawComponentMarker = true;
+        }
+      }
+      atLineStart = false;
+    }
+    return sawComponentMarker;
+  }
+
   bool _looksLikeComponentDiagram() {
-    const containerKeywords = {'package', 'node', 'cloud', 'frame'};
+    const containerKeywords = {
+      'package',
+      'node',
+      'cloud',
+      'frame',
+      'folder',
+      'file',
+      'hexagon',
+    };
     const ambiguousContainerKeywords = {'database', 'queue', 'storage'};
     var atLineStart = true;
     for (var k = _pos; k < _tokens.length; k++) {
@@ -4358,13 +5149,23 @@ class Parser {
         continue;
       }
       if (atLineStart && t.type == TokenType.identifier) {
-        if (t.lexeme == 'component') return true;
+        // Accept the `component` keyword regardless of letter case — PlantUML
+        // tolerates `Component "X" as Y` interchangeably with `component ...`.
+        if (t.lexeme.toLowerCase() == 'component') return true;
         if (t.lexeme == 'artifact') return true;
         // Mixed-element keywords introduced via `allowmixing`. Their presence
         // at line start is a strong component-diagram indicator since this is
         // the most lenient host parser for mixed contents.
         if (t.lexeme == 'agent') return true;
         if (t.lexeme == 'stack') return true;
+        // `sprite $name [...] { ... }` declaration only appears in
+        // component-style diagrams; treat as a component-diagram signal so
+        // sources that lead with a sprite still dispatch here.
+        if (t.lexeme == 'sprite') return true;
+        // `rectangle` and `card` are component-style container keywords; their
+        // presence at line start dispatches into the component parser.
+        if (t.lexeme == 'rectangle') return true;
+        if (t.lexeme == 'card') return true;
         if (containerKeywords.contains(t.lexeme)) return true;
         if (ambiguousContainerKeywords.contains(t.lexeme)) {
           for (var j = k + 1; j < _tokens.length; j++) {
@@ -4407,6 +5208,14 @@ class Parser {
           _tokens[k + 1].type == TokenType.rightParen) {
         return true;
       }
+      // Mid-line `<arrow> [Name]` or `[Name] <arrow>` patterns are also a
+      // component-diagram signal — sequence diagrams don't accept bracketed
+      // participants. Catches forms like `Interface <- [Component]`.
+      if ((t.type == TokenType.arrow || t.type == TokenType.minusMinus) &&
+          k + 1 < _tokens.length &&
+          _tokens[k + 1].type == TokenType.leftBracket) {
+        return true;
+      }
       atLineStart = false;
     }
     return false;
@@ -4446,7 +5255,10 @@ class Parser {
         _skipNewlines();
         continue;
       }
-      if (_isKeyword('hide') || _isKeyword('show')) {
+      if (_isKeyword('hide') ||
+          _isKeyword('show') ||
+          _isKeyword('remove') ||
+          _isKeyword('restore')) {
         _consumeRestOfLine();
         _skipNewlines();
         continue;
@@ -4476,32 +5288,69 @@ class Parser {
         _skipNewlines();
         continue;
       }
-      if (_isKeyword('component')) {
-        addNode(_parseComponentDecl());
+      // `sprite $name [WxH/depth] { hex_grid }` — a sprite/icon definition.
+      // We don't yet render sprite bitmaps; consume the whole declaration
+      // (including the brace-balanced hex grid body) as a no-op so sources
+      // that lead with a sprite still parse.
+      if (_isKeyword('sprite')) {
+        _skipSpriteBlock();
+        _skipNewlines();
+        continue;
+      }
+      // Bare `[ ... ]` block at line start whose body spans multiple lines is
+      // a free-form description / comment attached to the previous element.
+      // The body has no embedded identifier-as-alias, so just consume the
+      // block (including the newline-broken interior) and continue.
+      if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+        _skipMultiLineBracketBlock();
+        _skipNewlines();
+        continue;
+      }
+      if (_isComponentDeclKeyword()) {
+        if (_componentDeclOpensContainer()) {
+          containers.add(_parseComponentAsContainer(addNode,
+              relations: relations));
+        } else {
+          addNode(_parseComponentDecl());
+        }
       } else if (_isKeyword('artifact')) {
-        addNode(_parseArtifactDecl());
+        if (_typedNodeKeywordIsContainer()) {
+          containers.add(
+              _parseComponentContainer(addNode, relations: relations));
+        } else {
+          addNode(_parseArtifactDecl());
+        }
       } else if (_isKeyword('interface')) {
         addNode(_parseInterfaceDecl());
+      } else if (_isKeyword('label')) {
+        // PlantUML `label "<text>" [as Alias]` declares a free-standing label
+        // element. Model as a component-kind node for AST purposes; visual
+        // rendering of labels is currently deferred.
+        addNode(_parseLabelDecl());
       } else if (_isKeyword('database')) {
         if (_typedNodeKeywordIsContainer()) {
-          containers.add(_parseComponentContainer(addNode));
+          containers.add(
+              _parseComponentContainer(addNode, relations: relations));
         } else {
           addNode(_parseTypedNodeDecl(ComponentNodeKind.database));
         }
       } else if (_isKeyword('queue')) {
         if (_typedNodeKeywordIsContainer()) {
-          containers.add(_parseComponentContainer(addNode));
+          containers.add(
+              _parseComponentContainer(addNode, relations: relations));
         } else {
           addNode(_parseTypedNodeDecl(ComponentNodeKind.queue));
         }
       } else if (_isKeyword('storage')) {
         if (_typedNodeKeywordIsContainer()) {
-          containers.add(_parseComponentContainer(addNode));
+          containers.add(
+              _parseComponentContainer(addNode, relations: relations));
         } else {
           addNode(_parseTypedNodeDecl(ComponentNodeKind.storage));
         }
       } else if (_isComponentContainerKeyword()) {
-        containers.add(_parseComponentContainer(addNode));
+        containers.add(
+            _parseComponentContainer(addNode, relations: relations));
       } else if (_check(TokenType.leftBracket) && !_bracketIsRelationStart()) {
         addNode(_parseBracketComponent());
       } else if (_check(TokenType.leftParen) &&
@@ -4526,8 +5375,221 @@ class Parser {
 
   bool _isComponentContainerKeyword() {
     if (!_check(TokenType.identifier)) return false;
-    const kws = {'package', 'node', 'cloud', 'frame'};
+    // `file` is included here so PlantUML deployment-style declarations like
+    // `file f #color { [c1] [c2] }` or bare `file f #color` flow through the
+    // shared container parser, which already handles trailing stereotypes,
+    // inline-style hashColor tokens, multi-line `[...]` description blocks
+    // and a brace-balanced body.
+    const kws = {'package', 'node', 'cloud', 'frame', 'folder', 'rectangle',
+        'card', 'file', 'hexagon'};
     return kws.contains(_peek().lexeme);
+  }
+
+  /// True if the current token is `component` or `Component` — PlantUML
+  /// tolerates either case for the component declaration keyword.
+  bool _isComponentDeclKeyword() {
+    if (!_check(TokenType.identifier)) return false;
+    final lex = _peek().lexeme;
+    return lex == 'component' || lex == 'Component';
+  }
+
+  /// True if a `component <name>` declaration is followed by a `{` on the
+  /// same logical line — meaning it opens a nested container body rather
+  /// than just declaring a leaf component.
+  bool _componentDeclOpensContainer() {
+    for (var k = _pos + 1; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.leftBrace) return true;
+      if (t.type == TokenType.newline ||
+          t.type == TokenType.eof ||
+          t.type == TokenType.endUml) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /// True if the `[` at the current position is followed by a newline before
+  /// any closing `]` — i.e. a bare multi-line `[ ... ]` descriptive block.
+  ///
+  /// The lexer collapses the multi-line body of `[ ... ]` into a single `text`
+  /// token (so embedded Creole separators / inline markup don't trip the
+  /// punctuation scanner). Detect that shape as well: a leftBracket followed
+  /// directly by a text token and a rightBracket on the SAME logical position
+  /// run is the absorbed multi-line form.
+  bool _isMultiLineBracketBlock() {
+    if (!_check(TokenType.leftBracket)) return false;
+    // Lexer-absorbed form: `[` then `text` then `]` with no other tokens
+    // between. The text token's lexeme contains embedded newlines.
+    if (_pos + 2 < _tokens.length &&
+        _tokens[_pos + 1].type == TokenType.text &&
+        _tokens[_pos + 2].type == TokenType.rightBracket &&
+        _tokens[_pos + 1].lexeme.contains('\n')) {
+      return true;
+    }
+    var sawNewline = false;
+    for (var k = _pos + 1; k < _tokens.length; k++) {
+      final t = _tokens[k];
+      if (t.type == TokenType.rightBracket) return sawNewline;
+      if (t.type == TokenType.newline) {
+        sawNewline = true;
+        continue;
+      }
+      if (t.type == TokenType.eof || t.type == TokenType.endUml) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /// Consumes a multi-line `[ ... ]` block (already validated by
+  /// [_isMultiLineBracketBlock]) including the closing `]`.
+  void _skipMultiLineBracketBlock() {
+    _advance(); // consume `[`
+    while (!_check(TokenType.rightBracket) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      _advance();
+    }
+    if (_check(TokenType.rightBracket)) _advance();
+  }
+
+  /// Consumes a `sprite $name [WxH/depth] { hex_grid_lines }` declaration as
+  /// a no-op. The hex-grid body is brace-balanced so we count braces while
+  /// consuming the rest of the block.
+  void _skipSpriteBlock() {
+    _advance(); // consume 'sprite'
+    while (!_check(TokenType.leftBrace) &&
+        !_check(TokenType.newline) &&
+        !_check(TokenType.eof) &&
+        !_check(TokenType.endUml)) {
+      _advance();
+    }
+    if (!_check(TokenType.leftBrace)) return;
+    var depth = 0;
+    while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
+      if (_check(TokenType.leftBrace)) {
+        depth++;
+        _advance();
+        continue;
+      }
+      if (_check(TokenType.rightBrace)) {
+        depth--;
+        _advance();
+        if (depth == 0) return;
+        continue;
+      }
+      _advance();
+    }
+  }
+
+  /// Parses a `component <name> { ... }` declaration where the name is
+  /// followed by a brace-balanced body — i.e. the component acts as a
+  /// container for nested components, bracketed components, and relations.
+  /// Modelled as a [ContainerKind.package] container for layout purposes
+  /// since component diagrams don't have a dedicated `componentContainer`
+  /// AST kind yet.
+  ComponentContainer _parseComponentAsContainer(
+      void Function(ComponentNode) addNode,
+      {List<ComponentRelation>? relations}) {
+    final relOut = relations ?? <ComponentRelation>[];
+    final kwToken = _advance(); // consume `component`/`Component`
+    String? label;
+    String? alias;
+    if (_check(TokenType.stringLiteral)) {
+      label = _advance().lexeme;
+    } else if (_check(TokenType.identifier) && _peek().lexeme != 'as') {
+      label = _advance().lexeme;
+    }
+    if (_isKeyword('as')) {
+      _advance();
+      // Accept both `component alias as Identifier` and
+      // `component alias as "Display"` forms. In the latter case the
+      // identifier consumed as `label` above is actually the alias and
+      // the quoted string becomes the display label.
+      if (_check(TokenType.stringLiteral)) {
+        final displayed = _advance().lexeme;
+        alias = label;
+        label = displayed;
+      } else {
+        alias = _expect(TokenType.identifier).lexeme;
+      }
+    }
+    // Tolerate trailing stereotype / hash color on the header line.
+    for (var k = 0; k < 2; k++) {
+      if (_check(TokenType.stereotype)) {
+        _advance();
+      } else if (_check(TokenType.hashColor)) {
+        _advance();
+      } else {
+        break;
+      }
+    }
+    final contained = <String>[];
+    final nested = <ComponentContainer>[];
+    if (_check(TokenType.leftBrace)) {
+      _advance();
+      _skipNewlines();
+      while (!_check(TokenType.rightBrace) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+          _skipMultiLineBracketBlock();
+          _skipNewlines();
+          continue;
+        }
+        if (_isComponentDeclKeyword()) {
+          if (_componentDeclOpensContainer()) {
+            nested.add(
+                _parseComponentAsContainer(addNode, relations: relOut));
+          } else {
+            final node = _parseComponentDecl();
+            addNode(node);
+            contained.add(node.alias);
+          }
+        } else if (_isKeyword('artifact')) {
+          if (_typedNodeKeywordIsContainer()) {
+            nested.add(
+                _parseComponentContainer(addNode, relations: relOut));
+          } else {
+            final node = _parseArtifactDecl();
+            addNode(node);
+            contained.add(node.alias);
+          }
+        } else if (_isKeyword('interface')) {
+          final node = _parseInterfaceDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isPortKeyword()) {
+          final kind = _portKindFor(_peek().lexeme);
+          final node = _parsePortDecl(kind);
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_check(TokenType.leftBracket) &&
+            !_bracketIsRelationStart()) {
+          final node = _parseBracketComponent();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_check(TokenType.leftBracket) &&
+            _bracketIsRelationStart()) {
+          _parseComponentRelation(relOut, addNode);
+        } else if (_isComponentContainerKeyword()) {
+          nested.add(_parseComponentContainer(addNode, relations: relOut));
+        } else {
+          // Unknown / unsupported line — consume it so the body parses.
+          _consumeRestOfLine();
+        }
+        _skipNewlines();
+      }
+      if (_check(TokenType.rightBrace)) _advance();
+    }
+    return ComponentContainer(
+      kind: ContainerKind.package,
+      label: label ?? alias ?? kwToken.lexeme,
+      alias: alias ?? label ?? kwToken.lexeme,
+      nodeAliases: List.unmodifiable(contained),
+      nestedContainers: List.unmodifiable(nested),
+    );
   }
 
   bool _typedNodeKeywordIsContainer() {
@@ -4612,6 +5674,23 @@ class Parser {
       throw ParserException(
           'Expected element name, got ${t.type}', t.line, t.column);
     }
+    // Optional trailing `<<Stereo>>` / `#color;line:X;text:Y` on the element
+    // header line, in any order. Visual styling is currently deferred — we
+    // just consume so the declaration parses.
+    for (var k = 0; k < 3; k++) {
+      if (_check(TokenType.stereotype)) {
+        _advance();
+      } else if (_check(TokenType.hashColor)) {
+        _advance();
+      } else {
+        break;
+      }
+    }
+    // PlantUML allows a trailing multi-line `[ ... ]` block as a free-form
+    // description body. Consume as a no-op so the line parses.
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
+    }
     return ComponentNode(
       alias: alias,
       label: displayName ?? alias,
@@ -4651,7 +5730,15 @@ class Parser {
     String? alias;
     if (_isKeyword('as')) {
       _advance();
-      alias = _expect(TokenType.identifier).lexeme;
+      // Accept both `stack alias as Identifier` and
+      // `stack alias as "Display"` forms.
+      if (_check(TokenType.stringLiteral)) {
+        final displayed = _advance().lexeme;
+        alias = label;
+        label = displayed;
+      } else {
+        alias = _expect(TokenType.identifier).lexeme;
+      }
     }
     final contained = <String>[];
     final nested = <ComponentContainer>[];
@@ -4670,9 +5757,13 @@ class Parser {
           addNode(node);
           contained.add(node.alias);
         } else if (_isKeyword('artifact')) {
-          final node = _parseArtifactDecl();
-          addNode(node);
-          contained.add(node.alias);
+          if (_typedNodeKeywordIsContainer()) {
+            nested.add(_parseComponentContainer(addNode));
+          } else {
+            final node = _parseArtifactDecl();
+            addNode(node);
+            contained.add(node.alias);
+          }
         } else if (_isKeyword('interface')) {
           final node = _parseInterfaceDecl();
           addNode(node);
@@ -4716,6 +5807,18 @@ class Parser {
         return ContainerKind.queue;
       case 'storage':
         return ContainerKind.storage;
+      // PlantUML supports additional container shapes (`folder`, `rectangle`,
+      // `card`) that this codebase doesn't yet have dedicated AST kinds for.
+      // Map them to the nearest visual equivalent (frame for folder, package
+      // for rectangle/card) so containers nested via these keywords parse
+      // and render without error.
+      case 'folder':
+        return ContainerKind.frame;
+      case 'rectangle':
+      case 'card':
+      case 'hexagon':
+      case 'artifact':
+        return ContainerKind.package;
     }
     return ContainerKind.package;
   }
@@ -4732,6 +5835,19 @@ class Parser {
       } else {
         alias = displayName;
       }
+    } else if (_check(TokenType.leftBracket)) {
+      // `component [Name] as Alias` — bracketed-name form. The bracketed
+      // name is the display label; the alias defaults to the same when no
+      // explicit `as` clause is present.
+      final name = _readBracketedName();
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = name;
+      } else {
+        alias = name;
+        displayName = name;
+      }
     } else if (_check(TokenType.identifier)) {
       final first = _advance().lexeme;
       if (_isKeyword('as')) {
@@ -4746,8 +5862,29 @@ class Parser {
       throw ParserException(
           'Expected component name, got ${t.type}', t.line, t.column);
     }
-    if (_check(TokenType.hashColor)) {
+    // Tolerate trailing stereotype (`<< Apache >>`) and/or `#color` on the
+    // component header line in any order — PlantUML allows these in either
+    // position after the alias.
+    for (var k = 0; k < 3; k++) {
+      if (_check(TokenType.hashColor)) {
+        _advance();
+      } else if (_check(TokenType.stereotype)) {
+        _advance();
+      } else {
+        break;
+      }
+    }
+    // Consume optional `$tag` suffix(es) on the component declaration (e.g.
+    // `component C1 $tag13 $tag1`). Visual / semantic tag handling is
+    // deferred — accept and discard.
+    while (_check(TokenType.identifier) && _peek().lexeme.startsWith('\$')) {
       _advance();
+    }
+    // PlantUML allows a trailing multi-line `[ ... ]` block as a free-form
+    // description body on shape declarations. Consume as a no-op so the line
+    // parses. Visual rendering of the description is deferred.
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
     }
     return ComponentNode(
       alias: alias,
@@ -4782,10 +5919,49 @@ class Parser {
       throw ParserException(
           'Expected artifact name, got ${t.type}', t.line, t.column);
     }
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
+    }
     return ComponentNode(
       alias: alias,
       label: displayName ?? alias,
       kind: ComponentNodeKind.artifact,
+    );
+  }
+
+  /// Parses a PlantUML `label "<text>" [as Alias]` declaration in a component
+  /// diagram. Modelled as a generic component node since there's no dedicated
+  /// label AST kind. Visual rendering of labels is currently deferred.
+  ComponentNode _parseLabelDecl() {
+    _advance(); // consume `label`
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = first;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected label text, got ${t.type}', t.line, t.column);
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: ComponentNodeKind.component,
     );
   }
 
@@ -4815,11 +5991,67 @@ class Parser {
       throw ParserException(
           'Expected interface name, got ${t.type}', t.line, t.column);
     }
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
+    }
     return ComponentNode(
       alias: alias,
       label: displayName ?? alias,
       kind: ComponentNodeKind.interface,
     );
+  }
+
+  /// Parses a `port <name>`, `portin <name>`, or `portout <name>` declaration
+  /// inside a component container. The bare-identifier form is the common
+  /// case; the quoted-label `as <alias>` form is also accepted.
+  ComponentNode _parsePortDecl(ComponentNodeKind kind) {
+    _advance(); // consume `port`/`portin`/`portout`
+    String? displayName;
+    final String alias;
+    if (_check(TokenType.stringLiteral)) {
+      displayName = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+      } else {
+        alias = displayName;
+      }
+    } else if (_check(TokenType.identifier)) {
+      final first = _advance().lexeme;
+      if (_isKeyword('as')) {
+        _advance();
+        alias = _expect(TokenType.identifier).lexeme;
+        displayName = first;
+      } else {
+        alias = first;
+      }
+    } else {
+      final t = _peek();
+      throw ParserException(
+          'Expected port name, got ${t.type}', t.line, t.column);
+    }
+    return ComponentNode(
+      alias: alias,
+      label: displayName ?? alias,
+      kind: kind,
+    );
+  }
+
+  bool _isPortKeyword() {
+    if (!_check(TokenType.identifier)) return false;
+    final lex = _peek().lexeme;
+    return lex == 'port' || lex == 'portin' || lex == 'portout';
+  }
+
+  ComponentNodeKind _portKindFor(String keyword) {
+    switch (keyword) {
+      case 'portin':
+        return ComponentNodeKind.portIn;
+      case 'portout':
+        return ComponentNodeKind.portOut;
+      default:
+        return ComponentNodeKind.port;
+    }
   }
 
   ComponentNode _parseTypedNodeDecl(ComponentNodeKind kind) {
@@ -4847,6 +6079,19 @@ class Parser {
       final t = _peek();
       throw ParserException(
           'Expected node name, got ${t.type}', t.line, t.column);
+    }
+    // Optional trailing `<<Stereo>>` / `#color`.
+    for (var k = 0; k < 2; k++) {
+      if (_check(TokenType.stereotype)) {
+        _advance();
+      } else if (_check(TokenType.hashColor)) {
+        _advance();
+      } else {
+        break;
+      }
+    }
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
     }
     return ComponentNode(
       alias: alias,
@@ -4885,11 +6130,27 @@ class Parser {
     }
     _advance();
     if (parts.isEmpty) {
-      final t = _peek();
-      throw ParserException(
-          "Expected component name inside '[]'", t.line, t.column);
+      // Empty bracket `[ ]` — accept as an anonymous placeholder. Synthesise
+      // a unique alias so the rest of the parser can index it without
+      // colliding with other anonymous slots.
+      _anonBracketCounter++;
+      return '__anon_$_anonBracketCounter';
     }
-    return parts.join(' ');
+    // PlantUML embeds `\n` inside bracketed names to force a line break.
+    // The lexer emits the literal `\n` as a `text` token; reconstruct the
+    // name preserving the escape, then convert to a real newline. Other
+    // adjacent tokens are joined with a single space so multi-word names
+    // like `[Auth Service]` still come out as `Auth Service`.
+    final buf = StringBuffer();
+    for (var k = 0; k < parts.length; k++) {
+      final p = parts[k];
+      if (k > 0) {
+        final prev = parts[k - 1];
+        if (prev != r'\n' && p != r'\n') buf.write(' ');
+      }
+      buf.write(p);
+    }
+    return buf.toString().replaceAll(r'\n', '\n');
   }
 
   ComponentNode _parseBracketComponent() {
@@ -4901,9 +6162,21 @@ class Parser {
       alias = _expect(TokenType.identifier).lexeme;
       displayName = name;
     }
+    // Optional trailing `<<Stereo>>` / `#color` on the bracket-component line
+    // (e.g. `[AA] <<static lib>>`). Stereotypes are not currently mapped to
+    // per-element style overrides — accept and discard.
+    for (var k = 0; k < 2; k++) {
+      if (_check(TokenType.stereotype)) {
+        _advance();
+      } else if (_check(TokenType.hashColor)) {
+        _advance();
+      } else {
+        break;
+      }
+    }
     return ComponentNode(
       alias: alias,
-      label: displayName ?? alias,
+      label: displayName ?? alias.trim(),
       kind: ComponentNodeKind.component,
     );
   }
@@ -4945,7 +6218,9 @@ class Parser {
   }
 
   ComponentContainer _parseComponentContainer(
-      void Function(ComponentNode) addNode) {
+      void Function(ComponentNode) addNode,
+      {List<ComponentRelation>? relations}) {
+    final relOut = relations ?? <ComponentRelation>[];
     final kwToken = _advance();
     final kind = _containerKindFor(kwToken.lexeme);
     String? label;
@@ -4959,19 +6234,29 @@ class Parser {
     String? alias;
     if (_isKeyword('as')) {
       _advance();
-      alias = _expect(TokenType.identifier).lexeme;
+      // PlantUML accepts both `<keyword> alias as Identifier` and the
+      // reversed `<keyword> alias as "Display"` form (where the quoted
+      // string is the display label). In the latter case the identifier
+      // already consumed above is the alias and the quoted string becomes
+      // the label.
+      if (_check(TokenType.stringLiteral)) {
+        final displayed = _advance().lexeme;
+        alias = label;
+        label = displayed;
+      } else {
+        alias = _expect(TokenType.identifier).lexeme;
+      }
     }
     // Optional stereotype `<<Stereo>>` and/or background `#color` on the
-    // container header line, in any order (e.g.
-    // `package "Name" #DDDDDD { ... }`, `package foo <<Node>> { ... }`).
-    for (var k = 0; k < 2; k++) {
-      if (_check(TokenType.stereotype)) {
-        _advance();
-      } else if (_check(TokenType.hashColor)) {
-        _advance();
-      } else {
-        break;
-      }
+    // container header line, in any order — also tolerates ArchiMate-style
+    // multi-stereotype headers `<<$sprite>><<behavior>> #color`.
+    while (_check(TokenType.stereotype) || _check(TokenType.hashColor)) {
+      _advance();
+    }
+    // PlantUML allows a trailing multi-line `[ ... ]` block as a free-form
+    // description body on shape declarations. Consume as a no-op.
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
     }
     final contained = <String>[];
     final nested = <ComponentContainer>[];
@@ -4986,11 +6271,21 @@ class Parser {
           addNode(node);
           contained.add(node.alias);
         } else if (_isKeyword('artifact')) {
-          final node = _parseArtifactDecl();
-          addNode(node);
-          contained.add(node.alias);
+          if (_typedNodeKeywordIsContainer()) {
+            nested.add(
+                _parseComponentContainer(addNode, relations: relOut));
+          } else {
+            final node = _parseArtifactDecl();
+            addNode(node);
+            contained.add(node.alias);
+          }
         } else if (_isKeyword('interface')) {
           final node = _parseInterfaceDecl();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_isPortKeyword()) {
+          final kind = _portKindFor(_peek().lexeme);
+          final node = _parsePortDecl(kind);
           addNode(node);
           contained.add(node.alias);
         } else if (_isKeyword('database') &&
@@ -5009,24 +6304,42 @@ class Parser {
           contained.add(node.alias);
         } else if (_isKeyword('database') &&
             _typedNodeKeywordIsContainer()) {
-          nested.add(_parseComponentContainer(addNode));
+          nested.add(
+              _parseComponentContainer(addNode, relations: relOut));
         } else if (_isKeyword('queue') && _typedNodeKeywordIsContainer()) {
-          nested.add(_parseComponentContainer(addNode));
+          nested.add(
+              _parseComponentContainer(addNode, relations: relOut));
         } else if (_isKeyword('storage') &&
             _typedNodeKeywordIsContainer()) {
-          nested.add(_parseComponentContainer(addNode));
-        } else if (_check(TokenType.leftBracket)) {
+          nested.add(
+              _parseComponentContainer(addNode, relations: relOut));
+        } else if (_check(TokenType.leftBracket) &&
+            !_bracketIsRelationStart()) {
           final node = _parseBracketComponent();
+          addNode(node);
+          contained.add(node.alias);
+        } else if (_check(TokenType.leftBracket) &&
+            _bracketIsRelationStart()) {
+          // `[Component] --> Target` line inside a container body — parse as
+          // a cross-container relation. Don't claim either endpoint as a
+          // member of this container; the relation parser auto-declares any
+          // bracketed nodes at top scope.
+          _parseComponentRelation(relOut, addNode);
+        } else if (_check(TokenType.leftParen) &&
+            _pos + 1 < _tokens.length &&
+            _tokens[_pos + 1].type == TokenType.rightParen &&
+            !_parenIsRelationStart()) {
+          final node = _parseParenInterface();
           addNode(node);
           contained.add(node.alias);
         } else if (_check(TokenType.leftParen) &&
             _pos + 1 < _tokens.length &&
-            _tokens[_pos + 1].type == TokenType.rightParen) {
-          final node = _parseParenInterface();
-          addNode(node);
-          contained.add(node.alias);
+            _tokens[_pos + 1].type == TokenType.rightParen &&
+            _parenIsRelationStart()) {
+          _parseComponentRelation(relOut, addNode);
         } else if (_isComponentContainerKeyword()) {
-          nested.add(_parseComponentContainer(addNode));
+          nested.add(
+              _parseComponentContainer(addNode, relations: relOut));
         } else if (_check(TokenType.identifier) &&
             _peek().lexeme.startsWith('\$')) {
           // PlantUML preprocessor procedure / variable expansion at runtime
@@ -5045,7 +6358,7 @@ class Parser {
           final name = _advance().lexeme;
           if (_check(TokenType.arrow) || _check(TokenType.minusMinus)) {
             _pos = save;
-            _parseComponentRelation(<ComponentRelation>[], addNode);
+            _parseComponentRelation(relOut, addNode);
           } else {
             addNode(ComponentNode(
               alias: name,
@@ -5083,6 +6396,19 @@ class Parser {
       List<ComponentRelation> out, void Function(ComponentNode) addNode) {
     final from = _readComponentRelationEnd();
     if (!_check(TokenType.arrow) && !_check(TokenType.minusMinus)) {
+      // Bare identifier line — e.g. `$C2` referencing an existing component.
+      // Accept as a node-reference no-op; auto-declare when not bracketed so
+      // downstream layout still sees the alias.
+      if (_check(TokenType.newline) ||
+          _check(TokenType.eof) ||
+          _check(TokenType.endUml)) {
+        addNode(ComponentNode(
+          alias: from.alias,
+          label: from.alias,
+          kind: ComponentNodeKind.component,
+        ));
+        return;
+      }
       final t = _peek();
       throw ParserException(
           "Expected relationship arrow after '${from.alias}', got ${t.type}",
@@ -5091,6 +6417,14 @@ class Parser {
     }
     final arrowToken = _advance();
     final to = _readComponentRelationEnd();
+    // Optional PlantUML inline-style suffix on the relation:
+    // `--> bar1 #line:red;line.bold;text:red : label`. The lexer absorbs the
+    // full `#color;line:X;line.X;text:X` run into a single hashColor token.
+    // Visual styling on component relations is currently deferred — consume
+    // the token so the line still parses.
+    if (_check(TokenType.hashColor)) {
+      _advance();
+    }
     String? label;
     if (_check(TokenType.colon)) {
       _advance();
@@ -5131,6 +6465,26 @@ class Parser {
     if (_check(TokenType.leftBracket)) {
       final name = _readBracketedName();
       return _ComponentRelEnd(name, declared: true);
+    }
+    // `() Name` — interface endpoint inline in a relation
+    // (`[X] ..> () HTTP : use`). Consume the `()` glyph and read the
+    // following identifier or string as the interface name.
+    if (_check(TokenType.leftParen) &&
+        _pos + 1 < _tokens.length &&
+        _tokens[_pos + 1].type == TokenType.rightParen) {
+      _advance();
+      _advance();
+      if (_check(TokenType.identifier)) {
+        return _ComponentRelEnd(_advance().lexeme, declared: true);
+      }
+      if (_check(TokenType.stringLiteral)) {
+        return _ComponentRelEnd(_advance().lexeme, declared: true);
+      }
+      final t = _peek();
+      throw ParserException(
+          'Expected interface name after \'()\', got ${t.type}',
+          t.line,
+          t.column);
     }
     if (_check(TokenType.identifier)) {
       return _ComponentRelEnd(_advance().lexeme, declared: false);
@@ -5198,18 +6552,18 @@ class Parser {
       // case diagram. The use-case AST doesn't model these element types
       // directly; we coerce them to actor-kind UseCaseNodes so the alias
       // appears in the node list and downstream relations resolve. Layout
-      // currently treats them as actors.
-      if (_isKeyword('component') ||
-          _isKeyword('node') ||
-          _isKeyword('cloud') ||
-          _isKeyword('frame') ||
-          _isKeyword('agent') ||
-          _isKeyword('stack') ||
-          _isKeyword('database') ||
-          _isKeyword('queue') ||
-          _isKeyword('storage') ||
-          _isKeyword('artifact')) {
+      // currently treats them as actors. The set covers every PlantUML
+      // component/deployment/use-case shape keyword that may legally appear
+      // as a `<kind> <name>` declaration in a use case or mixed diagram.
+      if (_isMixedElementKeyword()) {
         _consumeMixedTopLevelDecl(addNode);
+        _skipNewlines();
+        continue;
+      }
+      // `sprite $name [WxH/depth] { hex_grid }` — a sprite/icon definition.
+      // Consumed as a no-op so sources that lead with a sprite still parse.
+      if (_isKeyword('sprite')) {
+        _skipSpriteBlock();
         _skipNewlines();
         continue;
       }
@@ -5674,6 +7028,12 @@ class Parser {
     if (_check(TokenType.hashColor)) {
       _advance();
     }
+    // PlantUML allows a trailing multi-line `[ ... ]` block as a free-form
+    // description body on shape declarations (`usecase name [\n...\n]`).
+    // Consume it as a no-op so the line parses.
+    if (_check(TokenType.leftBracket) && _isMultiLineBracketBlock()) {
+      _skipMultiLineBracketBlock();
+    }
     return UseCaseNode(
       alias: alias,
       label: label,
@@ -5761,9 +7121,26 @@ class Parser {
         label = _advance().lexeme;
       }
     }
-    if (_isKeyword('as')) {
-      _advance();
-      _expect(TokenType.identifier);
+    // Tolerate `<<Stereo>>` / `#color` / `as <alias>` on the rectangle
+    // header in any order (e.g. `rectangle "X" <<$sprite>> {`,
+    // `rectangle "X" <<$sprite>> as foo`). These don't yet drive layout but
+    // accepting them keeps stereotyped boundaries parsing.
+    for (var k = 0; k < 4; k++) {
+      if (_check(TokenType.stereotype)) {
+        _advance();
+      } else if (_check(TokenType.hashColor)) {
+        _advance();
+      } else if (_isKeyword('as')) {
+        _advance();
+        if (_check(TokenType.identifier) ||
+            _check(TokenType.stringLiteral)) {
+          _advance();
+        } else {
+          _expect(TokenType.identifier);
+        }
+      } else {
+        break;
+      }
     }
     final contained = <String>[];
     if (_check(TokenType.leftBrace)) {
@@ -5827,6 +7204,21 @@ class Parser {
       _UseCaseEnd? leadingEnd,
       Set<String>? noteAliases,
       List<UseCaseNoteConnection>? noteConnections}) {
+    // Recovery: if we entered without a leading endpoint but the current
+    // token is already an arrow (e.g. PlantUML's `() name )-arrow- target`
+    // form where the `()` interface shorthand was consumed as a node
+    // declaration on the previous outer-loop iteration), swallow the line
+    // as a no-op so parsing can continue.
+    if (leadingEnd == null &&
+        leadingAlias == null &&
+        (_check(TokenType.arrow) || _check(TokenType.minusMinus))) {
+      while (!_check(TokenType.newline) &&
+          !_check(TokenType.endUml) &&
+          !_check(TokenType.eof)) {
+        _advance();
+      }
+      return;
+    }
     final _UseCaseEnd fromEnd;
     if (leadingEnd != null) {
       fromEnd = leadingEnd;
@@ -5836,11 +7228,29 @@ class Parser {
       fromEnd = _readUseCaseRelationEnd();
     }
     if (!_check(TokenType.arrow) && !_check(TokenType.minusMinus)) {
-      final t = _peek();
-      throw ParserException(
-          "Expected relationship arrow after '${fromEnd.alias}', got ${t.type}",
-          t.line,
-          t.column);
+      // PlantUML accepts esoteric chained-arrow forms with intermediate
+      // identifiers/strings between the source endpoint and the actual
+      // arrow (e.g. `() component3 )-0-(0 "foo" [componentC]`). Skip over
+      // intermediate non-arrow tokens up to a newline boundary until we
+      // find an arrow; if none is found on this line, swallow the rest
+      // of the line as a no-op recovery.
+      while (!_check(TokenType.arrow) &&
+          !_check(TokenType.minusMinus) &&
+          !_check(TokenType.newline) &&
+          !_check(TokenType.endUml) &&
+          !_check(TokenType.eof)) {
+        _advance();
+      }
+      if (!_check(TokenType.arrow) && !_check(TokenType.minusMinus)) {
+        // No arrow found on this line — accept the leading endpoint as a
+        // standalone node declaration so parsing can continue.
+        addNode(UseCaseNode(
+          alias: fromEnd.alias,
+          label: fromEnd.label ?? fromEnd.alias,
+          kind: fromEnd.declaredKind ?? UseCaseNodeKind.actor,
+        ));
+        return;
+      }
     }
     final arrowToken = _advance();
     final toEnd = _readUseCaseRelationEnd();
@@ -5930,6 +7340,15 @@ class Parser {
       inlineLineStyle: inlineLineStyle,
       textColor: inlineTextColor,
     ));
+    // Chained relations on a single line: `A --> B --> C` becomes
+    // `A --> B` plus `B --> C`. Continue parsing from the toEnd as the new
+    // fromEnd while the same logical line still carries an arrow.
+    if (_check(TokenType.arrow) || _check(TokenType.minusMinus)) {
+      _parseUseCaseRelation(out, addNode,
+          leadingEnd: toEnd,
+          noteAliases: noteAliases,
+          noteConnections: noteConnections);
+    }
   }
 
   /// Splits a PlantUML inline-style lexeme such as
@@ -6030,9 +7449,93 @@ class Parser {
         declaredKind: UseCaseNodeKind.useCase,
       );
     }
+    // `[name]` — bracketed component reference appearing in a use-case
+    // relation context. Accept as a generic endpoint.
+    if (_check(TokenType.leftBracket)) {
+      _advance();
+      final buf = StringBuffer();
+      while (!_check(TokenType.rightBracket) &&
+          !_check(TokenType.newline) &&
+          !_check(TokenType.endUml) &&
+          !_check(TokenType.eof)) {
+        buf.write(_advance().lexeme);
+      }
+      if (_check(TokenType.rightBracket)) {
+        _advance();
+      }
+      final alias = buf.toString().trim();
+      return _UseCaseEnd(
+        alias: alias,
+        label: alias,
+        declaredKind: null,
+      );
+    }
     if (_check(TokenType.identifier) || _check(TokenType.stringLiteral)) {
-      final alias = _advance().lexeme;
-      return _UseCaseEnd(alias: alias, declaredKind: null);
+      final tok = _advance();
+      final rawLex = tok.lexeme;
+      // Quoted endpoint may carry a trailing `as <alias>` (PlantUML uses
+      // this to give a display label its own identifier). Consume it so the
+      // alias becomes the relation endpoint and the lexeme stays as the
+      // display label.
+      if (tok.type == TokenType.stringLiteral &&
+          _check(TokenType.identifier) &&
+          _peek().lexeme == 'as' &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier) {
+        _advance();
+        final aliasTok = _advance();
+        return _UseCaseEnd(
+          alias: aliasTok.lexeme,
+          label: rawLex,
+          declaredKind: null,
+        );
+      }
+      // Identifier endpoint `Name(arg)` — accept a parenthesized call-style
+      // suffix as part of the alias. Lets sources that use macro/procedure
+      // call syntax as a node reference (e.g. activity-style `SALT(choose)`
+      // routed through use-case dispatch) parse without error.
+      //
+      // When the call shape is a single bare identifier argument (e.g.
+      // `SALT(choose)`), use the inner argument as the node alias *and*
+      // display label. PlantUML's `!unquoted procedure SALT($x)` macro
+      // expands to `"..." as $x`, so subsequent references to the bare
+      // argument (e.g. `wait -right-> SALT(success)`) must resolve to the
+      // same node. Falling back to the literal `SALT(choose)` lexeme would
+      // split each call into its own disconnected node.
+      if (tok.type == TokenType.identifier && _check(TokenType.leftParen)) {
+        _advance();
+        final argTokens = <Token>[];
+        while (!_check(TokenType.rightParen) &&
+            !_check(TokenType.newline) &&
+            !_check(TokenType.endUml) &&
+            !_check(TokenType.eof)) {
+          argTokens.add(_advance());
+        }
+        if (_check(TokenType.rightParen)) {
+          _advance();
+        }
+        if (argTokens.length == 1 &&
+            (argTokens.first.type == TokenType.identifier ||
+                argTokens.first.type == TokenType.text)) {
+          final argName = argTokens.first.lexeme.trim();
+          if (argName.isNotEmpty &&
+              argName != '*' &&
+              RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$').hasMatch(argName)) {
+            return _UseCaseEnd(
+              alias: argName,
+              label: argName,
+              declaredKind: null,
+            );
+          }
+        }
+        final buf = StringBuffer(rawLex)..write('(');
+        for (final t in argTokens) {
+          buf.write(t.lexeme);
+        }
+        buf.write(')');
+        return _UseCaseEnd(alias: buf.toString(), declaredKind: null);
+      }
+      return _UseCaseEnd(alias: rawLex, declaredKind: null);
     }
     final t = _peek();
     throw ParserException(
@@ -6110,7 +7613,17 @@ class Parser {
   }
 
   bool _looksLikeTimingDiagram() {
-    const laneKeywords = {'robust', 'concise', 'clock', 'binary'};
+    const laneKeywords = {
+      'robust',
+      'concise',
+      'clock',
+      'binary',
+      'analog',
+      // `rectangle` is NOT included here — it's ambiguous with use-case
+      // diagram boundaries (`rectangle "Name" { ... }`). It is still parsed
+      // as a timing lane when the source has already been routed to the
+      // timing parser by another lane keyword.
+    };
     var atLineStart = true;
     for (var k = _pos; k < _tokens.length; k++) {
       final t = _tokens[k];
@@ -6127,21 +7640,104 @@ class Parser {
           laneKeywords.contains(t.lexeme)) {
         return true;
       }
+      // `mode compact` is a timing-diagram directive that can appear before
+      // any lane declarations.
+      if (atLineStart &&
+          t.type == TokenType.identifier &&
+          t.lexeme == 'mode' &&
+          k + 1 < _tokens.length &&
+          _tokens[k + 1].type == TokenType.identifier &&
+          (_tokens[k + 1].lexeme == 'compact' ||
+              _tokens[k + 1].lexeme == 'tabular')) {
+        return true;
+      }
       atLineStart = false;
     }
     return false;
   }
 
+  // Timing-diagram keywords whose lines are consumed-and-ignored at the
+  // top level (visual support deferred). The form is generally
+  // `<keyword> ...rest-of-line` and we tolerate any tokens up to the
+  // next newline/end-of-input.
+  static const _timingIgnoredLineKeywords = {
+    'highlight',
+    'hide',
+    'scale',
+    'manual',
+    'use',
+    'mode',
+    // `note top of X : ...` / `note bottom of X : ...` / `note left/right of`.
+    // The colon scanner already swallows the trailing message, so consuming
+    // the remaining tokens of the line is sufficient.
+    'note',
+  };
+
+  // Decoration-style keywords whose case-variants (e.g. `Title` vs `title`)
+  // we tolerate inside `_parseTimingDiagram`. Lowercase forms are already
+  // handled by `_tryParseDecoration`; this set lets us consume-and-ignore
+  // the line when the source capitalizes the keyword. Visual rendering of
+  // these directives inside timing diagrams is deferred.
+  static const _timingCaseInsensitiveDecorationKeywords = {
+    'title',
+    'header',
+    'footer',
+    'caption',
+    'legend',
+  };
+
   TimingDiagram _parseTimingDiagram() {
     final lanes = <TimingLane>[];
     final events = <TimingEvent>[];
     var currentTime = 0;
+    String? laneFocus;
     while (!_check(TokenType.endUml) && !_check(TokenType.eof)) {
       _skipNewlines();
       if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
       if (_tryParseDecoration()) {
         _skipNewlines();
         continue;
+      }
+      // Tolerate case-variant decoration keywords inside timing diagrams
+      // (e.g. `Title ...`, `Header ...`). The strict `_tryParseDecoration`
+      // path is lowercase-only; sources from the regression set occasionally
+      // capitalize the keyword. Consume-and-ignore the rest of the line so
+      // the timing parser stays robust. Visual rendering deferred.
+      if (_check(TokenType.identifier) &&
+          _timingCaseInsensitiveDecorationKeywords
+              .contains(_peek().lexeme.toLowerCase())) {
+        final kw = _peek().lexeme.toLowerCase();
+        _consumeRestOfLine();
+        // `legend` and `title` (block form) extend until `end <kw>`.
+        if (kw == 'legend' || kw == 'title') {
+          while (!_check(TokenType.eof) && !_check(TokenType.endUml)) {
+            _skipNewlines();
+            if (_check(TokenType.identifier) &&
+                _peek().lexeme.toLowerCase() == 'end' &&
+                _pos + 1 < _tokens.length &&
+                _tokens[_pos + 1].type == TokenType.identifier &&
+                _tokens[_pos + 1].lexeme.toLowerCase() == kw) {
+              _advance();
+              _advance();
+              break;
+            }
+            if (_check(TokenType.endUml) || _check(TokenType.eof)) break;
+            _consumeRestOfLine();
+          }
+        }
+        _skipNewlines();
+        continue;
+      }
+      // Optional `compact` modifier prefix on a lane declaration:
+      // `compact robust "..." as X`. Consume-and-ignore the modifier so the
+      // lane keyword that follows is parsed normally. Visual stacking is
+      // deferred.
+      if (_isKeyword('compact') &&
+          _pos + 1 < _tokens.length &&
+          _tokens[_pos + 1].type == TokenType.identifier &&
+          const {'robust', 'concise', 'clock', 'binary', 'analog', 'rectangle'}
+              .contains(_tokens[_pos + 1].lexeme)) {
+        _advance();
       }
       if (_isKeyword('robust')) {
         lanes.add(_parseTimingLane(TimingLaneKind.robust));
@@ -6151,12 +7747,54 @@ class Parser {
         lanes.add(_parseTimingLane(TimingLaneKind.clock));
       } else if (_isKeyword('binary')) {
         lanes.add(_parseTimingLane(TimingLaneKind.binary));
-      } else if (_isKeyword('highlight') || _isKeyword('hide')) {
+      } else if (_isKeyword('analog')) {
+        lanes.add(_parseTimingLane(TimingLaneKind.analog));
+      } else if (_isKeyword('rectangle')) {
+        lanes.add(_parseTimingLane(TimingLaneKind.rectangle));
+      } else if (_check(TokenType.identifier) &&
+          _timingIgnoredLineKeywords.contains(_peek().lexeme)) {
         _consumeRestOfLine();
       } else if (_check(TokenType.atTime)) {
-        currentTime = int.parse(_advance().lexeme);
+        final raw = _advance().lexeme;
+        final parsed = int.tryParse(raw);
+        final parsedDouble = parsed == null ? double.tryParse(raw) : null;
+        if (parsed != null) {
+          currentTime = parsed;
+          laneFocus = null;
+        } else if (parsedDouble != null) {
+          currentTime = parsedDouble.toInt();
+          laneFocus = null;
+        } else if (raw.startsWith(':') ||
+            raw.startsWith('-') ||
+            raw.startsWith('+') ||
+            _isAnchorArithmetic(raw)) {
+          // Labeled / arithmetic / relative anchor. Best-effort: extract the
+          // leading integer if any; otherwise hold the previous time. The
+          // anchor name (without `:`) is tracked so subsequent `+N`/`-N`
+          // lines can resolve. Visual rendering deferred.
+          currentTime = _approxTimeFromAnchor(raw, currentTime);
+          laneFocus = null;
+        } else {
+          // `@<laneName>` selects a lane as the focus for following
+          // relative-time statements (e.g. `@WB\n0 is idle\n+200 is Proc.`).
+          laneFocus = raw;
+          currentTime = 0;
+        }
+        // Optional `as :label` suffix that names this anchor for later
+        // reference (e.g. `@0 as :start`). Consume the rest of the line so
+        // the loop's `_skipNewlines` advances past the trailing alias.
+        if (_isKeyword('as')) {
+          _consumeRestOfLine();
+        }
+        // Annotation arrow with no source lane prefix:
+        // `@200 <-> @+150 : {150 ms}`. After the `@N` anchor is consumed
+        // the rest of the line is an annotation between time-anchors. We
+        // consume-and-ignore it; visual rendering deferred.
+        if (_check(TokenType.arrow)) {
+          _consumeRestOfLine();
+        }
       } else {
-        _parseTimingStatement(events, currentTime);
+        _parseTimingStatement(events, currentTime, laneFocus);
       }
       _skipNewlines();
     }
@@ -6168,12 +7806,34 @@ class Parser {
     );
   }
 
+  static bool _isAnchorArithmetic(String raw) {
+    return raw.contains('+') || raw.contains('-') ||
+        raw.contains(':') || raw.contains('/') ||
+        raw.contains('.') || raw.contains('*');
+  }
+
+  static int _approxTimeFromAnchor(String raw, int fallback) {
+    final m = RegExp(r'^-?\d+(?:\.\d+)?').firstMatch(raw);
+    if (m != null) {
+      final s = m.group(0)!;
+      final asInt = int.tryParse(s);
+      if (asInt != null) return asInt;
+      final asDouble = double.tryParse(s);
+      if (asDouble != null) return asDouble.toInt();
+    }
+    return fallback;
+  }
+
   TimingLane _parseTimingLane(TimingLaneKind kind) {
     final keywordToken = _advance();
     String label;
     String alias;
     if (_check(TokenType.stringLiteral)) {
       label = _advance().lexeme;
+      // Optional `between A and B` clause for analog lanes — the values bound
+      // the y-axis range. Consume-and-ignore for parser robustness; visual
+      // axis scaling is deferred.
+      _consumeOptionalAnalogBetween();
       if (_isKeyword('as')) {
         _advance();
         if (!_check(TokenType.identifier)) {
@@ -6187,6 +7847,7 @@ class Parser {
     } else if (_check(TokenType.identifier)) {
       alias = _advance().lexeme;
       label = alias;
+      _consumeOptionalAnalogBetween();
       if (_isKeyword('as')) {
         _advance();
         if (!_check(TokenType.identifier)) {
@@ -6200,6 +7861,13 @@ class Parser {
           "Expected lane label after '${keywordToken.lexeme}'",
           keywordToken.line,
           keywordToken.column);
+    }
+    // Optional `<<stereotype>>` after the alias (e.g.
+    // `binary "X" as IS2 <<blue>>`). The stereotype is a style-class reference
+    // resolved by the `<style>` block; we consume-and-ignore for parser
+    // robustness — visual styling is deferred.
+    while (_check(TokenType.stereotype)) {
+      _advance();
     }
     int? clockPeriod;
     if (kind == TimingLaneKind.clock && _isKeyword('with')) {
@@ -6222,6 +7890,14 @@ class Parser {
             periodToken.line,
             periodToken.column);
       }
+      // Optional `pulse N` and/or `offset M` modifiers. Consume-and-ignore for
+      // visual fidelity (rendering-side support deferred).
+      while (_isKeyword('pulse') || _isKeyword('offset')) {
+        _advance();
+        if (_check(TokenType.identifier)) {
+          _advance();
+        }
+      }
     }
     return TimingLane(
       alias: alias,
@@ -6231,7 +7907,8 @@ class Parser {
     );
   }
 
-  void _parseTimingStatement(List<TimingEvent> out, int currentTime) {
+  void _parseTimingStatement(
+      List<TimingEvent> out, int currentTime, String? laneFocus) {
     if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
       final t = _peek();
       throw ParserException(
@@ -6239,29 +7916,82 @@ class Parser {
     }
     final firstToken = _advance();
     final first = firstToken.lexeme;
+
+    // Relative-time anchor at line start (e.g. `0 is idle`, `+200 is Proc.`,
+    // `-100 is x`). Treated as a time directive followed by a lane-state
+    // change. The "lane" is the most recent `@<lane>` focus.
+    if (_isRelativeTimeAnchor(first)) {
+      if (_isKeyword('is')) {
+        _advance();
+        final state = _readTimingStateValue();
+        if (laneFocus != null) {
+          out.add(StateChange(
+            time: _approxTimeFromAnchor(first, currentTime),
+            lane: laneFocus,
+            state: state,
+          ));
+        }
+        return;
+      }
+      // Bare numeric line without `is` is tolerated.
+      _consumeRestOfLine();
+      return;
+    }
+
     if (_isKeyword('is')) {
       _advance();
-      String state;
-      if (_check(TokenType.stringLiteral) || _check(TokenType.identifier)) {
-        state = _advance().lexeme;
-      } else if (_check(TokenType.text)) {
-        state = _advance().lexeme;
-      } else {
-        final t = _peek();
-        throw ParserException(
-            "Expected state name after 'is'", t.line, t.column);
-      }
+      final state = _readTimingStateValue();
+      // Tolerate trailing lane-modifier tokens (e.g. `VCC is 200 pixels height`)
+      // by consuming the remainder of the line. The state name is captured;
+      // the layout hint is deferred.
+      _consumeRestOfLine();
       out.add(StateChange(time: currentTime, lane: first, state: state));
+      return;
+    }
+    // `<lane> has v1,v2,...` declares the enumerated state values for a lane.
+    // Consume-and-ignore for parser robustness (visual rendering deferred).
+    if (_isKeyword('has')) {
+      _advance();
+      // Consume `value (, value)*` until newline/end-of-input.
+      while (!_check(TokenType.newline) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        _advance();
+      }
+      return;
+    }
+    // `<lane> ticks num on multiple N` — analog axis tick decoration. Consume
+    // the rest of the line. Visual rendering deferred.
+    if (_isKeyword('ticks')) {
+      _consumeRestOfLine();
+      return;
+    }
+    // `<lane>@<time>` prefix on a cross-lane arrow / annotation
+    // (e.g. `db@:write_beg-1 <-> @:write_end : setup time`,
+    // `db@:write_beg-1 -> addr@:write_end+1 : hold`). For parser robustness
+    // we consume the rest of the line — visual annotations are deferred.
+    if (_check(TokenType.atTime)) {
+      _consumeRestOfLine();
       return;
     }
     if (_check(TokenType.arrow)) {
       _advance();
+      // Tolerate an optional target time-anchor before the lane identifier
+      // (e.g. `<-> @:write_end`).
+      if (_check(TokenType.atTime)) {
+        _consumeRestOfLine();
+        return;
+      }
       if (!_check(TokenType.identifier) && !_check(TokenType.stringLiteral)) {
         final t = _peek();
         throw ParserException(
             "Expected target lane after arrow", t.line, t.column);
       }
       final to = _advance().lexeme;
+      // Skip optional `@<time>` after the target lane.
+      if (_check(TokenType.atTime)) {
+        _advance();
+      }
       String? label;
       if (_check(TokenType.colon)) {
         _advance();
@@ -6279,6 +8009,73 @@ class Parser {
     }
     throw ParserException("Expected 'is' or arrow after '${firstToken.lexeme}'",
         firstToken.line, firstToken.column);
+  }
+
+  // Reads a state value after `is`. Supports plain identifiers/strings,
+  // multi-value `{a,b}` lists, and the special `{hidden}` marker. Trailing
+  // colon-delimited notes (`is Waiting : some note`) are absorbed by the
+  // colon lexer as a text token, which is also accepted here.
+  String _readTimingStateValue() {
+    if (_check(TokenType.leftBrace)) {
+      _advance();
+      final buf = StringBuffer('{');
+      var first = true;
+      while (!_check(TokenType.rightBrace) &&
+          !_check(TokenType.newline) &&
+          !_check(TokenType.eof) &&
+          !_check(TokenType.endUml)) {
+        if (_check(TokenType.comma)) {
+          buf.write(',');
+          _advance();
+          first = true;
+          continue;
+        }
+        if (!first) buf.write(' ');
+        buf.write(_advance().lexeme);
+        first = false;
+      }
+      if (_check(TokenType.rightBrace)) _advance();
+      buf.write('}');
+      // Optional `#color` highlight after a multi-value state.
+      if (_check(TokenType.hashColor)) _advance();
+      // Absorb trailing `: note text` if present.
+      if (_check(TokenType.colon)) {
+        _advance();
+        if (_check(TokenType.text)) _advance();
+      }
+      // `{-}` shorthand is equivalent to the `{hidden}` marker.
+      final raw = buf.toString();
+      if (raw == '{-}') return '{hidden}';
+      return raw;
+    }
+    if (_check(TokenType.stringLiteral) || _check(TokenType.identifier)) {
+      final state = _advance().lexeme;
+      // Optional `#color` highlight after the state name.
+      if (_check(TokenType.hashColor)) _advance();
+      if (_check(TokenType.colon)) {
+        _advance();
+        if (_check(TokenType.text)) _advance();
+      }
+      return state;
+    }
+    if (_check(TokenType.text)) {
+      return _advance().lexeme;
+    }
+    final t = _peek();
+    throw ParserException(
+        "Expected state name after 'is'", t.line, t.column);
+  }
+
+  static bool _isRelativeTimeAnchor(String s) {
+    if (s.isEmpty) return false;
+    final c = s.codeUnitAt(0);
+    if (c == 0x2B || c == 0x2D) {
+      // `+` / `-` followed by digits.
+      return s.length > 1 &&
+          s.codeUnits.skip(1).every((u) => u >= 0x30 && u <= 0x39);
+    }
+    // Bare digits (possibly with trailing dot — but `0` etc.).
+    return s.codeUnits.every((u) => u >= 0x30 && u <= 0x39);
   }
 
   MindmapDiagram _parseMindmapDiagram() {
@@ -6302,6 +8099,12 @@ class Parser {
     required String diagramName,
   }) {
     final lines = <_MindmapLine>[];
+    // Tracks whether we are inside a PlantUML `<style> ... </style>` block
+    // that the WBS-body lexer captured as raw text lines (style blocks
+    // appearing inside indented-tree bodies are not consumed by the global
+    // `<style>` block handler — we consume-and-ignore them here so the
+    // surrounding diagram still parses without error).
+    var inStyleBlock = false;
     while (!_check(endType) && !_check(TokenType.eof)) {
       if (_check(TokenType.newline)) {
         _advance();
@@ -6313,6 +8116,40 @@ class Parser {
             'Expected $diagramName line, got ${t.type}', t.line, t.column);
       }
       final t = _advance();
+      final lower = t.lexeme.trim().toLowerCase();
+      if (inStyleBlock) {
+        if (lower.contains('</style>')) {
+          inStyleBlock = false;
+        }
+        _skipNewlines();
+        continue;
+      }
+      if (lower.startsWith('<style>')) {
+        // Single-line `<style>...</style>` or multi-line opening tag.
+        if (!lower.contains('</style>')) {
+          inStyleBlock = true;
+        }
+        _skipNewlines();
+        continue;
+      }
+      // PlantUML mindmap/wbs layout directives: `left to right direction`,
+      // `right to left direction`, `top to bottom direction`,
+      // `bottom to top direction`, each optionally followed by a
+      // `left side` / `right side` positioning qualifier. Standalone
+      // `left side` / `right side` directives (used between nodes to
+      // assign sides for subsequent `**:..;` bodies) are also accepted.
+      // All are consumed-and-ignored — visual layout is deferred.
+      if (_isMindmapDirectionOrSideDirective(lower)) {
+        _skipNewlines();
+        continue;
+      }
+      // Cross-edges between aliased nodes (e.g. `t2 -> c1 <<foo>>` or
+      // `t2 ..> c2 #blue`). PlantUML allows these as additional relations
+      // inside WBS/mindmap bodies. We currently consume-and-ignore them.
+      if (_isIndentedTreeEdgeLine(t.lexeme)) {
+        _skipNewlines();
+        continue;
+      }
       final parsed = _parseMindmapLine(t.lexeme, t.line, t.column);
       if (parsed != null) {
         lines.add(parsed);
@@ -6325,10 +8162,115 @@ class Parser {
     return _buildMindmapTree(lines, diagramName: diagramName);
   }
 
+  /// Returns true when [raw] looks like an inter-node edge line of the form
+  /// `id -> id`, `id ..> id`, `id --> id` etc. used inside WBS bodies to
+  /// connect aliased nodes. The check is intentionally lenient: any line
+  /// that does not start with a `+`, `-`, or `*` marker but does contain
+  /// an arrow-like token is treated as a relation.
+  bool _isIndentedTreeEdgeLine(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty) return false;
+    final first = s[0];
+    if (first == '+' || first == '-' || first == '*') return false;
+    // Look for an arrow-shape: `->`, `..>`, `-->`, `<-`, `<..`, etc.
+    return s.contains('->') ||
+        s.contains('<-') ||
+        s.contains('..>') ||
+        s.contains('<..');
+  }
+
+  /// Returns true when [lowerTrimmed] (already lower-cased and trimmed) is a
+  /// PlantUML mindmap/wbs layout directive line that should be consumed and
+  /// ignored at the parser level. Accepts the four canonical direction
+  /// directives (`left to right direction`, `right to left direction`,
+  /// `top to bottom direction`, `bottom to top direction`), each optionally
+  /// followed by a `left side` / `right side` positioning qualifier; plus
+  /// standalone `left side` / `right side` lines (used to assign the side
+  /// for subsequent `**:..;` body nodes).
+  bool _isMindmapDirectionOrSideDirective(String lowerTrimmed) {
+    if (lowerTrimmed.isEmpty) return false;
+    if (lowerTrimmed == 'left side' || lowerTrimmed == 'right side') {
+      return true;
+    }
+    const directions = [
+      'left to right direction',
+      'right to left direction',
+      'top to bottom direction',
+      'bottom to top direction',
+    ];
+    for (final d in directions) {
+      if (lowerTrimmed == d) return true;
+      if (lowerTrimmed == '$d left side') return true;
+      if (lowerTrimmed == '$d right side') return true;
+    }
+    return false;
+  }
+
   _MindmapLine? _parseMindmapLine(String raw, int line, int col) {
     var s = raw.trim();
     if (s.isEmpty) return null;
     MindmapSide side = MindmapSide.auto;
+    // WBS-style markers: lines whose leading run consists entirely of `+`
+    // and/or `-` characters (e.g. `+`, `++`, `+++`, `++-`, `----`). Depth is
+    // the total count of `+`/`-` characters; a trailing `-` (or all-`-` run)
+    // flips the node to the left side, mirroring PlantUML WBS semantics. A
+    // single trailing `_` after the run (e.g. `+_`, `++_`, `-_`) marks the
+    // node as boxless — we currently consume-and-ignore the boxless flag
+    // (visual rendering deferred).
+    if (s.startsWith('+') || s.startsWith('-')) {
+      var markerEnd = 0;
+      while (markerEnd < s.length &&
+          (s[markerEnd] == '+' || s[markerEnd] == '-')) {
+        markerEnd++;
+      }
+      // Optional `_` boxless suffix immediately after the `+`/`-` run.
+      var afterEnd = markerEnd;
+      if (afterEnd < s.length && s[afterEnd] == '_') {
+        afterEnd++;
+      }
+      // A WBS marker is followed by whitespace, `[`, `:`, or end-of-line;
+      // otherwise fall through to the legacy mindmap parsing (which treats
+      // `+`/`-` as a side prefix before a `*` depth run).
+      final afterMarker =
+          afterEnd >= s.length ? '' : s.substring(afterEnd, afterEnd + 1);
+      final isWbsMarker = markerEnd >= 1 &&
+          (afterEnd == s.length ||
+              afterMarker == ' ' ||
+              afterMarker == '\t' ||
+              afterMarker == '[' ||
+              afterMarker == ':');
+      if (isWbsMarker) {
+        final marker = s.substring(0, markerEnd);
+        final depth = markerEnd;
+        // Trailing `-` (e.g. `++-`) or all-`-` marker => left side.
+        final lastChar = marker[marker.length - 1];
+        side = lastChar == '-' ? MindmapSide.left : MindmapSide.right;
+        s = s.substring(afterEnd).trimLeft();
+        Color? color;
+        if (s.startsWith('[#')) {
+          final close = s.indexOf(']');
+          if (close > 2) {
+            final colorText = s.substring(2, close).trim();
+            color = text_colors.tryParseColor('#$colorText');
+            s = s.substring(close + 1);
+          }
+        }
+        // Multi-line `:text;` content marker (e.g. `++:Body text;`).
+        if (s.startsWith(':')) {
+          s = s.substring(1);
+          if (s.endsWith(';')) s = s.substring(0, s.length - 1);
+        }
+        final text = _stripTrailingStereotypeAndAlias(s.trim());
+        return _MindmapLine(
+          depth: depth,
+          side: side,
+          color: color,
+          text: text,
+          line: line,
+          column: col,
+        );
+      }
+    }
     if (s.startsWith('+')) {
       side = MindmapSide.right;
       s = s.substring(1);
@@ -6344,6 +8286,13 @@ class Parser {
       throw ParserException('Expected node line starting with *', line, col);
     }
     s = s.substring(depth);
+    // Trailing marker suffix: `<` flips this node to the left side (e.g.
+    // `***< New York`), `_` marks the node as boxless (currently consumed
+    // and ignored). Both must be immediately after the `*` run.
+    if (s.isNotEmpty && (s[0] == '<' || s[0] == '_')) {
+      if (s[0] == '<') side = MindmapSide.left;
+      s = s.substring(1);
+    }
     Color? color;
     s = s.trimLeft();
     if (s.startsWith('[#')) {
@@ -6354,7 +8303,13 @@ class Parser {
         s = s.substring(close + 1);
       }
     }
-    final text = s.trim();
+    // Multi-line `:text;` content marker (e.g. `**:Body text;`).
+    s = s.trimLeft();
+    if (s.startsWith(':')) {
+      s = s.substring(1);
+      if (s.endsWith(';')) s = s.substring(0, s.length - 1);
+    }
+    final text = _stripTrailingStereotypeAndAlias(s.trim());
     return _MindmapLine(
       depth: depth,
       side: side,
@@ -6365,12 +8320,46 @@ class Parser {
     );
   }
 
+  /// Strips trailing `<<class>>` stereotypes and `as alias` clauses from a
+  /// mindmap/wbs node label, and unquotes a leading `"..."` quoted name.
+  /// Returns the visible node text. Stereotype/alias metadata is currently
+  /// consumed-and-ignored (visual styling deferred).
+  String _stripTrailingStereotypeAndAlias(String input) {
+    var s = input.trim();
+    // Repeatedly peel trailing `<<...>>` stereotypes.
+    while (s.endsWith('>>')) {
+      final open = s.lastIndexOf('<<');
+      if (open < 0) break;
+      s = s.substring(0, open).trim();
+    }
+    // Drop a trailing ` as <alias>` clause if present (only when the head
+    // is a quoted string — avoids stripping legitimate prose containing
+    // the word "as").
+    if (s.startsWith('"')) {
+      final closeQuote = s.indexOf('"', 1);
+      if (closeQuote > 0) {
+        final head = s.substring(1, closeQuote);
+        final tail = s.substring(closeQuote + 1).trim();
+        if (tail.isEmpty || tail.startsWith('as ') || tail == 'as') {
+          s = head;
+        }
+      }
+    }
+    return s;
+  }
+
   MindmapNode? _buildMindmapTree(
     List<_MindmapLine> lines, {
     String diagramName = 'mindmap',
   }) {
     if (lines.isEmpty) return null;
     final label = diagramName[0].toUpperCase() + diagramName.substring(1);
+    // WBS and mindmap sources in the wild sometimes use bare `+`/`*` for every
+    // level (relying on document order rather than marker depth to convey
+    // hierarchy). When we encounter additional depth-1 nodes after the first,
+    // treat them as children of the prior depth-1 root instead of throwing —
+    // this matches PlantUML's lenient handling for both WBS and mindmap.
+    final allowImpliedNesting = diagramName == 'wbs' || diagramName == 'mindmap';
     final stack = <_MindmapBuilder>[];
     _MindmapBuilder? rootBuilder;
     for (final l in lines) {
@@ -6382,6 +8371,17 @@ class Parser {
       );
       if (l.depth == 1) {
         if (rootBuilder != null) {
+          if (allowImpliedNesting) {
+            // Attach to root as a child to keep parsing.
+            rootBuilder.children.add(node);
+            // Reset stack to (root, this) so subsequent deeper nodes can
+            // nest under the latest depth-1 sibling.
+            stack
+              ..clear()
+              ..add(rootBuilder)
+              ..add(node);
+            continue;
+          }
           throw ParserException(
               '$label may have only one root node', l.line, l.column);
         }
@@ -6399,8 +8399,16 @@ class Parser {
         stack.removeLast();
       }
       if (stack.isEmpty) {
-        throw ParserException(
-            '$label node depth jumps from 0 to ${l.depth}', l.line, l.column);
+        if (allowImpliedNesting) {
+          // Re-seed from root when the stack drained (e.g. multiple
+          // independent subtrees nested under a shared root).
+          stack.add(rootBuilder);
+        } else {
+          throw ParserException(
+              '$label node depth jumps from 0 to ${l.depth}',
+              l.line,
+              l.column);
+        }
       }
       stack.last.children.add(node);
       stack.add(node);
@@ -6568,6 +8576,7 @@ class Parser {
 
   DataDiagram _parseYamlDiagram() {
     final lines = <_YamlSourceLine>[];
+    var inStyleBlock = false;
     while (!_check(TokenType.endYaml) && !_check(TokenType.eof)) {
       if (_check(TokenType.newline)) {
         _advance();
@@ -6580,6 +8589,24 @@ class Parser {
       }
       final t = _advance();
       final raw = t.lexeme;
+      final trimmed = raw.trim();
+      // Consume `<style> ... </style>` blocks as no-ops. PlantUML allows a
+      // CSS-like style declaration inside `@startyaml`/`@endyaml`; rendering
+      // is deferred so we just skip the block here.
+      if (inStyleBlock) {
+        if (trimmed.toLowerCase().contains('</style>')) {
+          inStyleBlock = false;
+        }
+        continue;
+      }
+      final lowerTrimmed = trimmed.toLowerCase();
+      if (lowerTrimmed.startsWith('<style>') ||
+          lowerTrimmed.startsWith('<style ')) {
+        if (!lowerTrimmed.contains('</style>')) {
+          inStyleBlock = true;
+        }
+        continue;
+      }
       if (raw.trimLeft().startsWith('#')) {
         continue;
       }
@@ -6912,32 +8939,132 @@ class Parser {
     DateTime? projectStart;
     final builders = <_GanttItemBuilder>[];
     final tasks = <String, _GanttTaskBuilder>{};
+    // Alias resolution: `[D]` -> `Prototype design`. Aliases declared via
+    // `[Task] as [Alias] requires N days` (and friends) let later lines
+    // reference the task by either name or alias.
+    final aliasFor = <String, String>{};
+    _GanttTaskBuilder taskFor(String key) {
+      final resolved = aliasFor[key] ?? key;
+      return tasks.putIfAbsent(
+          resolved, () => _GanttTaskBuilder(name: resolved));
+    }
 
     final projectRe =
         RegExp(r'^[Pp]roject\s+starts?\s+(\d{4}-\d{2}-\d{2})\s*$');
+    // `Project starts the Nth of MonthName YYYY` — natural-language project
+    // start. Consumes ordinal suffixes (`1st`, `2nd`, `3rd`, `Nth`) and
+    // month names; parses to a real `DateTime` so downstream task placement
+    // works as if the ISO form had been written.
+    final projectNaturalRe = RegExp(
+        r'^[Pp]roject\s+starts?\s+(?:on\s+)?the\s+(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([A-Za-z]+)\s+(\d{4})\s*$');
+    // `projectscale daily|weekly|monthly|yearly[ N]` / `printscale ...` /
+    // `zoom N` — diagram-wide scale directives. Consumed-and-ignored at
+    // build time since layout uses an implicit day-based scale.
+    final scaleDirectiveRe = RegExp(
+        r'^(?:project|print)scale\b.*$',
+        caseSensitive: false);
+    final zoomRe = RegExp(r'^zoom\s+\S+\s*$', caseSensitive: false);
     final sectionRe = RegExp(r'^--\s*(.*?)\s*--\s*$');
     final lastsRe = RegExp(
-        r'^\[(.+?)\]\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s*$');
+        r'^\[(.+?)\](?:\s+as\s+\[(.+?)\])?\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s*$');
     final lastsAndStartsRe = RegExp(
         r"^\[(.+?)\]\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s+and\s+starts?\s+at\s+\[(.+?)\]'s\s+(end|start)\s*$");
     final startsDateRe = RegExp(
         r'^\[(.+?)\]\s+starts?\s+(?:on\s+|at\s+)?(\d{4}-\d{2}-\d{2})\s*$');
+    // `[Task] starts D+N` or `[Task] starts D-N` — relative day offset from
+    // the project start.
+    final startsRelativeRe = RegExp(
+        r'^\[(.+?)\]\s+starts?\s+(?:on\s+|at\s+)?D\s*([+-])\s*(\d+)\s*$',
+        caseSensitive: false);
+    // `[Task] ends YYYY-MM-DD` — absolute end date.
+    final endsDateRe = RegExp(
+        r'^\[(.+?)\]\s+ends?\s+(?:on\s+|at\s+)?(\d{4}-\d{2}-\d{2})\s*$');
+    // `[Task] ends D+N` — relative day offset from the project start.
+    final endsRelativeRe = RegExp(
+        r'^\[(.+?)\]\s+ends?\s+(?:on\s+|at\s+)?D\s*([+-])\s*(\d+)\s*$',
+        caseSensitive: false);
     final startsAtRe =
         RegExp(r"^\[(.+?)\]\s+starts?\s+at\s+\[(.+?)\]'s\s+(end|start)\s*$");
     final happensRe = RegExp(
         r"^\[(.+?)\]\s+happens?\s+(?:on\s+|at\s+)?(?:\[(.+?)\]'s\s+(end|start)|(\d{4}-\d{2}-\d{2}))\s*$");
     final coloredRe = RegExp(r'^\[(.+?)\]\s+is\s+colored?\s+in\s+(\S+)\s*$');
+    // `YYYY-MM-DD to YYYY-MM-DD are colored in Color` — date-range coloring
+    // (consumed and tolerated; visual coloring of calendar ranges deferred).
+    final dateRangeColoredRe = RegExp(
+        r'^\d{4}-\d{2}-\d{2}\s+to\s+\d{4}-\d{2}-\d{2}\s+(?:are|is)\s+colored?\s+in\s+\S+\s*$',
+        caseSensitive: false);
+    // `[FROM]->[TO]` raw dependency arrow — equivalent to `[TO] starts at
+    // [FROM]'s end` but written as a graph edge. The arrow body tolerates
+    // any mix of dashes / dots; head must be `>`.
+    final depArrowRe =
+        RegExp(r'^\[(.+?)\]\s*[-.]+>\s*\[(.+?)\]\s*$');
     final closedDayRe = RegExp(
         r'^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\s+(?:are|is)\s+(closed|open)\s*$',
         caseSensitive: false);
+    // `[Task] requires N days [on {Resource[:N%]}]` and the
+    // `[Task] as [Alias] requires N days` alias-bind variant. Optional
+    // `on {Resource}` / `on {Resource:N%}` resource assignment may appear
+    // either BEFORE or AFTER the `requires` clause; both are consumed
+    // (resource modelling is deferred). A trailing `then [Task2] requires
+    // ... [on {R2}]` clause chains a follow-on task that starts at the
+    // current task's end.
     final requiresRe = RegExp(
-        r'^\[(.+?)\]\s+requires?\s+\d+\s+\w+\s*$');
+        r'^\[(.+?)\](?:\s+as\s+\[(.+?)\])?(?:\s+on\s+\{(.+?)\})?\s+requires?\s+(\d+)\s+(day|days|week|weeks|month|months)(?:\s+and\s+(\d+)\s+(day|days|week|weeks|month|months))?(?:\s+on\s+\{(.+?)\})?(?:\s+then\s+\[(.+?)\](?:\s+on\s+\{(.+?)\})?\s+requires?\s+(\d+)\s+(day|days|week|weeks|month|months)(?:\s+on\s+\{(.+?)\})?)?\s*$',
+        caseSensitive: false);
     final thenLastsRe = RegExp(
         r'^then\s+\[(.+?)\]\s+lasts?\s+(\d+)\s+(day|days|week|weeks|month|months)\s*$',
         caseSensitive: false);
 
-    _GanttTaskBuilder? previousTask;
+    // Expand compound `[Task] <clause> and <clause> [and <clause> ...]` lines
+    // into multiple single-clause source lines so the per-clause dispatch
+    // below can handle them uniformly. The first clause is left intact; each
+    // follow-up clause is prefixed with the bracketed task ref (using the
+    // alias when the first clause introduces one via `as [Alias]`) so it
+    // matches the existing per-clause regexes. Forms already supported as
+    // single combined patterns — `lasts N <unit> and starts at [X]'s end`
+    // and `requires N <unit> and M <unit2>` — are left untouched.
+    final taskHeadRe = RegExp(
+        r'^\s*(\[(?:.+?)\])(?:\s+as\s+(\[(?:.+?)\]))?\s+');
+    final expandedLines = <_GanttSourceLine>[];
     for (final src in rawLines) {
+      final s0 = src.raw.trim();
+      if (s0.isEmpty || !s0.toLowerCase().contains(' and ')) {
+        expandedLines.add(src);
+        continue;
+      }
+      // Skip lines already matched by combined-form regexes.
+      if (lastsAndStartsRe.hasMatch(s0) || requiresRe.hasMatch(s0)) {
+        expandedLines.add(src);
+        continue;
+      }
+      final head = taskHeadRe.firstMatch(s0);
+      if (head == null) {
+        expandedLines.add(src);
+        continue;
+      }
+      // Prefer the alias (if present) as the prefix for follow-up clauses
+      // since color/duration/start lines may target the alias form.
+      final refPrefix = (head.group(2) ?? head.group(1))!;
+      // Case-insensitive split on whitespace-delimited `and`.
+      final parts = s0.split(RegExp(r'\s+and\s+', caseSensitive: false));
+      if (parts.length < 2) {
+        expandedLines.add(src);
+        continue;
+      }
+      expandedLines.add(_GanttSourceLine(
+          raw: parts.first, line: src.line, column: src.column));
+      for (var i = 1; i < parts.length; i++) {
+        final clause = parts[i].trim();
+        if (clause.isEmpty) continue;
+        final synthesized =
+            clause.startsWith('[') ? clause : '$refPrefix $clause';
+        expandedLines.add(_GanttSourceLine(
+            raw: synthesized, line: src.line, column: src.column));
+      }
+    }
+
+    _GanttTaskBuilder? previousTask;
+    for (final src in expandedLines) {
       final s = src.raw.trim();
       if (s.isEmpty) continue;
       if (s.toLowerCase().startsWith('title ') ||
@@ -6947,7 +9074,64 @@ class Parser {
       if (closedDayRe.hasMatch(s)) {
         continue;
       }
-      if (requiresRe.hasMatch(s)) {
+      // `projectscale ...` / `printscale ...` / `zoom N` — purely visual
+      // scale directives consumed as no-ops.
+      if (scaleDirectiveRe.hasMatch(s) || zoomRe.hasMatch(s)) {
+        continue;
+      }
+      // `YYYY-MM-DD to YYYY-MM-DD are colored in Color` — calendar-range
+      // background coloring. Visual coloring deferred; line consumed.
+      if (dateRangeColoredRe.hasMatch(s)) {
+        continue;
+      }
+      final rqm = requiresRe.firstMatch(s);
+      if (rqm != null) {
+        final name = rqm.group(1)!.trim();
+        final alias = rqm.group(2)?.trim();
+        int unitToDays(int n, String unit) {
+          final u = unit.toLowerCase();
+          if (u.startsWith('week')) return n * 7;
+          if (u.startsWith('month')) return n * 30;
+          return n;
+        }
+        var days = unitToDays(int.parse(rqm.group(4)!), rqm.group(5)!);
+        if (rqm.group(6) != null) {
+          days += unitToDays(int.parse(rqm.group(6)!), rqm.group(7)!);
+        }
+        final builder = taskFor(name);
+        builder.duration = Duration(days: days);
+        if (alias != null && alias.isNotEmpty) {
+          aliasFor[alias] = builder.name;
+        }
+        if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
+        // Optional `then [Task2] requires N <unit>` follow-on clause —
+        // the chained task starts at the current task's end.
+        final thenName = rqm.group(9);
+        if (thenName != null) {
+          final n2 = int.parse(rqm.group(11)!);
+          final unit2 = rqm.group(12)!;
+          final days2 = unitToDays(n2, unit2);
+          final thenBuilder = taskFor(thenName.trim());
+          thenBuilder.duration = Duration(days: days2);
+          thenBuilder.startsAtRef = builder.name;
+          thenBuilder.startsAtEnd = true;
+          if (!builders.contains(thenBuilder)) builders.add(thenBuilder);
+          previousTask = thenBuilder;
+        }
+        continue;
+      }
+      // `[FROM]->[TO]` raw dependency edge — model as `[TO] starts at
+      // [FROM]'s end`.
+      final dam = depArrowRe.firstMatch(s);
+      if (dam != null) {
+        final from = dam.group(1)!.trim();
+        final to = dam.group(2)!.trim();
+        final builder = taskFor(to);
+        builder.startsAtRef = aliasFor[from] ?? from;
+        builder.startsAtEnd = true;
+        if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
         continue;
       }
       final tlm = thenLastsRe.firstMatch(s);
@@ -6976,6 +9160,25 @@ class Parser {
         projectStart = DateTime.parse(pm.group(1)!);
         continue;
       }
+      final pnm = projectNaturalRe.firstMatch(s);
+      if (pnm != null) {
+        const monthNames = {
+          'january': 1, 'february': 2, 'march': 3, 'april': 4,
+          'may': 5, 'june': 6, 'july': 7, 'august': 8,
+          'september': 9, 'october': 10, 'november': 11, 'december': 12,
+          'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4,
+          'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9,
+          'oct': 10, 'nov': 11, 'dec': 12,
+        };
+        final day = int.parse(pnm.group(1)!);
+        final monthKey = pnm.group(2)!.toLowerCase();
+        final year = int.parse(pnm.group(3)!);
+        final month = monthNames[monthKey];
+        if (month != null) {
+          projectStart = DateTime(year, month, day);
+        }
+        continue;
+      }
       final lasm = lastsAndStartsRe.firstMatch(s);
       if (lasm != null) {
         final name = lasm.group(1)!.trim();
@@ -6988,10 +9191,9 @@ class Parser {
             : unit.startsWith('month')
                 ? n * 30
                 : n;
-        final builder =
-            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
+        final builder = taskFor(name);
         builder.duration = Duration(days: days);
-        builder.startsAtRef = ref;
+        builder.startsAtRef = aliasFor[ref] ?? ref;
         builder.startsAtEnd = endpoint == 'end';
         if (!builders.contains(builder)) builders.add(builder);
         previousTask = builder;
@@ -7005,16 +9207,19 @@ class Parser {
       final lm = lastsRe.firstMatch(s);
       if (lm != null) {
         final name = lm.group(1)!.trim();
-        final n = int.parse(lm.group(2)!);
-        final unit = lm.group(3)!.toLowerCase();
+        final alias = lm.group(2)?.trim();
+        final n = int.parse(lm.group(3)!);
+        final unit = lm.group(4)!.toLowerCase();
         final days = unit.startsWith('week')
             ? n * 7
             : unit.startsWith('month')
                 ? n * 30
                 : n;
-        final builder =
-            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
+        final builder = taskFor(name);
         builder.duration = Duration(days: days);
+        if (alias != null && alias.isNotEmpty) {
+          aliasFor[alias] = builder.name;
+        }
         if (!builders.contains(builder)) builders.add(builder);
         previousTask = builder;
         continue;
@@ -7023,9 +9228,42 @@ class Parser {
       if (sdm != null) {
         final name = sdm.group(1)!.trim();
         final date = DateTime.parse(sdm.group(2)!);
-        final builder =
-            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
+        final builder = taskFor(name);
         builder.explicitStart = date;
+        if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
+        continue;
+      }
+      final srm = startsRelativeRe.firstMatch(s);
+      if (srm != null) {
+        final name = srm.group(1)!.trim();
+        final sign = srm.group(2)!;
+        final n = int.parse(srm.group(3)!);
+        final offset = sign == '-' ? -n : n;
+        final builder = taskFor(name);
+        builder.relativeStartDays = offset;
+        if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
+        continue;
+      }
+      final edm = endsDateRe.firstMatch(s);
+      if (edm != null) {
+        final name = edm.group(1)!.trim();
+        final date = DateTime.parse(edm.group(2)!);
+        final builder = taskFor(name);
+        builder.explicitEnd = date;
+        if (!builders.contains(builder)) builders.add(builder);
+        previousTask = builder;
+        continue;
+      }
+      final erm = endsRelativeRe.firstMatch(s);
+      if (erm != null) {
+        final name = erm.group(1)!.trim();
+        final sign = erm.group(2)!;
+        final n = int.parse(erm.group(3)!);
+        final offset = sign == '-' ? -n : n;
+        final builder = taskFor(name);
+        builder.relativeEndDays = offset;
         if (!builders.contains(builder)) builders.add(builder);
         previousTask = builder;
         continue;
@@ -7035,9 +9273,8 @@ class Parser {
         final name = sam.group(1)!.trim();
         final ref = sam.group(2)!.trim();
         final endpoint = sam.group(3)!.toLowerCase();
-        final builder =
-            tasks.putIfAbsent(name, () => _GanttTaskBuilder(name: name));
-        builder.startsAtRef = ref;
+        final builder = taskFor(name);
+        builder.startsAtRef = aliasFor[ref] ?? ref;
         builder.startsAtEnd = endpoint == 'end';
         if (!builders.contains(builder)) builders.add(builder);
         previousTask = builder;
@@ -7049,9 +9286,11 @@ class Parser {
         final ref = hm.group(2);
         final endpoint = hm.group(3);
         final date = hm.group(4);
+        final resolvedRef =
+            ref == null ? null : (aliasFor[ref.trim()] ?? ref.trim());
         builders.add(_GanttMilestoneBuilder(
           name: name,
-          ref: ref?.trim(),
+          ref: resolvedRef,
           atEnd: endpoint?.toLowerCase() == 'end',
           explicitDate: date != null ? DateTime.parse(date) : null,
         ));
@@ -7061,7 +9300,7 @@ class Parser {
       if (cm != null) {
         final name = cm.group(1)!.trim();
         final color = text_colors.tryParseColor(cm.group(2)!);
-        final builder = tasks[name];
+        final builder = tasks[aliasFor[name] ?? name];
         if (builder != null) builder.color = color;
         continue;
       }
@@ -7119,6 +9358,8 @@ class Parser {
     DateTime start;
     if (task.explicitStart != null) {
       start = task.explicitStart!;
+    } else if (task.relativeStartDays != null) {
+      start = projectStart.add(Duration(days: task.relativeStartDays!));
     } else if (task.startsAtRef != null) {
       final ref = tasks[task.startsAtRef!];
       if (ref == null) {
@@ -7129,8 +9370,32 @@ class Parser {
       start = task.startsAtEnd
           ? refStart.add(ref.duration ?? const Duration(days: 1))
           : refStart;
+    } else if (task.explicitEnd != null && task.duration != null) {
+      // Derive start from the explicit end minus the duration.
+      start = task.explicitEnd!.subtract(task.duration!);
+    } else if (task.relativeEndDays != null && task.duration != null) {
+      // Derive start from the relative end minus the duration.
+      final end = projectStart.add(Duration(days: task.relativeEndDays!));
+      start = end.subtract(task.duration!);
+    } else if (task.explicitEnd != null) {
+      // End-only spec: 1-day-long task ending on the given date.
+      start = task.explicitEnd!;
+    } else if (task.relativeEndDays != null) {
+      start = projectStart.add(Duration(days: task.relativeEndDays!));
     } else {
       start = projectStart;
+    }
+    // When both end and duration are missing but only `ends D+N` was given
+    // alongside `starts D+M`, derive the duration so the task has a length.
+    if (task.duration == null) {
+      if (task.explicitEnd != null) {
+        final diff = task.explicitEnd!.difference(start).inDays;
+        if (diff > 0) task.duration = Duration(days: diff);
+      } else if (task.relativeEndDays != null) {
+        final end = projectStart.add(Duration(days: task.relativeEndDays!));
+        final diff = end.difference(start).inDays;
+        if (diff > 0) task.duration = Duration(days: diff);
+      }
     }
     visiting.remove(task.name);
     task.resolvedStart = start;
@@ -7283,6 +9548,10 @@ class Parser {
     for (final src in rawLines) {
       for (final s in normalize(src.raw)) {
         if (s.isEmpty) continue;
+        // Preprocessor directives (e.g. `!include <library/path>`) are
+        // consumed and ignored at the nwdiag body level — sprite-library
+        // resolution is not yet implemented.
+        if (s.startsWith('!')) continue;
         if (s == '{') continue;
         if (s == '}') {
           final ctx = contextStack.isNotEmpty ? contextStack.last : 'root';
@@ -7335,6 +9604,12 @@ class Parser {
           continue;
         }
         // Node with attrs: `name [address = ".1"]`
+        // The attribute list may contain multiple comma-separated key=value
+        // pairs (e.g. `address = "X, Y", description = "..."`). We extract
+        // the `address` attribute when present and silently swallow any
+        // other keys (such as `description`, `color`, `shape`) so the
+        // verbatim source parses without throwing — sprite rendering and
+        // node descriptions are not yet implemented.
         final nodeAttrs = nodeWithAttrsRe.firstMatch(s);
         if (nodeAttrs != null) {
           final name = nodeAttrs.group(1)!;
@@ -7445,6 +9720,9 @@ sealed class _GanttItemBuilder {
 class _GanttTaskBuilder extends _GanttItemBuilder {
   final String name;
   DateTime? explicitStart;
+  DateTime? explicitEnd;
+  int? relativeStartDays;
+  int? relativeEndDays;
   String? startsAtRef;
   bool startsAtEnd = false;
   Duration? duration;

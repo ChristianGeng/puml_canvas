@@ -284,6 +284,10 @@ class Renderer {
   }
 
   void _drawActor(Canvas canvas, SceneSymbol s) {
+    if (s.style?.toLowerCase() == 'awesome') {
+      _drawAwesomeActor(canvas, s);
+      return;
+    }
     final r = s.rect;
     final labelHeight = _measureLabelHeight(s);
     final iconBottom = r.bottom - labelHeight;
@@ -313,6 +317,49 @@ class Renderer {
         Offset(cx - legSpan, iconBottom - 1), stroke);
     canvas.drawLine(Offset(cx, bodyBottom),
         Offset(cx + legSpan, iconBottom - 1), stroke);
+
+    _paintLabel(
+        canvas, s, Rect.fromLTRB(r.left, iconBottom, r.right, r.bottom),
+        maxWidth: r.width);
+  }
+
+  // Renders the `skinparam actorStyle awesome` variant: a slightly larger,
+  // filled head plus a curved trapezoidal body. Visually distinct from the
+  // default stick figure but uses the same bounding rect so layout math
+  // (centers, lifelines, foot row) stays unchanged.
+  void _drawAwesomeActor(Canvas canvas, SceneSymbol s) {
+    final r = s.rect;
+    final labelHeight = _measureLabelHeight(s);
+    final iconBottom = r.bottom - labelHeight;
+    final iconTop = r.top + 2;
+    final iconHeight = iconBottom - iconTop;
+    final cx = r.center.dx;
+    final headRadius = math.min(iconHeight * 0.26, r.width * 0.26);
+    final headCenter = Offset(cx, iconTop + headRadius);
+
+    final fill = _fillPaint(s);
+    final stroke = _strokePaint(s);
+    // Solid-filled head (using the stroke colour) distinguishes the awesome
+    // variant from the hollow circle of the default stick figure.
+    final headFill = Paint()
+      ..color = s.stroke
+      ..style = PaintingStyle.fill;
+
+    canvas.drawCircle(headCenter, headRadius, headFill);
+
+    // Trapezoidal body, wider at the shoulders than the waist.
+    final shoulderY = headCenter.dy + headRadius + 1;
+    final waistY = iconBottom - 2;
+    final shoulderHalf = math.min(iconHeight * 0.32, r.width * 0.4);
+    final waistHalf = shoulderHalf * 0.55;
+    final body = Path()
+      ..moveTo(cx - shoulderHalf, shoulderY)
+      ..lineTo(cx + shoulderHalf, shoulderY)
+      ..lineTo(cx + waistHalf, waistY)
+      ..lineTo(cx - waistHalf, waistY)
+      ..close();
+    canvas.drawPath(body, fill);
+    canvas.drawPath(body, stroke);
 
     _paintLabel(
         canvas, s, Rect.fromLTRB(r.left, iconBottom, r.right, r.bottom),

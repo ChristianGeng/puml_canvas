@@ -46,6 +46,18 @@ const namedColors = <String, Color>{
   'tan': Color(0xFFD2B48C),
   'khaki': Color(0xFFF0E68C),
   'plum': Color(0xFFDDA0DD),
+  'cadetblue': Color(0xFF5F9EA0),
+  'steelblue': Color(0xFF4682B4),
+  'royalblue': Color(0xFF4169E1),
+  'dodgerblue': Color(0xFF1E90FF),
+  'skyblue': Color(0xFF87CEEB),
+  'turquoise': Color(0xFF40E0D0),
+  'chocolate': Color(0xFFD2691E),
+  'crimson': Color(0xFFDC143C),
+  'tomato': Color(0xFFFF6347),
+  'coral': Color(0xFFFF7F50),
+  'wheat': Color(0xFFF5DEB3),
+  'orchid': Color(0xFFDA70D6),
 };
 
 Color? tryParseColor(String spec) {

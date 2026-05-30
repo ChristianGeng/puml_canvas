@@ -165,6 +165,20 @@ class _Parser {
       return true;
     }
 
+    // `<img sourceforge.jpg>`, `<img:foo.png>`, `<img/foo.png>` — image
+    // loading is deferred, so emit a deterministic `[img]` placeholder
+    // span and consume the tag so the URL text doesn't bleed through.
+    if (lower == 'img' ||
+        lower.startsWith('img:') ||
+        lower.startsWith('img=') ||
+        lower.startsWith('img/') ||
+        lower.startsWith('img ')) {
+      _flushText();
+      _appendSpan(const TextSpan(text: '[img]'));
+      _pos = close + 1;
+      return true;
+    }
+
     final isClosing = inner.startsWith('/');
     if (isClosing) {
       final name = inner.substring(1).toLowerCase().trim();
@@ -269,15 +283,12 @@ class _Parser {
       );
     }
 
-    // `<img sourceforge.jpg>` and `<img:foo.png>` — we can't decode images in
-    // the test harness, so emit a deterministic placeholder string instead.
-    if (lower.startsWith('img')) {
-      _flushText();
-      _appendSpan(const TextSpan(text: '(Cannot decode)'));
-      return null;
-    }
-
-    if (lower.startsWith('color:') || lower.startsWith('color=')) {
+    // `<color:red>`, `<color=red>`, `<color red>` and `<color #118888>` all
+    // map to a font-color span. The space-delimited form (often used with
+    // hex values) needs to be handled in addition to the `:` / `=` forms.
+    if (lower.startsWith('color:') ||
+        lower.startsWith('color=') ||
+        lower.startsWith('color ')) {
       final spec = trimmed.substring(6).trim();
       final color = tryParseColor(spec);
       if (color == null) return null;

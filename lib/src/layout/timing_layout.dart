@@ -103,6 +103,14 @@ class TimingLayout implements DiagramLayout {
           bodyHeight = _clockMinHeight;
         case TimingLaneKind.binary:
           bodyHeight = _robustMinHeight;
+        case TimingLaneKind.analog:
+          // Analog lanes share the robust min height. Visual rendering of the
+          // continuous waveform is deferred.
+          bodyHeight = _robustMinHeight;
+        case TimingLaneKind.rectangle:
+          // Rectangle lanes share the concise layout; visual rendering is
+          // deferred.
+          bodyHeight = _conciseMinHeight;
       }
       laneHeights[lane.alias] =
           bodyHeight + _laneTopPadding + _laneBottomPadding;
@@ -228,6 +236,12 @@ class TimingLayout implements DiagramLayout {
             timeToX: timeToX,
             measurer: measurer,
           );
+        case TimingLaneKind.analog:
+          // Visual rendering of analog (continuous) waveforms is deferred.
+          break;
+        case TimingLaneKind.rectangle:
+          // Visual rendering of rectangle lanes is deferred.
+          break;
       }
     }
 

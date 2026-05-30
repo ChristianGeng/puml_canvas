@@ -184,13 +184,33 @@ class Preprocessor {
               procBuf.clear();
             }
             break;
+          case 'unquoted':
+          case 'final':
+            // PlantUML allows `!unquoted procedure …` and `!final procedure …`
+            // modifier prefixes (also `!unquoted function`, `!final function`).
+            // The expansion semantics differ from a plain `!procedure` (the
+            // result is spliced unquoted into the source), but for visual
+            // rendering we just need the block to round-trip through the
+            // preprocessor without aborting. Capture the body as an opaque
+            // block that we silently drop on `!endprocedure` / `!endfunction`.
+            if (active()) {
+              final rest = directive.rest.trimLeft();
+              if (rest.startsWith('procedure') ||
+                  rest.startsWith('function')) {
+                capturingProc = _Procedure('', const [], const []);
+                procBuf.clear();
+              }
+            }
+            break;
           case 'endprocedure':
             if (capturingProc == null) {
               throw PreprocessorException(
                   '!endprocedure without matching !procedure', lineNo);
             }
-            _procedures[capturingProc.name] = _Procedure(
-                capturingProc.name, capturingProc.params, List.of(procBuf));
+            if (capturingProc.name.isNotEmpty) {
+              _procedures[capturingProc.name] = _Procedure(
+                  capturingProc.name, capturingProc.params, List.of(procBuf));
+            }
             capturingProc = null;
             procBuf.clear();
             break;
@@ -198,6 +218,16 @@ class Preprocessor {
           case 'return':
           case 'endfunction':
           case 'include_many':
+            // `!endfunction` may close a previously-captured unquoted/final
+            // function block. Treat it symmetrically with `!endprocedure`.
+            if (directive.name == 'endfunction' && capturingProc != null) {
+              if (capturingProc.name.isNotEmpty) {
+                _procedures[capturingProc.name] = _Procedure(
+                    capturingProc.name, capturingProc.params, List.of(procBuf));
+              }
+              capturingProc = null;
+              procBuf.clear();
+            }
             break;
           default:
             if (active() &&
@@ -244,18 +274,30 @@ class Preprocessor {
   bool _isProcEnd(String trimmed) {
     if (!trimmed.startsWith('!')) return false;
     final d = _parseDirective(trimmed);
-    return d.name == 'endprocedure';
+    return d.name == 'endprocedure' || d.name == 'endfunction';
   }
 
   _Procedure _parseProcedureHeader(String rest, int lineNo) {
     final src = rest.trim();
-    if (src.isEmpty || src.codeUnitAt(0) != 0x24) {
+    if (src.isEmpty) {
       throw PreprocessorException(
           '!procedure requires a \$name', lineNo);
     }
-    var i = 1;
+    // Standard PlantUML procedure names start with `$`, but some published
+    // examples (notably the Salt-embedded activity-diagram pattern) declare
+    // procedures with a bare identifier prefix (e.g. `!procedure _choose()`).
+    // Accept either form so the block can round-trip through the
+    // preprocessor — the body is dropped for visual rendering either way.
+    var i = 0;
+    if (src.codeUnitAt(0) == 0x24) {
+      i = 1;
+    }
     while (i < src.length && _isNameChar(src.codeUnitAt(i))) {
       i++;
+    }
+    if (i == 0 || (i == 1 && src.codeUnitAt(0) == 0x24)) {
+      throw PreprocessorException(
+          '!procedure requires a \$name', lineNo);
     }
     final name = src.substring(0, i);
     final params = <String>[];

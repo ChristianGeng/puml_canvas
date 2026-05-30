@@ -75,6 +75,11 @@ class SceneSymbol extends SceneShape {
   final Color fill;
   final Color stroke;
   final double strokeWidth;
+  // Optional rendering variant hint. Currently consumed by the actor
+  // renderer to switch between the default stick figure (`null`) and the
+  // `awesome` cartoonier figure used by sequence diagrams when
+  // `skinparam actorStyle awesome` is set.
+  final String? style;
 
   const SceneSymbol({
     required this.rect,
@@ -84,6 +89,7 @@ class SceneSymbol extends SceneShape {
     this.fill = const Color(0xFFFFFFFF),
     this.stroke = const Color(0xFF000000),
     this.strokeWidth = 1.0,
+    this.style,
   });
 }
 

@@ -84,6 +84,25 @@ class ClassLayout implements DiagramLayout {
   static const _packageColor = Color(0xFF6A1B9A);
   static const _edgeRouter = OrthogonalEdgeRouter();
 
+  // Kind badge ("C" for class, "I" for interface, "E" for enum, ...) drawn as
+  // a small filled circle at the top-left of the title bar. Mirrors the
+  // colour-coded glyphs PlantUML renders for class-diagram nodes.
+  static const _badgeRadius = 7.0;
+  static const _badgeMargin = 6.0;
+  static const _badgeTextStyle = TextStyle(
+    color: Color(0xFFFFFFFF),
+    fontSize: 9,
+    fontWeight: FontWeight.w700,
+  );
+  static const _badgeClassFill = Color(0xFF2E7D32);
+  static const _badgeAbstractFill = Color(0xFF6A1B9A);
+  static const _badgeInterfaceFill = Color(0xFF1565C0);
+  static const _badgeEnumFill = Color(0xFFEF6C00);
+  static const _badgeObjectFill = Color(0xFF455A64);
+  static const _badgeAnnotationFill = Color(0xFF8D6E63);
+  static const _badgeExceptionFill = Color(0xFFC62828);
+  static const _badgeStructFill = Color(0xFF00838F);
+
   const ClassLayout();
 
   @override
@@ -301,10 +320,18 @@ class ClassLayout implements DiagramLayout {
         _classHeaderPaddingY;
     final memberAreaHeight =
         memberLines.isEmpty ? 0.0 : memberHeightSum + _memberPaddingY * 2;
+    // The kind badge sits at the top-left of the title bar; reserve enough
+    // width so the centred title text doesn't visually overlap with it.
+    final badgeInfo = _kindBadge(c.kind);
+    final badgeGlyphSize = badgeInfo == null
+        ? Size.zero
+        : measurer.measure(badgeInfo.glyph, _badgeTextStyle);
+    final badgeReserved =
+        badgeInfo == null ? 0.0 : _badgeMargin + _badgeRadius * 2 + 4.0;
     final width = math.max(
       _minClassWidth,
       math.max(
-            math.max(nameSize.width, stereotypeSize.width),
+            math.max(nameSize.width + badgeReserved * 2, stereotypeSize.width),
             maxMemberWidth,
           ) +
           _classPaddingX * 2,
@@ -321,6 +348,7 @@ class ClassLayout implements DiagramLayout {
       headerHeight: headerHeight,
       width: width,
       height: totalHeight,
+      badgeGlyphSize: badgeInfo == null ? null : badgeGlyphSize,
     );
   }
 
@@ -451,6 +479,48 @@ class ClassLayout implements DiagramLayout {
       text: box.headerText,
       textStyle: box.headerStyle,
     ));
+
+    // Kind badge — a small filled circle with a single letter at the top-left
+    // of the title bar. Mirrors the PlantUML class-diagram visual where a
+    // colour-coded glyph identifies the kind (C/A/I/E/O/...) of each node.
+    final badge = _kindBadge(box.decl.kind);
+    if (badge != null && box.badgeGlyphSize != null) {
+      final badgeCenter = Offset(
+        rect.left + _badgeMargin + _badgeRadius,
+        ty + box.nameSize.height / 2,
+      );
+      shapes.add(SceneCircle(
+        center: badgeCenter,
+        radius: _badgeRadius,
+        fill: badge.fill,
+        stroke: _classStroke,
+        strokeWidth: 0.8,
+      ));
+      shapes.add(SceneText(
+        offset: Offset(
+          badgeCenter.dx - box.badgeGlyphSize!.width / 2,
+          badgeCenter.dy - box.badgeGlyphSize!.height / 2,
+        ),
+        text: badge.glyph,
+        textStyle: _badgeTextStyle,
+      ));
+    }
+
+    if (box.memberLines.isNotEmpty) {
+      // Draw an explicit horizontal divider between the title bar and the
+      // member area. The header rect's own stroke already covers this, but
+      // drawing the line explicitly keeps the divider crisp when the header
+      // fill is changed or the box is rendered with a transparent header.
+      final dividerY = rect.top + box.headerHeight;
+      shapes.add(SceneLine(
+        from: Offset(rect.left, dividerY),
+        to: Offset(rect.right, dividerY),
+        dashed: false,
+        head: null,
+        stroke: _classStroke,
+        strokeWidth: 1.0,
+      ));
+    }
 
     if (box.memberLines.isEmpty) return;
     var my = rect.top + box.headerHeight + _memberPaddingY;
@@ -731,6 +801,37 @@ class ClassLayout implements DiagramLayout {
     }
   }
 
+  _KindBadge? _kindBadge(ClassKind kind) {
+    switch (kind) {
+      case ClassKind.class_:
+      case ClassKind.dataclass:
+      case ClassKind.metaclass:
+      case ClassKind.protocol:
+      case ClassKind.stereotype_:
+      case ClassKind.record_:
+        return const _KindBadge(glyph: 'C', fill: _badgeClassFill);
+      case ClassKind.abstractClass:
+        return const _KindBadge(glyph: 'A', fill: _badgeAbstractFill);
+      case ClassKind.interface:
+        return const _KindBadge(glyph: 'I', fill: _badgeInterfaceFill);
+      case ClassKind.enum_:
+        return const _KindBadge(glyph: 'E', fill: _badgeEnumFill);
+      case ClassKind.annotation:
+        return const _KindBadge(glyph: '@', fill: _badgeAnnotationFill);
+      case ClassKind.exception:
+        return const _KindBadge(glyph: 'X', fill: _badgeExceptionFill);
+      case ClassKind.object_:
+      case ClassKind.map_:
+      case ClassKind.entity_:
+        return const _KindBadge(glyph: 'O', fill: _badgeObjectFill);
+      case ClassKind.struct:
+        return const _KindBadge(glyph: 'S', fill: _badgeStructFill);
+      case ClassKind.circle:
+      case ClassKind.diamond:
+        return null;
+    }
+  }
+
   String? _stereotype(ClassKind kind) {
     switch (kind) {
       case ClassKind.class_:
@@ -806,6 +907,7 @@ class _ClassBox {
   final double headerHeight;
   final double width;
   final double height;
+  final Size? badgeGlyphSize;
   Rect rect = Rect.zero;
 
   _ClassBox({
@@ -819,7 +921,14 @@ class _ClassBox {
     required this.headerHeight,
     required this.width,
     required this.height,
+    this.badgeGlyphSize,
   });
+}
+
+class _KindBadge {
+  final String glyph;
+  final Color fill;
+  const _KindBadge({required this.glyph, required this.fill});
 }
 
 class _MemberLine {
