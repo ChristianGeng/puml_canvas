@@ -1394,4 +1394,105 @@ void main() {
       expect(state2Boxes, 1);
     });
   });
+
+  group('history pseudostate scoping', () {
+    SceneRoundedBox boxFor(Scene scene, String label) => scene.shapes
+        .whereType<SceneRoundedBox>()
+        .firstWhere((s) => s.label == label);
+
+    StateDiagram repro() => _parseStateDiagram(
+          '@startuml\n'
+          'State2 --> State3 : Succeeded\n'
+          'state State3 {\n'
+          '  [*] --> long1\n'
+          '  State2 --> [H]: Resume\n'
+          '}\n'
+          'State2 --> State3[H*]: DeepResume\n'
+          '@enduml\n',
+        );
+
+    /// State3's composite shell: the null-label rounded box that encloses the
+    /// "State3" header text.
+    Rect state3Shell(Scene scene) {
+      final header = scene.shapes
+          .whereType<SceneText>()
+          .firstWhere((t) => t.text == 'State3');
+      return scene.shapes
+          .whereType<SceneRoundedBox>()
+          .where((b) => b.label == null)
+          .firstWhere((b) =>
+              header.offset.dx >= b.rect.left &&
+              header.offset.dx <= b.rect.right &&
+              header.offset.dy >= b.rect.top - 1 &&
+              header.offset.dy <= b.rect.bottom)
+          .rect;
+    }
+
+    /// History circles render at radius `_historyRadius` (10); the H/H* letter
+    /// text identifies shallow vs deep.
+    SceneCircle historyCircleNear(Scene scene, String letter) {
+      final t = scene.shapes
+          .whereType<SceneText>()
+          .firstWhere((s) => s.text == letter);
+      final center = Offset(t.offset.dx, t.offset.dy);
+      return scene.shapes.whereType<SceneCircle>().where((c) => c.radius == 10).reduce(
+        (a, b) => (a.center - center).distance <= (b.center - center).distance
+            ? a
+            : b,
+      );
+    }
+
+    test('shallow [H] history circle lands inside State3', () {
+      final scene = layoutStateDiagramWithSugiyama(repro(), measurer);
+      final shell = state3Shell(scene);
+      final h = historyCircleNear(scene, 'H');
+      expect(shell.contains(h.center), isTrue);
+    });
+
+    test('deep [H*] history circle lands inside State3', () {
+      final scene = layoutStateDiagramWithSugiyama(repro(), measurer);
+      final shell = state3Shell(scene);
+      final hStar = historyCircleNear(scene, 'H*');
+      expect(shell.contains(hStar.center), isTrue);
+    });
+
+    test('exactly one H and one H* node, each reached from outside State3', () {
+      final scene = layoutStateDiagramWithSugiyama(repro(), measurer);
+      // Exactly one shallow letter and one deep letter (no duplicate nodes).
+      final hLetters =
+          scene.shapes.whereType<SceneText>().where((t) => t.text == 'H').length;
+      final hStarLetters = scene.shapes
+          .whereType<SceneText>()
+          .where((t) => t.text == 'H*')
+          .length;
+      expect(hLetters, 1);
+      expect(hStarLetters, 1);
+      // Two history circles total, both inside State3's shell.
+      final shell = state3Shell(scene);
+      final historyCircles = scene.shapes
+          .whereType<SceneCircle>()
+          .where((c) => c.radius == 10)
+          .toList();
+      expect(historyCircles.length, 2);
+      for (final c in historyCircles) {
+        expect(shell.contains(c.center), isTrue);
+      }
+      // State2 sits OUTSIDE (above) State3, and an arrow reaches each history
+      // node from outside: the labelled cross-boundary routes terminate near
+      // State3's boundary or inside it.
+      final state2 = boxFor(scene, 'State2');
+      expect(state2.rect.bottom, lessThanOrEqualTo(shell.top + 1));
+      final arrows = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) => l.head == ArrowHead.open)
+          .toList();
+      bool reaches(SceneCircle target) => arrows.any(
+            (l) => (l.to - target.center).distance < 60 ||
+                (l.to.dy >= shell.top - 1 && l.to.dy <= shell.bottom + 1),
+          );
+      for (final c in historyCircles) {
+        expect(reaches(c), isTrue);
+      }
+    });
+  });
 }

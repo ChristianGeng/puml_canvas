@@ -111,6 +111,8 @@ class StateLayout implements DiagramLayout {
     // different composites render as an arrow between the composites' edges.
     String resolve(String ref) {
       if (ref == '[*]') return ref;
+      final history = _normalizeHistoryRef(ref);
+      if (history != ref) return history;
       for (final s in states) {
         if (s.name == ref) return ref;
       }
@@ -241,20 +243,33 @@ class StateLayout implements DiagramLayout {
     return _RegionResult(width: width, height: height);
   }
 
+  /// Collapse a qualified history reference `Name[H]`/`Name[H*]` to its bare
+  /// pseudo form `[H]`/`[H*]`. The default layout draws a single history marker
+  /// per kind and does not scope history to its owning composite, so the owner
+  /// prefix is dropped here (the opt-in Sugiyama layout preserves it instead).
+  String _normalizeHistoryRef(String ref) {
+    if (ref == '[H]' || ref == '[H*]') return ref;
+    if (ref.endsWith('[H*]')) return '[H*]';
+    if (ref.endsWith('[H]')) return '[H]';
+    return ref;
+  }
+
   Map<String, _PseudoKind> _classifyPseudoStates(
       List<StateTransition> transitions) {
     final result = <String, _PseudoKind>{};
     for (final t in transitions) {
-      if (t.from == '[*]') {
+      final from = _normalizeHistoryRef(t.from);
+      final to = _normalizeHistoryRef(t.to);
+      if (from == '[*]') {
         result.putIfAbsent('[*]:initial', () => _PseudoKind.initial);
       }
-      if (t.to == '[*]') {
+      if (to == '[*]') {
         result.putIfAbsent('[*]:final', () => _PseudoKind.finalState);
       }
-      if (t.from == '[H]' || t.to == '[H]') {
+      if (from == '[H]' || to == '[H]') {
         result.putIfAbsent('[H]', () => _PseudoKind.historyShallow);
       }
-      if (t.from == '[H*]' || t.to == '[H*]') {
+      if (from == '[H*]' || to == '[H*]') {
         result.putIfAbsent('[H*]', () => _PseudoKind.historyDeep);
       }
     }

@@ -3658,8 +3658,20 @@ class Parser {
   }
 
   bool _isStatePseudoRef(String ref) {
-    return ref == '[*]' || ref == '[H]' || ref == '[H*]';
+    return ref == '[*]' ||
+        ref == '[H]' ||
+        ref == '[H*]' ||
+        _isQualifiedHistoryRef(ref);
   }
+
+  /// True for a qualified history reference `Name[H]` / `Name[H*]` produced by
+  /// `_readStateRef`. The owning composite `Name` is the canonical prefix; the
+  /// suffix is exactly `[H]` or `[H*]`. Such a ref must never materialize a
+  /// literal top-level state named `Name[H]` (the owner is declared elsewhere).
+  bool _isQualifiedHistoryRef(String ref) =>
+      (ref.endsWith('[H]') || ref.endsWith('[H*]')) &&
+      ref != '[H]' &&
+      ref != '[H*]';
 
   String _readStateRef() {
     if (_check(TokenType.leftBracket)) {
@@ -3697,11 +3709,10 @@ class Parser {
       final name = _advance().lexeme;
       // PlantUML chained history reference: `StateName[H]`, `StateName[H*]`.
       // The bracketed history marker attaches to the preceding state name.
-      // We surface it as a synthetic pseudo-state name `[H]` / `[H*]` (the
-      // base name is preserved for the surrounding container) so the
-      // renderer can draw a small history-marker circle. This loses the
-      // composite-vs-shallow association in the AST but matches PlantUML's
-      // visual rendering of history pseudo-states.
+      // We surface it as a canonical qualified token `Name[H]` / `Name[H*]`
+      // that PRESERVES the owning composite, so the layout can place the
+      // history pseudo-state INSIDE that composite. `_isStatePseudoRef`
+      // recognizes this form, preventing a literal `Name[H]` top-level stub.
       if (_check(TokenType.leftBracket)) {
         final save = _pos;
         _advance();
@@ -3715,7 +3726,7 @@ class Parser {
           if (_check(TokenType.rightBracket)) {
             _advance();
             if (inner == 'H' || inner == 'h') {
-              return '[H$tail]';
+              return '$name[H$tail]';
             }
             return name;
           }

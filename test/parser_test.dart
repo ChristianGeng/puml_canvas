@@ -5380,6 +5380,35 @@ Alice -> Bob : ""->"" \\nfrom actor1 to actor2
       });
     });
 
+    group('qualified history reference Name[H]/Name[H*]', () {
+      test('preserves the owning composite and creates no literal stub', () {
+        final d = parseState('@startuml\n'
+            'State2 --> State3 : Succeeded\n'
+            'state State3 {\n'
+            '  [*] --> long1\n'
+            '  State2 --> [H]: Resume\n'
+            '}\n'
+            'State2 --> State3[H*]: DeepResume\n'
+            '@enduml\n');
+        // The deep-history transition encodes State3's deep history, owner
+        // State3 preserved (NOT a bare [H*]).
+        final deep = d.transitions.firstWhere((t) => t.label == 'DeepResume');
+        expect(deep.from, 'State2');
+        expect(deep.to, 'State3[H*]');
+        // No literal `State3[H*]` top-level state was materialized.
+        expect(
+          d.states.map((s) => s.name),
+          isNot(contains('State3[H*]')),
+        );
+        // The bare in-block [H] history stays unchanged.
+        final state3 = d.states.firstWhere((s) => s.name == 'State3');
+        expect(
+          state3.nestedTransitions.map((t) => '${t.from}->${t.to}'),
+          contains('State2->[H]'),
+        );
+      });
+    });
+
     test('parses full state diagram example', () {
       final d = parseState('@startuml\n'
           '[*] --> Idle\n'

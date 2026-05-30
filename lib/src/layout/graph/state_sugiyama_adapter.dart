@@ -121,16 +121,58 @@ Scene layoutStateDiagramWithSugiyama(
 /// that references a state in a sibling composite is therefore lifted up to
 /// their common ancestor (often the root), so it routes between the two
 /// composites' shells rather than dangling inside the wrong one.
+/// A transition assigned to a layout scope, carrying any history endpoint
+/// resolution (its owner-scoped node id) computed from the DECLARING scope so
+/// the resolution survives lifting to the LCA layout scope.
+class _ScopedTransition {
+  final StateTransition transition;
+  /// Resolved history node id for `from`/`to` when that endpoint is a history
+  /// ref owned by a known composite; null otherwise.
+  final _HistoryResolution? fromHistory;
+  final _HistoryResolution? toHistory;
+  const _ScopedTransition(this.transition, this.fromHistory, this.toHistory);
+}
+
 class _StatePlan {
   /// Scope path (`''` root, else `A`, `A/B`, …) -> transitions to lay out
   /// there. The path matches the `scope` string threaded through `_layoutScope`
   /// (root composites prefix-free, nested composites slash-joined).
-  final Map<String, List<StateTransition>> _byScope;
+  final Map<String, List<_ScopedTransition>> _byScope;
 
-  const _StatePlan(this._byScope);
+  /// Scope path -> the history pseudo nodes that scope OWNS (i.e. must
+  /// materialize inside its interior even when no in-scope edge references
+  /// them). Keyed by the resolved history node id (`[H]@<scope>` etc.).
+  final Map<String, Map<String, _PseudoKind>> _ownedHistory;
 
-  List<StateTransition> transitionsForScope(String scope) =>
+  /// Interior scope path of every composite by name (`A` for top-level `A`,
+  /// `A/B` for nested `B`). Used to resolve a history pseudo's owner.
+  final Map<String, String> _interiorScopeOf;
+
+  const _StatePlan(this._byScope, this._ownedHistory, this._interiorScopeOf);
+
+  List<_ScopedTransition> transitionsForScope(String scope) =>
       _byScope[scope] ?? const [];
+
+  /// History nodes owned by [scope] (resolved id -> kind); empty when none.
+  Map<String, _PseudoKind> ownedHistoryForScope(String scope) =>
+      _ownedHistory[scope] ?? const {};
+
+  /// Every history node id owned at or below [scopePrefix] (the interior scope
+  /// of a direct-child composite), so an ancestor builder can map those ids to
+  /// that child for cross-boundary punch-through.
+  List<String> historyIdsUnder(String scopePrefix) {
+    final out = <String>[];
+    _ownedHistory.forEach((scope, ids) {
+      if (scope == scopePrefix || scope.startsWith('$scopePrefix/')) {
+        out.addAll(ids.keys);
+      }
+    });
+    return out;
+  }
+
+  /// Interior scope path of composite [name], or null when [name] is not a
+  /// known composite (undeclared, a leaf, or a concurrent composite).
+  String? interiorScopeOf(String name) => _interiorScopeOf[name];
 
   static _StatePlan build(StateDiagram diagram) {
     // Container path per state name: the slash-joined scope of its enclosing
@@ -139,21 +181,41 @@ class _StatePlan {
     // are opaque (their interior transitions are handled by the region's own
     // sub-layout), so we do not descend into them here for path mapping.
     final containerOf = <String, String>{};
+    // Interior scope per composite name: a true (sequential) composite's
+    // interior scope is its container scope joined with its own name.
+    final interiorScopeOf = <String, String>{};
     void mapStates(List<StateDecl> decls, String scope) {
       for (final d in decls) {
         containerOf[d.name] = scope;
         if (d.concurrentRegions.isEmpty) {
           final childScope = scope.isEmpty ? d.name : '$scope/${d.name}';
+          final hasNested =
+              d.nestedStates.isNotEmpty || d.nestedTransitions.isNotEmpty;
+          if (hasNested) interiorScopeOf[d.name] = childScope;
           mapStates(d.nestedStates, childScope);
         }
       }
     }
     mapStates(diagram.states, '');
 
-    final byScope = <String, List<StateTransition>>{};
+    final ownedHistory = <String, Map<String, _PseudoKind>>{};
+    void recordHistory(_HistoryResolution? h) {
+      if (h == null) return;
+      ownedHistory
+          .putIfAbsent(h.ownerScope, () => <String, _PseudoKind>{})[h.id] =
+          h.kind;
+    }
+
+    final byScope = <String, List<_ScopedTransition>>{};
     void assign(StateTransition t, String declScope) {
-      final scope = _lcaScope(t, declScope, containerOf);
-      byScope.putIfAbsent(scope, () => <StateTransition>[]).add(t);
+      final fromH = _resolveHistory(t.from, declScope, interiorScopeOf);
+      final toH = _resolveHistory(t.to, declScope, interiorScopeOf);
+      recordHistory(fromH);
+      recordHistory(toH);
+      final scope = _lcaScope(t, declScope, containerOf, interiorScopeOf);
+      byScope
+          .putIfAbsent(scope, () => <_ScopedTransition>[])
+          .add(_ScopedTransition(t, fromH, toH));
     }
 
     void walk(List<StateDecl> decls, String scope) {
@@ -175,36 +237,88 @@ class _StatePlan {
     }
     walk(diagram.states, '');
 
-    return _StatePlan(byScope);
+    return _StatePlan(byScope, ownedHistory, interiorScopeOf);
   }
 
   /// LCA scope for a transition: the longest common scope prefix of both
-  /// endpoints' container paths. Pseudo endpoints (`[*]`/`[H]`/`[H*]`) are
-  /// scope-local, so they anchor to the declaring scope rather than lifting.
+  /// endpoints' container paths. A `[*]` pseudo endpoint is scope-local, so it
+  /// anchors to the declaring scope. A history endpoint (`[H]`/`[H*]` or
+  /// `Name[H]`/`Name[H*]`) anchors to its OWNING composite's interior scope so
+  /// the transition lifts to the LCA of its source and the history's owner.
   static String _lcaScope(
     StateTransition t,
     String declScope,
     Map<String, String> containerOf,
+    Map<String, String> interiorScopeOf,
   ) {
-    final fromPseudo = _isPseudoRef(t.from);
-    final toPseudo = _isPseudoRef(t.to);
-    if (fromPseudo && toPseudo) return declScope;
-    // For a pseudo endpoint, treat its path as the declaring scope.
-    final fromPath = fromPseudo
-        ? _scopeSegments(declScope)
-        : _endpointScope(t.from, declScope, containerOf);
-    final toPath = toPseudo
-        ? _scopeSegments(declScope)
-        : _endpointScope(t.to, declScope, containerOf);
+    final fromPath = _endpointLcaPath(t.from, declScope, containerOf,
+        interiorScopeOf);
+    final toPath =
+        _endpointLcaPath(t.to, declScope, containerOf, interiorScopeOf);
+    if (fromPath == null && toPath == null) return declScope;
+    final from = fromPath ?? _scopeSegments(declScope);
+    final to = toPath ?? _scopeSegments(declScope);
     final common = <String>[];
-    for (var i = 0; i < fromPath.length && i < toPath.length; i++) {
-      if (fromPath[i] == toPath[i]) {
-        common.add(fromPath[i]);
+    for (var i = 0; i < from.length && i < to.length; i++) {
+      if (from[i] == to[i]) {
+        common.add(from[i]);
       } else {
         break;
       }
     }
     return common.join('/');
+  }
+
+  /// Scope-segment path used for LCA against an endpoint, or null when the
+  /// endpoint is scope-local (a `[*]` pseudo) and should not constrain the LCA.
+  static List<String>? _endpointLcaPath(
+    String ref,
+    String declScope,
+    Map<String, String> containerOf,
+    Map<String, String> interiorScopeOf,
+  ) {
+    if (ref == '[*]') return null;
+    final h = _resolveHistory(ref, declScope, interiorScopeOf);
+    if (h != null) return _scopeSegments(h.ownerScope);
+    return _endpointScope(ref, declScope, containerOf);
+  }
+
+  /// Resolve a history endpoint [ref] to its owning composite's interior scope,
+  /// stable node id, and kind. A bare `[H]`/`[H*]` is owned by its declaring
+  /// composite [declScope]; a qualified `Name[H]`/`Name[H*]` is owned by
+  /// `Name`. Returns null when [ref] is not a history ref or its owner is not a
+  /// known composite (the caller then falls back to existing behavior).
+  static _HistoryResolution? _resolveHistory(
+    String ref,
+    String declScope,
+    Map<String, String> interiorScopeOf,
+  ) {
+    final _PseudoKind kind;
+    final String ownerScope;
+    if (ref == '[H]' || ref == '[H*]') {
+      kind = ref == '[H*]'
+          ? _PseudoKind.historyDeep
+          : _PseudoKind.historyShallow;
+      // A bare in-block history is owned by the composite it is declared in.
+      if (declScope.isEmpty) return null;
+      ownerScope = declScope;
+    } else if (ref.endsWith('[H]') || ref.endsWith('[H*]')) {
+      final deep = ref.endsWith('[H*]');
+      kind =
+          deep ? _PseudoKind.historyDeep : _PseudoKind.historyShallow;
+      final owner = ref.substring(0, ref.length - (deep ? 4 : 3));
+      final scope = interiorScopeOf[owner];
+      if (scope == null) return null;
+      ownerScope = scope;
+    } else {
+      return null;
+    }
+    final base = kind == _PseudoKind.historyDeep ? '[H*]' : '[H]';
+    return _HistoryResolution(
+      kind: kind,
+      ownerScope: ownerScope,
+      id: '$base@$ownerScope',
+    );
   }
 
   /// Container scope segments for a real-state endpoint. Falls back to the
@@ -224,8 +338,22 @@ class _StatePlan {
       scope.isEmpty ? const [] : scope.split('/');
 }
 
-bool _isPseudoRef(String ref) =>
-    ref == '[*]' || ref == '[H]' || ref == '[H*]';
+/// True for a bare (`[H]`/`[H*]`) or qualified (`Name[H]`/`Name[H*]`) history
+/// reference.
+bool _isHistoryRef(String ref) => ref.endsWith('[H]') || ref.endsWith('[H*]');
+
+/// A history endpoint resolved to its owning composite's interior scope, a
+/// stable per-owner node id, and shallow/deep kind.
+class _HistoryResolution {
+  final _PseudoKind kind;
+  final String ownerScope;
+  final String id;
+  const _HistoryResolution({
+    required this.kind,
+    required this.ownerScope,
+    required this.id,
+  });
+}
 
 /// Result of laying out one scope (the root, or one composite's interior) in
 /// LOCAL coordinates with origin (0,0).
@@ -257,7 +385,7 @@ class _ScopeResult {
 /// arrow punches through to that leaf's absolute position.
 _ScopeResult _layoutScope(
   List<StateDecl> states,
-  List<StateTransition> transitions,
+  List<_ScopedTransition> transitions,
   TextMeasurer measurer, {
   required String scope,
   required _StatePlan plan,
@@ -804,13 +932,33 @@ class _ScopeBuilder {
 
   _ScopeBuilder(this.measurer, this.scope, this.plan);
 
-  void collect(List<StateDecl> states, List<StateTransition> transitions) {
+  void collect(List<StateDecl> states, List<_ScopedTransition> transitions) {
     for (final decl in states) {
       _addDirectChild(decl);
     }
+    // Materialize the history pseudo nodes this scope OWNS, so they are placed
+    // inside even when only cross-boundary edges (from an ancestor scope)
+    // reference them.
+    plan.ownedHistoryForScope(scope).forEach((id, kind) {
+      _ensureHistoryNode(id, kind);
+    });
     for (final t in transitions) {
       _addEdge(t);
     }
+  }
+
+  /// Materialize a history pseudo node owned by THIS scope (id `[H]@<scope>` /
+  /// `[H*]@<scope>`) as a placed member node once.
+  void _ensureHistoryNode(String id, _PseudoKind kind) {
+    if (infoById.containsKey(id)) return;
+    infoById[id] = _NodeInfo(
+      id: id,
+      width: _historyRadius * 2,
+      height: _historyRadius * 2,
+      label: '',
+      pseudoKind: kind,
+    );
+    _directChildOf[id] = id;
   }
 
   /// Add a direct child of this scope as a single sized node, recording the
@@ -845,6 +993,12 @@ class _ScopeBuilder {
   /// direct-child [childId].
   void _recordDescendants(StateDecl decl, String childId) {
     _directChildOf[decl.name] = childId;
+    // Map any history node owned by this child's subtree to the child so a
+    // cross-boundary edge punches through to it.
+    final interior = scope.isEmpty ? childId : '$scope/$childId';
+    for (final id in plan.historyIdsUnder(interior)) {
+      _directChildOf[id] = childId;
+    }
     for (final c in decl.nestedStates) {
       _recordDescendants(c, childId);
     }
@@ -905,9 +1059,10 @@ class _ScopeBuilder {
     );
   }
 
-  void _addEdge(StateTransition t) {
-    final from = _resolveEndpoint(t.from, source: true);
-    final to = _resolveEndpoint(t.to, source: false);
+  void _addEdge(_ScopedTransition st) {
+    final t = st.transition;
+    final from = _resolveEndpoint(t.from, source: true, history: st.fromHistory);
+    final to = _resolveEndpoint(t.to, source: false, history: st.toHistory);
     if (from == null || to == null) return;
     if (from.directChild == to.directChild) return;
     final dir = t.direction ?? StateArrowDirection.down;
@@ -945,13 +1100,36 @@ class _ScopeBuilder {
   }
 
   /// Resolve a transition endpoint [ref] to the direct-child node id of this
-  /// scope, plus (when the ref names a nested leaf) the original target name.
+  /// scope, plus (when the ref names a nested leaf or owner-scoped history node)
+  /// the original target name. [history] is the precomputed owner resolution
+  /// for a history endpoint, threaded from the declaring scope.
   ({String directChild, String? nestedTarget})? _resolveEndpoint(
     String ref, {
     required bool source,
+    _HistoryResolution? history,
   }) {
+    if (history != null) {
+      // History pseudo owned by some composite. When owned by THIS scope it is
+      // a direct child; when owned deeper, the direct child is the enclosing
+      // composite and we punch through to the history node id.
+      final direct = _directChildOf[history.id];
+      if (direct != null) {
+        final nestedTarget = direct == history.id ? null : history.id;
+        return (directChild: direct, nestedTarget: nestedTarget);
+      }
+      // Owner scope is not reachable from this scope (e.g. the LCA sits above
+      // an unrelated branch); fall back to a scope-local pseudo so the edge
+      // still renders.
+    }
     if (ref == '[*]' || ref == '[H]' || ref == '[H*]') {
       final id = _ensureScopedPseudo(ref, source: source);
+      return (directChild: id, nestedTarget: null);
+    }
+    if (_isHistoryRef(ref)) {
+      // Qualified history ref whose owner was not a known composite: degrade to
+      // a scope-local bare history pseudo of the matching kind.
+      final bare = ref.endsWith('[H*]') ? '[H*]' : '[H]';
+      final id = _ensureScopedPseudo(bare, source: source);
       return (directChild: id, nestedTarget: null);
     }
     final direct = _directChildOf[ref];
