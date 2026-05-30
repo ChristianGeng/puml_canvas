@@ -42,13 +42,18 @@ class SugiyamaResult {
 }
 
 /// Run the (currently Phase 1 + Phase 2 + Phase 3 + Phase 4) Sugiyama pipeline.
+///
+/// [sameRank] is an optional set of node-id pairs constrained to share a layer
+/// (PlantUML horizontal transitions). Empty (default) leaves the pipeline
+/// byte-identical to the unconstrained engine.
 SugiyamaResult runSugiyama(
   Graph input, {
   CoordinatesConfig coordinatesConfig = const CoordinatesConfig(),
   EdgeRoutingConfig edgeRoutingConfig = const EdgeRoutingConfig(),
+  Set<(String, String)> sameRank = const {},
 }) {
   final dag = removeCycles(input);
-  final layering = assignLayers(dag);
+  final layering = assignLayers(dag, sameRank: sameRank);
   final proper = insertDummyNodes(dag, layering);
   final ordered = reduceCrossings(proper);
   final coords = assignCoordinates(ordered, config: coordinatesConfig);

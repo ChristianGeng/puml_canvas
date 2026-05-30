@@ -281,14 +281,19 @@ _ScopeResult _layoutScope(
       clusterPadding: _clusterPadding,
       clusterTitleHeight: _clusterTitleHeight,
     ),
+    // Horizontal (`left`/`right`) edges are same-rank constraints: src and dst
+    // share a layer so a common successor centers between them.
+    sameRank: <(String, String)>{
+      for (final h in builder.horizontalEdges) (h.src, h.dst),
+    },
   );
   final coords = result.coordinates;
 
-  // Mutable positions: horizontal (`left`/`right`) edges pull their dst into
-  // the src's row and place it on the direction-implied side.
+  // Mutable positions: the engine places horizontal endpoints on the SAME
+  // layer (shared y); we only enforce the direction-implied left/right side.
   final xByNode = Map<String, double>.from(coords.xByNode);
   final yByNode = Map<String, double>.from(coords.yByNode);
-  _applyHorizontalPlacement(builder, xByNode, yByNode);
+  final movedNodes = _applyHorizontalPlacement(builder, xByNode);
 
   final shapes = <SceneShape>[];
   final descendantRects = <String, Rect>{};
@@ -332,12 +337,9 @@ _ScopeResult _layoutScope(
     _emitNode(shapes, info, center, measurer);
   }
 
-  // Nodes whose position was changed by horizontal placement. Any pre-computed
-  // engine route touching one of these is stale (it was routed from the node's
-  // original layer position), so we re-route it straight from the new rects.
-  final movedNodes = <String>{
-    for (final h in builder.horizontalEdges) h.dst,
-  };
+  // `movedNodes` (returned by `_applyHorizontalPlacement`) holds any nodes
+  // whose x was swapped to enforce the horizontal side. A pre-computed engine
+  // route touching one of these is stale, so we re-route it straight below.
 
   // --- Routes --------------------------------------------------------------
   for (final route in result.edgeRoutes.routes) {
@@ -475,26 +477,33 @@ Rect? _shapesBounds(List<SceneShape> shapes) {
   return Rect.fromLTRB(minX, minY, maxX, maxY);
 }
 
-/// Places each horizontal (`left`/`right`) edge's destination in the SAME row
-/// as its source (dst.y := src.y) and directly adjacent on the implied side
-/// (right => dst right of src; left => dst left of src), so the rendered arrow
-/// is a short straight segment. Mutates [xByNode]/[yByNode] in place.
-void _applyHorizontalPlacement(
+/// Enforces the direction-implied left/right SIDE for each horizontal
+/// (`left`/`right`) edge. The engine already ranks src and dst on the same
+/// layer (shared y) via the same-rank constraint, but crossing reduction may
+/// order them on either side. When the rendered side is wrong, swap the two
+/// nodes' x coordinates: this preserves their shared midpoint (so any common
+/// successor stays centered between them) while putting the dst on the implied
+/// side. Mutates [xByNode] in place and returns the set of nodes whose x
+/// actually changed (their engine routes are now stale and must be re-routed).
+Set<String> _applyHorizontalPlacement(
   _ScopeBuilder builder,
   Map<String, double> xByNode,
-  Map<String, double> yByNode,
 ) {
+  final moved = <String>{};
   for (final h in builder.horizontalEdges) {
     final sx = xByNode[h.src];
-    final sy = yByNode[h.src];
-    if (sx == null || sy == null) continue;
-    final srcInfo = builder.infoById[h.src];
-    final dstInfo = builder.infoById[h.dst];
-    if (srcInfo == null || dstInfo == null) continue;
-    final gap = srcInfo.width / 2 + _nodeSpacing + dstInfo.width / 2;
-    yByNode[h.dst] = sy;
-    xByNode[h.dst] = h.rightward ? sx + gap : sx - gap;
+    final dx = xByNode[h.dst];
+    if (sx == null || dx == null) continue;
+    final dstShouldBeRight = h.rightward;
+    final dstIsRight = dx > sx;
+    if (dstShouldBeRight != dstIsRight) {
+      xByNode[h.src] = dx;
+      xByNode[h.dst] = sx;
+      moved.add(h.src);
+      moved.add(h.dst);
+    }
   }
+  return moved;
 }
 
 /// Reconcile one end of a route. When [targetName] names a nested leaf reached

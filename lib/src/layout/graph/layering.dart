@@ -25,63 +25,109 @@ class Layering {
 /// `u`. Reversed edges count for layering with their direction flipped.
 /// Self-loops are ignored (they were marked reversed by cycle removal and
 /// neither side imposes a real predecessor constraint).
-Layering assignLayers(Graph dagGraph) {
-  // Build effective predecessor and successor maps.
-  final preds = <String, List<String>>{
-    for (final n in dagGraph.nodes) n.id: <String>[],
-  };
-  final succs = <String, List<String>>{
-    for (final n in dagGraph.nodes) n.id: <String>[],
-  };
+///
+/// [sameRank] is an optional set of node-id pairs that must share a layer
+/// (e.g. PlantUML horizontal `A -> B` transitions). When empty (the default)
+/// the behavior is the plain longest-path assignment described above and is
+/// byte-identical to the no-constraint engine. When non-empty, the connected
+/// components of the same-rank relation are collapsed into a single "group"
+/// for layering: the group DAG is layered by longest path, and every member
+/// of a group inherits the group's layer. A common successor of two same-rank
+/// nodes therefore sits exactly one layer below them and centers between them.
+Layering assignLayers(
+  Graph dagGraph, {
+  Set<(String, String)> sameRank = const {},
+}) {
+  // --- Same-rank grouping (union-find over node ids) -----------------------
+  final parent = <String, String>{for (final n in dagGraph.nodes) n.id: n.id};
+  String find(String x) {
+    var root = x;
+    while (parent[root] != root) {
+      root = parent[root]!;
+    }
+    // Path compression.
+    var cur = x;
+    while (parent[cur] != root) {
+      final next = parent[cur]!;
+      parent[cur] = root;
+      cur = next;
+    }
+    return root;
+  }
+
+  void union(String a, String b) {
+    if (!parent.containsKey(a) || !parent.containsKey(b)) return;
+    final ra = find(a);
+    final rb = find(b);
+    if (ra != rb) parent[ra] = rb;
+  }
+
+  for (final pair in sameRank) {
+    union(pair.$1, pair.$2);
+  }
+
+  String groupOf(String id) => find(id);
+
+  // --- Build group-level effective edges -----------------------------------
+  // Group predecessors/successors for longest-path layering. Edges WITHIN a
+  // group (both endpoints in the same group, e.g. the horizontal edge itself)
+  // impose no layer constraint and are dropped here.
+  final groupPreds = <String, Set<String>>{};
+  final groupSuccs = <String, Set<String>>{};
+  final groupIds = <String>{for (final n in dagGraph.nodes) groupOf(n.id)};
+  for (final g in groupIds) {
+    groupPreds[g] = <String>{};
+    groupSuccs[g] = <String>{};
+  }
 
   for (final e in dagGraph.edges) {
     if (e.src == e.dst) continue; // self-loop, skip
     final from = e.isReversed ? e.dst : e.src;
     final to = e.isReversed ? e.src : e.dst;
-    // Defensive: only add if both nodes exist in the graph.
-    if (preds.containsKey(to) && succs.containsKey(from)) {
-      preds[to]!.add(from);
-      succs[from]!.add(to);
-    }
+    if (!parent.containsKey(from) || !parent.containsKey(to)) continue;
+    final gf = groupOf(from);
+    final gt = groupOf(to);
+    if (gf == gt) continue; // intra-group edge: no ranking constraint
+    groupSuccs[gf]!.add(gt);
+    groupPreds[gt]!.add(gf);
   }
 
-  // Kahn's topological sort to detect any leftover cycles (shouldn't happen
-  // after cycle removal, but we guard) and to assign layers in topo order.
+  // --- Longest-path layering over groups (Kahn's topo sort) ----------------
   final inDegree = <String, int>{
-    for (final entry in preds.entries) entry.key: entry.value.length,
+    for (final g in groupIds) g: groupPreds[g]!.length,
   };
   final queue = <String>[];
-  for (final n in dagGraph.nodes) {
-    if ((inDegree[n.id] ?? 0) == 0) {
-      queue.add(n.id);
-    }
+  for (final g in groupIds) {
+    if ((inDegree[g] ?? 0) == 0) queue.add(g);
   }
 
-  final nodeLayer = <String, int>{};
+  final groupLayer = <String, int>{};
   var head = 0;
   while (head < queue.length) {
     final u = queue[head++];
-    final layerU = nodeLayer[u] ?? 0;
-    nodeLayer[u] = layerU;
-    for (final v in succs[u] ?? const []) {
+    final layerU = groupLayer[u] ?? 0;
+    groupLayer[u] = layerU;
+    for (final v in groupSuccs[u] ?? const <String>{}) {
       final candidate = layerU + 1;
-      final existing = nodeLayer[v];
+      final existing = groupLayer[v];
       if (existing == null || candidate > existing) {
-        nodeLayer[v] = candidate;
+        groupLayer[v] = candidate;
       }
       final remaining = (inDegree[v] ?? 0) - 1;
       inDegree[v] = remaining;
-      if (remaining == 0) {
-        queue.add(v);
-      }
+      if (remaining == 0) queue.add(v);
     }
   }
 
-  // Any node not reached by Kahn's algorithm (would indicate a residual
-  // cycle) gets layer 0 as a safe fallback.
-  for (final n in dagGraph.nodes) {
-    nodeLayer.putIfAbsent(n.id, () => 0);
+  // Any group not reached (residual cycle) gets layer 0 as a safe fallback.
+  for (final g in groupIds) {
+    groupLayer.putIfAbsent(g, () => 0);
   }
+
+  // --- Project group layers back onto nodes --------------------------------
+  final nodeLayer = <String, int>{
+    for (final n in dagGraph.nodes) n.id: groupLayer[groupOf(n.id)]!,
+  };
 
   // Bucket into layers.
   var maxLayer = 0;

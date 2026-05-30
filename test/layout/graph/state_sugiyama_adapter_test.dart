@@ -1092,4 +1092,105 @@ void main() {
       expect(maxTailX, greaterThanOrEqualTo(state2.rect.left - 5));
     });
   });
+
+  group('same-rank horizontal placement', () {
+    SceneRoundedBox boxFor(Scene scene, String label) => scene.shapes
+        .whereType<SceneRoundedBox>()
+        .firstWhere((s) => s.label == label);
+
+    test('common successor of `A -> B` centers between A and B on next rank',
+        () {
+      // PlantUML treats `State1 -> State2` as a same-rank constraint: both sit
+      // on one row and the shared final ring centers between them — no long
+      // diagonal back-edge under State1.
+      final scene = layoutStateDiagramWithSugiyama(
+        _parseStateDiagram(
+          '@startuml\n'
+          '[*] --> State1\n'
+          'State1 --> [*]\n'
+          'State1 -> State2\n'
+          'State2 --> [*]\n'
+          '@enduml\n',
+        ),
+        measurer,
+      );
+      final state1 = boxFor(scene, 'State1');
+      final state2 = boxFor(scene, 'State2');
+      // Same row.
+      expect((state1.rect.center.dy - state2.rect.center.dy).abs(),
+          lessThan(1.0));
+      // State2 to the right of State1.
+      expect(state2.rect.center.dx, greaterThan(state1.rect.center.dx));
+      // Final ring centered horizontally between the two states.
+      final ring =
+          scene.shapes.whereType<SceneCircle>().firstWhere((c) => c.ring);
+      expect(ring.center.dx, greaterThan(state1.rect.center.dx));
+      expect(ring.center.dx, lessThan(state2.rect.center.dx));
+      // Ring sits BELOW the same-rank row (it is a successor of both).
+      expect(ring.center.dy, greaterThan(state1.rect.center.dy));
+      // The `State2 --> [*]` arrow does not travel far left of State1 (no
+      // back-crossing): both ring-bound arrow tails stay at/right of State1.
+      final intoRing = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) =>
+              l.head == ArrowHead.open && (l.to - ring.center).distance < 40)
+          .toList();
+      expect(intoRing.length, 2);
+      for (final l in intoRing) {
+        expect(l.from.dx, greaterThanOrEqualTo(state1.rect.left - 1));
+      }
+    });
+
+    test('diamond `A -> B`, `A --> C`, `B --> C`: C centers between A and B',
+        () {
+      final scene = layoutStateDiagramWithSugiyama(
+        _parseStateDiagram(
+          '@startuml\n'
+          '[*] --> A\n'
+          'A -> B\n'
+          'A --> C\n'
+          'B --> C\n'
+          '@enduml\n',
+        ),
+        measurer,
+      );
+      final a = boxFor(scene, 'A');
+      final b = boxFor(scene, 'B');
+      final c = boxFor(scene, 'C');
+      // A and B on the same row, B to the right.
+      expect((a.rect.center.dy - b.rect.center.dy).abs(), lessThan(1.0));
+      expect(b.rect.center.dx, greaterThan(a.rect.center.dx));
+      // C centered between A and B, one rank below.
+      expect(c.rect.center.dx, greaterThan(a.rect.center.dx));
+      expect(c.rect.center.dx, lessThan(b.rect.center.dx));
+      expect(c.rect.center.dy, greaterThan(a.rect.center.dy));
+      // Both A->C and B->C present and short (tails sit above C, at/around
+      // each source column).
+      final intoC = scene.shapes
+          .whereType<SceneLine>()
+          .where((l) =>
+              l.head == ArrowHead.open &&
+              (l.to - c.rect.center).distance < c.rect.height + 5)
+          .toList();
+      expect(intoC.length, greaterThanOrEqualTo(2));
+    });
+
+    test('`A -left-> B`: B sits to the LEFT of A on the same row', () {
+      final scene = layoutStateDiagramWithSugiyama(
+        _parseStateDiagram(
+          '@startuml\n'
+          '[*] --> A\n'
+          'A -left-> B\n'
+          'A --> [*]\n'
+          'B --> [*]\n'
+          '@enduml\n',
+        ),
+        measurer,
+      );
+      final a = boxFor(scene, 'A');
+      final b = boxFor(scene, 'B');
+      expect(b.rect.center.dx, lessThan(a.rect.center.dx));
+      expect((a.rect.center.dy - b.rect.center.dy).abs(), lessThan(1.0));
+    });
+  });
 }
