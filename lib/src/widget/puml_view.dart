@@ -13,11 +13,16 @@ class PumlView extends StatelessWidget {
   final Widget Function(BuildContext, Object)? errorBuilder;
   final FileLoader? fileLoader;
 
+  /// Opt-in flag for the Phase-5 Sugiyama-backed state diagram layout. False
+  /// (default) keeps the existing [StateLayout] path so output is unchanged.
+  final bool useSugiyamaForStates;
+
   const PumlView({
     super.key,
     required this.source,
     this.errorBuilder,
     this.fileLoader,
+    this.useSugiyamaForStates = false,
   });
 
   @override
@@ -28,7 +33,8 @@ class PumlView extends StatelessWidget {
           Preprocessor(fileLoader: fileLoader).preprocess(source);
       final tokens = Lexer().tokenize(pre);
       final diagram = Parser().parse(tokens);
-      scene = const AutoLayout().layout(diagram, const FlutterTextMeasurer());
+      scene = AutoLayout(useSugiyamaForStates: useSugiyamaForStates)
+          .layout(diagram, const FlutterTextMeasurer());
     } catch (e) {
       return errorBuilder?.call(context, e) ??
           _DefaultError(error: e.toString());

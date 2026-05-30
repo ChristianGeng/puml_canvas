@@ -3132,6 +3132,20 @@ class Parser {
       _skipNewlines();
     }
     _expect(TokenType.endUml);
+    // PlantUML resolves state names globally, regardless of declaration order.
+    // A composite/aliased state declared at top level owns its name; an empty
+    // nested stub of the same name (auto-declared by a forward-referencing
+    // transition inside another composite) is dropped so the state isn't
+    // duplicated. The naming transition stays and becomes a cross-boundary edge.
+    final ownedTopLevel = <String>{
+      for (final s in states)
+        if (_hasStatePayload(s)) s.name,
+    };
+    if (ownedTopLevel.isNotEmpty) {
+      for (var i = 0; i < states.length; i++) {
+        states[i] = _pruneNestedStubs(states[i], ownedTopLevel);
+      }
+    }
     return StateDiagram(
       states: List.unmodifiable(states),
       transitions: List.unmodifiable(transitions),
@@ -3325,6 +3339,59 @@ class Parser {
       }
     }
     return false;
+  }
+
+  /// True when [s] carries real content (nested children, regions, a display
+  /// name, descriptions, or a stereotype) rather than being a bare stub.
+  bool _hasStatePayload(StateDecl s) =>
+      s.nestedStates.isNotEmpty ||
+      s.concurrentRegions.isNotEmpty ||
+      s.descriptions.isNotEmpty ||
+      s.displayName != null ||
+      s.stereotype != null;
+
+  /// True when [s] is an empty auto-declared stub: a bare name with no payload
+  /// and no nested transitions of its own.
+  bool _isStateStub(StateDecl s) =>
+      s.displayName == null &&
+      s.stereotype == null &&
+      s.nestedStates.isEmpty &&
+      s.nestedTransitions.isEmpty &&
+      s.concurrentRegions.isEmpty &&
+      s.descriptions.isEmpty;
+
+  /// Rebuild [decl] dropping any empty nested-state stub whose name is owned by
+  /// a top-level state in [ownedNames], recursing through nested states and
+  /// concurrent regions. The transition that referenced the stub is untouched.
+  StateDecl _pruneNestedStubs(StateDecl decl, Set<String> ownedNames) {
+    if (decl.nestedStates.isEmpty && decl.concurrentRegions.isEmpty) {
+      return decl;
+    }
+    final nested = <StateDecl>[
+      for (final c in decl.nestedStates)
+        if (!(_isStateStub(c) && ownedNames.contains(c.name)))
+          _pruneNestedStubs(c, ownedNames),
+    ];
+    final regions = <List<StateDecl>>[
+      for (final region in decl.concurrentRegions)
+        <StateDecl>[
+          for (final c in region)
+            if (!(_isStateStub(c) && ownedNames.contains(c.name)))
+              _pruneNestedStubs(c, ownedNames),
+        ],
+    ];
+    return StateDecl(
+      name: decl.name,
+      displayName: decl.displayName,
+      nestedStates: List.unmodifiable(nested),
+      nestedTransitions: decl.nestedTransitions,
+      concurrentRegions: decl.concurrentRegions.isEmpty
+          ? const []
+          : List.unmodifiable(regions.map(List<StateDecl>.unmodifiable)),
+      descriptions: decl.descriptions,
+      stereotype: decl.stereotype,
+      horizontalRegions: decl.horizontalRegions,
+    );
   }
 
   /// True when the current token is a `frame` / `folder` / etc. container
