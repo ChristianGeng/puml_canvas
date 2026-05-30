@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.12.1
+
+### Added
+
+- State diagram golden coverage was expanded for state descriptions,
+  history pseudo-states, stereotype pseudo-states, SDL receive-style
+  states, concurrent-region separators, cross-container transitions, and
+  collision-avoidance labels.
+- Class diagram golden coverage now includes PlantUML-style visibility
+  icons for class members.
+
+### Changed
+
+- Class member visibility markers now render as PlantUML-style icons
+  instead of plain text symbols: private square, protected diamond,
+  package triangle, and public circle, with filled variants for methods
+  and hollow variants for fields.
+- State diagram layout was refined for composite states, concurrent
+  regions, pseudo-state shapes, state descriptions, transition routing,
+  and label collision avoidance.
+
+### Fixed
+
+- State transitions that cross container boundaries no longer create
+  duplicate or misplaced shapes in the rendered scene.
+- State diagram concurrent regions now distinguish horizontal `||`
+  region layout from vertical `--` region layout.
+
 ## 0.12.0
 
 ### Added
