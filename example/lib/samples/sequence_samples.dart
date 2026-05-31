@@ -496,8 +496,7 @@ Bob -> Alice : hello
     source: '''
 @startuml
 note over Alice : initial state of Alice
-/
-note over Bob : initial state of Bob
+/ note over Bob : initial state of Bob
 Bob -> Alice : hello
 @enduml
 ''',
@@ -509,9 +508,7 @@ Bob -> Alice : hello
 participant Alice
 participant "The **Famous** Bob" as Bob
 Alice -> Bob : hello --there--
-...
-Some ~~long delay~~
-...
+...Some ~~long delay~~...
 Bob -> Alice : ok
 note left
 This is **bold**
@@ -887,7 +884,8 @@ Bob -> Alice: Authentication Response
     name: 'Titles (HTML)',
     source: '''
 @startuml
-title <u>Simple</u> communication example on <i>several</i> lines and using <font color=red>html</font>
+title
+<u>Simple</u> communication example on <i>several</i> lines and using <font color=red>html</font>
 This is hosted by <img:sourceforge.jpg>
 end title
 Alice -> Bob: Authentication Request
@@ -1321,11 +1319,9 @@ A ->(50) C: Starts\\nwhen 'B' sends
 @startuml
 !pragma teoz true
 S1 ->(30) S2: msg 1\\n
-&
-S2 ->(30) S1: msg 2
-note left S1: msg\\nS2 to S1
-&
-note right S2: msg\\nS1 to S2
+& S2 ->(30) S1: msg 2
+note left of S1: msg\\nS2 to S1
+& note right of S2: msg\\nS1 to S2
 @enduml
 ''',
   ),
@@ -1335,8 +1331,7 @@ note right S2: msg\\nS1 to S2
 @startuml
 !pragma teoz true
 Alice -> Bob : hello
-&
-Bob -> Charlie : hi
+& Bob -> Charlie : hi
 @enduml
 ''',
   ),
