@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.13.0
+
+### Added
+
+- New opt-in Sugiyama (hierarchical) layout for state diagrams, enabled
+  via `useSugiyamaForStates` on `PumlView` / `AutoLayout` (default off;
+  the existing state layout is unchanged when the flag is off). It lays
+  composite states out recursively, honors PlantUML arrow direction
+  hints (`->` horizontal, `-->` vertical, `-up->` / `-down->` /
+  `-left->` / `-right->`), treats horizontal arrows as same-rank so a
+  shared successor centers between them, renders self-transitions as
+  loop-backs, separates parallel transitions and de-overlaps their
+  labels, scopes `[H]` / `[H*]` history pseudo-states inside their owning
+  composite, and nudges edge labels clear of nodes and one another.
+- State parser support for dotted-name composite nesting: `state A.X`
+  declares state `X` inside composite `A` (and `A.B.C` nests deeper),
+  with repeated prefixes merging into one composite.
+- State transitions now capture their arrow direction, and qualified
+  history targets such as `X --> State3[H*]` preserve the owning
+  composite.
+- The example app now shows the official plantuml.com rendering
+  alongside the puml_canvas output for side-by-side comparison.
+
+### Changed
+
+- State names resolve globally regardless of declaration order: a state
+  referenced inside a composite (or before its declaration) that is
+  actually defined / used at an outer scope no longer produces a
+  duplicate nested stub.
+
+### Fixed
+
+- Numerous example sample sources that were invalid PlantUML (and failed
+  to render on plantuml.com) were corrected across state, sequence,
+  class, activity, component, deployment, gantt, mindmap, object, WBS,
+  and JSON diagrams.
+
 ## 0.12.1
 
 ### Added
