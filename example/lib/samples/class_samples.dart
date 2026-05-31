@@ -4,25 +4,25 @@ const classSubSamples = <SubSample>[
   SubSample(name: 'Declarative element', source: '''
 @startuml
 hide empty members
-abstract abstract
-abstract class "abstract class"
-annotation annotation
-circle circle ()
-circle_short_form
-class class
-class class_stereo <<stereotype>>
-dataclass dataclass
-diamond diamond <>
-diamond_short_form
-entity entity
-enum enum
-exception exception
-interface interface
-metaclass metaclass
-protocol protocol
-record record
-stereotype stereotype
-struct struct
+abstract        abstract
+abstract class  "abstract class"
+annotation      annotation
+circle          circle
+()              circle_short_form
+class           class
+class           class_stereo  <<stereotype>>
+dataclass       dataclass
+diamond         diamond
+<>              diamond_short_form
+entity          entity
+enum            enum
+exception       exception
+interface       interface
+metaclass       metaclass
+protocol        protocol
+record          record
+stereotype      stereotype
+struct          struct
 @enduml
 '''),
   SubSample(name: 'Relations between classes', source: '''
