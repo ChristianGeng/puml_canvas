@@ -348,8 +348,8 @@ Y1 -[#blue,bold]-> Y2
 state a
 a -> b : -> c
 x-> d : x-> e
-->o f : <>->o g
-x->o h : x->o
+e ->o f : <>->o g
+g x->o h : x->o
 @enduml
 ''',
   ),
@@ -373,7 +373,7 @@ end note
 state start <<start>>
 start -> A
 note left of start : this is a short note on start state
-end <<end>>
+state end <<end>>
 A -> end
 note right of end
 note on end
