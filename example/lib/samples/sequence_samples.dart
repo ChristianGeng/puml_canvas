@@ -455,7 +455,8 @@ end note
 caller -> server : conReq
 hnote over caller : idle
 caller <- server : conConf
-rnote over server "r" as rectangle
+rnote over server
+"r" as rectangle
 "h" as hexagon
 endrnote
 rnote over server
