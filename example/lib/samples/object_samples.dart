@@ -152,7 +152,6 @@ Foo --> Bar::def : Label two
   SubSample(
     name: 'Program evaluation and review technique (PERT) with map',
     source: '''@startuml
-PERT
 left to right direction
 ' Horizontal lines: -->, <--, <-->
 ' Vertical lines: ->, <-, <->

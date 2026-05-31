@@ -78,7 +78,7 @@ class2 *-- "foo/dummy" : use
 @startuml
 class \$C1
 class \$C2
-\$C2 class "\$C2" as dollarC2
+class "\$C2" as dollarC2
 remove \$C1
 remove \$C2
 remove dollarC2

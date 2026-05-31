@@ -272,9 +272,11 @@ Project starts 2020-07-01
     name: 'Milestone of maximum end of tasks',
     source: r'''
 @startgantt
-[Task1] requires 4 days then [Task1.1] requires 4 days
+[Task1] requires 4 days
+[Task1.1] starts at [Task1]'s end and requires 4 days
 [Task1.2] starts at [Task1]'s end and requires 7 days
-[Task2] requires 5 days then [Task2.1] requires 4 days
+[Task2] requires 5 days
+[Task2.1] starts at [Task2]'s end and requires 4 days
 [MaxTaskEnd] happens at [Task1.1]'s end
 [MaxTaskEnd] happens at [Task1.2]'s end
 [MaxTaskEnd] happens at [Task2.1]'s end
@@ -473,8 +475,7 @@ Project starts the 1st of january 2021
     name: 'Zoom on daily (with zoom)',
     source: r'''
 @startgantt
-printscale daily
-zoom 2
+printscale daily zoom 2
 saturday are closed
 sunday are closed
 Project starts the 1st of january 2021
@@ -508,8 +509,7 @@ Project starts the 1st of january 2021
     name: 'Zoom on weekly (with zoom)',
     source: r'''
 @startgantt
-printscale weekly
-zoom 4
+printscale weekly zoom 4
 saturday are closed
 sunday are closed
 Project starts the 1st of january 2021
@@ -541,8 +541,7 @@ Project starts the 20th of september 2020
     name: 'Zoom on monthly (with zoom)',
     source: r'''
 @startgantt
-projectscale monthly
-zoom 3
+projectscale monthly zoom 3
 Project starts the 20th of september 2020
 [Prototype design] as [TASK1] requires 130 days
 [TASK1] is colored in Lavender/LightBlue
@@ -572,8 +571,7 @@ Project starts the 20th of september 2020
     name: 'Zoom on quarterly (with zoom)',
     source: r'''
 @startgantt
-projectscale quarterly
-zoom 7
+projectscale quarterly zoom 7
 Project starts the 20th of september 2020
 [Prototype design] as [TASK1] requires 130 days
 [TASK1] is colored in Lavender/LightBlue
@@ -602,8 +600,7 @@ Project starts the 1st of october 2020
     name: 'Zoom on yearly (with zoom)',
     source: r'''
 @startgantt
-projectscale yearly
-zoom 2
+projectscale yearly zoom 2
 Project starts the 1st of october 2020
 [Prototype design] as [TASK1] requires 700 days
 [TASK1] is colored in Lavender/LightBlue
@@ -672,7 +669,8 @@ Project starts the 6th of July 2020
     name: 'Change first day of week',
     source: r'''
 @startgantt
-printscale weekly weeks starts on Sunday and must have at least 4 days
+printscale weekly
+weeks starts on Sunday and must have at least 4 days
 friday are closed
 saturday are closed
 Project starts the 1st of january 2025
@@ -1476,9 +1474,10 @@ Project starts 2021-01-01
     name: 'Delete Tasks or Milestones',
     source: r'''
 @startgantt
-[Prototype design] requires 1 weeks then [Prototype completed] requires 4 days
+[Prototype design] requires 1 weeks
+[Prototype completed] starts at [Prototype design]'s end and requires 4 days
 [End Prototype completed] happens at [Prototype completed]'s end
-then [Test prototype] requires 5 days
+[Test prototype] starts at [Prototype completed]'s end and requires 5 days
 [End Test prototype] happens at [Test prototype]'s end
 [Prototype completed] is deleted
 [End Prototype completed] is deleted

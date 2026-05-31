@@ -291,23 +291,40 @@ node n #aliceblue;line:blue;line.dotted;text:blue
   SubSample(
     name: 'Nestable elements',
     source: '''@startuml
-action action { }
-artifact artifact { }
-card card { }
-cloud cloud { }
-component component { }
-database database { }
-file file { }
-folder folder { }
-frame frame { }
-hexagon hexagon { }
-node node { }
-package package { }
-process process { }
-queue queue { }
-rectangle rectangle { }
-stack stack { }
-storage storage { }
+action action {
+}
+artifact artifact {
+}
+card card {
+}
+cloud cloud {
+}
+component component {
+}
+database database {
+}
+file file {
+}
+folder folder {
+}
+frame frame {
+}
+hexagon hexagon {
+}
+node node {
+}
+package package {
+}
+process process {
+}
+queue queue {
+}
+rectangle rectangle {
+}
+stack stack {
+}
+storage storage {
+}
 @enduml''',
   ),
   SubSample(
@@ -481,7 +498,7 @@ node Node1 as n1
 node "Node 2" as n2
 file f1 as "File 1"
 cloud c1 as "this is a cloud"
-cloud c2 [this is another cloud]
+cloud c2 as "this is another cloud"
 n1 -> n2
 n1 --> f1
 f1 -> c1
@@ -615,7 +632,7 @@ f11 --:|> b11 : ""--:|>""
 f10 --||> b10 : ""--||>""
 f9 --|> b9 : ""--|>""
 f8 --^ b8 : ""--^ ""
-f7 --\\ b7 : ""--\\\\\\\\""
+f7 --\\\\ b7 : ""--\\\\\\\\""
 f6 --# b6 : ""--# ""
 f5 --+ b5 : ""--+ ""
 f4 --o b4 : ""--o ""

@@ -113,13 +113,12 @@ endif
 start
 if (condition A) then (yes)
   :Text 1;
-elseif (condition B) then (yes)
+(no) elseif (condition B) then (yes)
   :Text 2;
-stop (no)
-elseif (condition C) then (yes)
+stop
+(no) elseif (condition C) then (yes)
   :Text 3;
-(no)
-elseif (condition D) then (yes)
+(no) elseif (condition D) then (yes)
   :Text 4;
 else (nothing)
   :Text else;
@@ -179,8 +178,7 @@ if (condition?) then
   :error;
   stop
 endif
-:action;
-<<#palegreen>>
+#palegreen:action;
 @enduml
 ''',
   ),
@@ -189,12 +187,10 @@ endif
     source: '''
 @startuml
 if (condition?) then
-  :error;
-  <<#pink>>
+  #pink:error;
   kill
 endif
-:action;
-<<#palegreen>>
+#palegreen:action;
 @enduml
 ''',
   ),
@@ -203,12 +199,10 @@ endif
     source: '''
 @startuml
 if (condition?) then
-  :error;
-  <<#pink>>
+  #pink:error;
   detach
 endif
-:action;
-<<#palegreen>>
+#palegreen:action;
 @enduml
 ''',
   ),
@@ -248,8 +242,7 @@ start
 repeat
   :Test something;
   if (Something went wrong?) then (no)
-    :OK;
-    <<#palegreen>>
+    #palegreen:OK;
     break
   endif
   ->NOK;
@@ -395,7 +388,7 @@ fork
   :action 1;
 fork again
   :action 2;
-end end merge
+end merge
 stop
 @enduml
 ''',
@@ -531,8 +524,12 @@ split again
   (Z)
   detach
 split again
-end split
-again stop
+  split
+    :d;
+  split again
+    :e;
+    stop
+  end split
 end split
 @enduml
 ''',
@@ -582,8 +579,7 @@ partition "**process** HelloWorld" {
   //Creole test//
   end note
   :Ready;
-  :HelloWorld(i);
-  <<output>>
+  :HelloWorld(i); <<output>>
   :Hello-Sent;
 }
 @enduml
@@ -595,11 +591,9 @@ partition "**process** HelloWorld" {
 @startuml
 start
 :starting progress;
-:reading configuration files
+#HotPink:reading configuration files
 These files should be edited at this point!;
-<<#HotPink>>
-:ending of the process;
-<<#AAAAAA>>
+#AAAAAA:ending of the process;
 @enduml
 ''',
   ),
@@ -609,8 +603,7 @@ These files should be edited at this point!;
 @startuml
 start
 partition #red/white testPartition {
-  :testActivity;
-  <<#blue\\green>>
+  #blue\\green:testActivity;
 }
 @enduml
 ''',
@@ -675,38 +668,8 @@ link #blue
 @startuml
 skinparam colorArrowSeparationSpace 1
 start
--[#red;#green;#orange;#blue]->
-if(a?)then(yes)
--[#red]-> :activity;
--[#red]-> if(c?)then(yes)
--[#maroon,dashed]->
-else(no)
--[#red]-> if(b?)then(yes)
--[#maroon,dashed]->
-else(no)
--[#blue,dashed;dotted]-> :do a;
--[#red]-> :do b;
--[#red]-> endif
--[#red;#maroon,dashed]-> endif
--[#red;#maroon,dashed]-> elseif(e?)then(yes)
--[#green]-> if(c?)then(yes)
--[#maroon,dashed]->
-else(no)
--[#green]-> if(d?)then(yes)
--[#maroon,dashed]->
-else(no)
--[#green]-> :do something;
-<<continuous>>
--[#green]-> endif
--[#green;#maroon,dashed]-> partition dummy {
-:some function;
-}
--[#green;#maroon,dashed]-> endif
--[#green;#maroon,dashed]-> elseif(f?)then(yes)
--[#orange]-> :activity;
-<<continuous>>
--[#orange]-> else(no)
--[#blue,dashed;dotted]-> endif
+-[#red;#green;#orange;#blue]-> :activity 1;
+-[#blue,dashed;dotted]-> :activity 2;
 stop
 @enduml
 ''',
@@ -872,22 +835,18 @@ stop
 |#pink|Actor_For_red|
 start
 if (color?) is (red) then
-:\\**action red**;
-<<#pink>>
+#pink:\\**action red**;
 :foo1;
 else (not red)
 |#lightgray|Actor_For_no_red|
-:\\**action not red**;
-<<#lightgray>>
+#lightgray:\\**action not red**;
 :foo2;
 endif
 |Next_Actor|
-:foo3;
-<<#lightblue>>
+#lightblue:foo3;
 :foo4;
 |Final_Actor|
-:foo5;
-<<#palegreen>>
+#palegreen:foo5;
 stop
 @enduml
 ''',
@@ -961,10 +920,9 @@ stop
     source: '''
 @startuml
 while (<:cloud_with_rain:>)
-:<:umbrella:>;
-<<icon>>
+:<:umbrella:>; <<icon>>
 endwhile
--<<icon>><:closed_umbrella:>
+:<:closed_umbrella:>; <<icon>>
 @enduml
 ''',
   ),
@@ -974,20 +932,13 @@ endwhile
 @startuml
 start
 :SDL Shape;
-:input;
-<<input>>
-:output;
-<<output>>
-:procedure;
-<<procedure>>
-:load;
-<<load>>
-:save;
-<<save>>
-:continuous;
-<<continuous>>
-:task;
-<<task>>
+:input; <<input>>
+:output; <<output>>
+:procedure; <<procedure>>
+:load; <<load>>
+:save; <<save>>
+:continuous; <<continuous>>
+:task; <<task>>
 end
 @enduml
 ''',
@@ -997,37 +948,25 @@ end
     source: '''
 @startuml
 :Ready;
-:next(o);
-<<procedure>>
+:next(o); <<procedure>>
 :Receiving;
 split
-:nak(i);
-<<input>>
-:ack(o);
-<<output>>
+:nak(i); <<input>>
+:ack(o); <<output>>
 split again
-:ack(i);
-<<input>>
-:next(o) on several lines;
-<<procedure>>
-:i := i + 1;
-<<task>>
-:ack(o);
-<<output>>
+:ack(i); <<input>>
+:next(o) on several lines; <<procedure>>
+:i := i + 1; <<task>>
+:ack(o); <<output>>
 split again
-:err(i);
-<<input>>
-:nak(o);
-<<output>>
+:err(i); <<input>>
+:nak(o); <<output>>
 split again
-:foo;
-<<save>>
+:foo; <<save>>
 split again
-:bar;
-<<load>>
+:bar; <<load>>
 split again
-:i > 5;
-<<continuous>>
+:i > 5; <<continuous>>
 stop
 end split
 :finish;
@@ -1039,20 +978,13 @@ end split
     source: '''
 @startuml
 :action;
-:object;
-<<object>>
-:ObjectNode typed by signal;
-<<objectSignal>>
-:AcceptEventAction without TimeEvent trigger;
-<<acceptEvent>>
-:SendSignalAction;
-<<sendSignal>>
-:SendObjectAction with signal type;
-<<sendSignal>>
-:Trigger;
-<<trigger>>
-:\\t\\t\\t\\t\\t\\tAcceptEventAction \\t\\t\\t\\t\\t\\twith TimeEvent trigger;
-<<timeEvent>>
+:object; <<object>>
+:ObjectNode typed by signal; <<objectSignal>>
+:AcceptEventAction without TimeEvent trigger; <<acceptEvent>>
+:SendSignalAction; <<sendSignal>>
+:SendObjectAction with signal type; <<sendSignal>>
+:Trigger; <<trigger>>
+:\\t\\t\\t\\t\\t\\tAcceptEventAction \\t\\t\\t\\t\\t\\twith TimeEvent trigger; <<timeEvent>>
 :an action;
 @enduml
 ''',

@@ -75,7 +75,7 @@ const mindMapSubSamples = <SubSample>[
 <code>
 template <typename T>
 class cname{
-void f1();
+void f1()<U+003B>
 ...
 }
 </code>

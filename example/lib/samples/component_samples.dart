@@ -18,7 +18,6 @@ component [Last\\ncomponent] as Comp4
 @startuml
 component [\$C1]
 component [\$C2]
-\$C2
 component [\$C2] as dollarC2
 remove \$C1
 remove \$C2
@@ -196,9 +195,10 @@ DA - [First Component]
     name: 'Long description',
     source: '''
 @startuml
-component comp1
-[
-This component has a long comment on several lines
+component comp1 [
+This component
+has a long comment
+on several lines
 ]
 @enduml
 ''',

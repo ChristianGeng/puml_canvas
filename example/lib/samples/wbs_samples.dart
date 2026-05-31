@@ -65,7 +65,8 @@ const wbsSubSamples = <SubSample>[
 @startwbs
 * <&flag> Debian
 ** <&globe> Ubuntu
-***:Linux Mint Open Source;
+***:Linux Mint
+Open Source;
 *** Kubuntu
 *** ...
 @endwbs
@@ -76,16 +77,16 @@ const wbsSubSamples = <SubSample>[
     source: r'''
 @startwbs
 + Project
-+ Part One
-+ Task 1.1
-- LeftTask 1.2
-+ Task 1.3
-+ Part Two
-+ Task 2.1
-+ Task 2.2
--_ Task 2.2.1 To the left boxless
--_ Task 2.2.2 To the Left boxless
-+_ Task 2.2.3 To the right boxless
+++ Part One
++++ Task 1.1
+--- LeftTask 1.2
++++ Task 1.3
+++ Part Two
++++ Task 2.1
++++ Task 2.2
+----_ Task 2.2.1 To the left boxless
+----_ Task 2.2.2 To the Left boxless
+++++_ Task 2.2.3 To the right boxless
 @endwbs
 ''',
   ),
@@ -94,16 +95,16 @@ const wbsSubSamples = <SubSample>[
     source: r'''
 @startwbs
 +_ Project
-+_ Part One
-+_ Task 1.1
--_ LeftTask 1.2
-+_ Task 1.3
-+_ Part Two
-+_ Task 2.1
-+_ Task 2.2
--_ Task 2.2.1 To the left boxless
--_ Task 2.2.2 To the Left boxless
-+_ Task 2.2.3 To the right boxless
+++_ Part One
++++_ Task 1.1
+---_ LeftTask 1.2
++++_ Task 1.3
+++_ Part Two
++++_ Task 2.1
++++_ Task 2.2
+++++_ Task 2.2.1 To the left boxless
+++++_ Task 2.2.2 To the Left boxless
+++++_ Task 2.2.3 To the right boxless
 @endwbs
 ''',
   ),
@@ -188,7 +189,8 @@ wbsDiagram {
 </style>
 * this is the partner workpackage <<your_style_name>>
 ** this is my workpackage <<pink>>
-**:This is on multiple lines; <<pink>>
+**:This is on
+multiple lines; <<pink>>
 ** this is another workpackage
 @endwbs
 ''',
@@ -205,7 +207,8 @@ wbsDiagram {
 </style>
 + this is the partner workpackage <<your_style_name>>
 ++ this is my workpackage <<pink>>
-++:This is on multiple lines; <<pink>>
+++:This is on
+multiple lines; <<pink>>
 ++ this is another workpackage
 @endwbs
 ''',
