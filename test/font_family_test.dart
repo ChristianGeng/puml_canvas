@@ -65,8 +65,12 @@ void main() {
       expect(withDefaultFontFamily(plain, null), same(plain));
       const named = TextStyle(fontFamily: 'monospace');
       expect(withDefaultFontFamily(named, 'Roboto'), same(named));
+      // A fallback list only covers missing characters: the family is
+      // still filled in, and the fallback list is kept.
       const fallback = TextStyle(fontFamilyFallback: ['Noto Sans']);
-      expect(withDefaultFontFamily(fallback, 'Roboto'), same(fallback));
+      final filled = withDefaultFontFamily(fallback, 'Roboto');
+      expect(filled.fontFamily, 'Roboto');
+      expect(filled.fontFamilyFallback, ['Noto Sans']);
     });
   });
 

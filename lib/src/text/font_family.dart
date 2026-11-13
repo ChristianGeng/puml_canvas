@@ -1,17 +1,14 @@
 import 'package:flutter/painting.dart';
 
-/// Returns [style] with [fontFamily] filled in when [style] names no family,
-/// neither as `fontFamily` nor in `fontFamilyFallback`.
+/// Returns [style] with [fontFamily] filled in when [style] names no
+/// `fontFamily`. A `fontFamilyFallback` list does not count: it only
+/// supplies fonts for characters the main font lacks, so it is kept.
 ///
 /// The measurer and the renderer both call this, so a diagram is laid out
 /// and painted with the same font. A family that a style already names (for
 /// example `monospace` for `""text""`) wins over [fontFamily], and a
 /// null [fontFamily] returns [style] unchanged.
 TextStyle withDefaultFontFamily(TextStyle style, String? fontFamily) {
-  if (fontFamily == null ||
-      style.fontFamily != null ||
-      style.fontFamilyFallback != null) {
-    return style;
-  }
+  if (fontFamily == null || style.fontFamily != null) return style;
   return style.copyWith(fontFamily: fontFamily);
 }
