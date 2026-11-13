@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:puml_canvas/puml_canvas.dart';
+import 'package:puml_canvas/src/text/font_family.dart';
 
 /// Family name under which the tests register Roboto.
 const _family = 'TestRoboto';
@@ -56,6 +57,18 @@ Scene _textScene(TextStyle style) => Scene(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUpAll(_loadRoboto);
+
+  group('withDefaultFontFamily', () {
+    test('fills in the family only when the style names none', () {
+      const plain = TextStyle(fontSize: 12);
+      expect(withDefaultFontFamily(plain, 'Roboto').fontFamily, 'Roboto');
+      expect(withDefaultFontFamily(plain, null), same(plain));
+      const named = TextStyle(fontFamily: 'monospace');
+      expect(withDefaultFontFamily(named, 'Roboto'), same(named));
+      const fallback = TextStyle(fontFamilyFallback: ['Noto Sans']);
+      expect(withDefaultFontFamily(fallback, 'Roboto'), same(fallback));
+    });
+  });
 
   group('FlutterTextMeasurer fontFamily', () {
     test('null fontFamily measures the style unchanged', () {
