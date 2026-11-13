@@ -70,6 +70,18 @@ deactivate S
 
 Wrap the widget with `InteractiveViewer` to get pan/zoom for free.
 
+Diagram text uses the platform's default font. To match the font of the
+surrounding page, pass `fontFamily`:
+
+```dart
+PumlView(source: source, fontFamily: 'Roboto')
+```
+
+It applies to every label whose style names no family; inline `<code>`
+text stays monospace. If you lay out and paint a `Scene` yourself, pass the
+same value to `FlutterTextMeasurer(fontFamily: ...)` and
+`Renderer(fontFamily: ...)`, so the text fits the boxes it was measured for.
+
 See [`example/lib/main.dart`](example/lib/main.dart) for a live editor that
 re-renders on every keystroke.
 
