@@ -77,8 +77,8 @@ surrounding page, pass `fontFamily`:
 PumlView(source: source, fontFamily: 'Roboto')
 ```
 
-It applies to every label whose style names no family; inline `<code>`
-text stays monospace. If you lay out and paint a `Scene` yourself, pass the
+It applies to every label whose style names no family; text marked as
+monospace (`""text""`) stays monospace. If you lay out and paint a `Scene` yourself, pass the
 same value to `FlutterTextMeasurer(fontFamily: ...)` and
 `Renderer(fontFamily: ...)`, so the text fits the boxes it was measured for.
 
