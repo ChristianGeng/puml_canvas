@@ -65,12 +65,13 @@ void main() {
       expect(withDefaultFontFamily(plain, null), same(plain));
       const named = TextStyle(fontFamily: 'monospace');
       expect(withDefaultFontFamily(named, 'Roboto'), same(named));
-      // A fallback list only covers missing characters: the family is
-      // still filled in, and the fallback list is kept.
+      // Without fontFamily, Flutter uses the first fallback entry as the
+      // preferred font, so a non-empty list names a family.
       const fallback = TextStyle(fontFamilyFallback: ['Noto Sans']);
-      final filled = withDefaultFontFamily(fallback, 'Roboto');
-      expect(filled.fontFamily, 'Roboto');
-      expect(filled.fontFamilyFallback, ['Noto Sans']);
+      expect(withDefaultFontFamily(fallback, 'Roboto'), same(fallback));
+      // An empty list is the same as none.
+      const empty = TextStyle(fontFamilyFallback: <String>[]);
+      expect(withDefaultFontFamily(empty, 'Roboto').fontFamily, 'Roboto');
     });
   });
 
