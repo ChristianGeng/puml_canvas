@@ -303,4 +303,200 @@ end fork
       expect(bLabel.left, greaterThan(aRight));
     });
   });
+
+  group('labels of blocks nested in a while loop', () {
+    Rect textRect(SceneText t) =>
+        Rect.fromLTWH(t.offset.dx, t.offset.dy, t.text.length * 7.0, 14);
+
+    /// Lines passing through the interior of a label.
+    List<String> crossings(Scene s) {
+      final out = <String>[];
+      for (final t in s.shapes.whereType<SceneText>()) {
+        final r = textRect(t).deflate(0.5);
+        for (final l in s.shapes.whereType<SceneLine>()) {
+          final seg = Rect.fromPoints(l.from, l.to);
+          final hit = seg.width < 0.5
+              ? seg.left > r.left &&
+                  seg.left < r.right &&
+                  seg.top < r.bottom &&
+                  seg.bottom > r.top
+              : seg.height < 0.5
+                  ? seg.top > r.top &&
+                      seg.top < r.bottom &&
+                      seg.left < r.right &&
+                      seg.right > r.left
+                  : seg.overlaps(r);
+          if (hit) out.add('${t.text}: ${l.from}->${l.to}');
+        }
+      }
+      return out;
+    }
+
+    void expectLabelsInsideScene(Scene s) {
+      for (final t in s.shapes.whereType<SceneText>()) {
+        final r = textRect(t);
+        expect(r.left, greaterThanOrEqualTo(0), reason: 'label ${t.text}');
+        expect(r.right, lessThanOrEqualTo(s.size.width),
+            reason: 'label ${t.text}');
+        expect(r.bottom, lessThanOrEqualTo(s.size.height),
+            reason: 'label ${t.text}');
+      }
+    }
+
+    /// Everything but the labels, for comparing layouts.
+    List<String> geometry(Scene s) => [
+          for (final x in s.shapes)
+            if (x is SceneLine)
+              'line ${x.from} ${x.to}'
+            else if (x is SceneDiamond)
+              'diamond ${x.rect}'
+            else if (x is SceneRoundedBox)
+              'box ${x.rect}'
+        ];
+
+    for (final (name, src) in [
+      (
+        '`not` label of a nested repeat',
+        '''
+@startuml
+while (o?)
+  repeat
+    :a;
+  repeat while (c?) is (y) not (n)
+endwhile
+@enduml
+'''
+      ),
+      (
+        '`is` label of a nested repeat',
+        '''
+@startuml
+while (o?)
+  repeat
+    :a;
+  repeat while (c?) is (yes)
+endwhile
+@enduml
+'''
+      ),
+      (
+        '`then` label of a nested if',
+        '''
+@startuml
+while (o?)
+  if (c?) then (yes indeed)
+    :a;
+  endif
+endwhile
+@enduml
+'''
+      ),
+    ]) {
+      test('$name is not crossed by the loop-back', () {
+        final s = _layout(src);
+        expect(crossings(s), isEmpty);
+        expectLabelsInsideScene(s);
+      });
+    }
+
+    test('a repeat outside a while keeps its geometry; `is` widens it', () {
+      const plain = '''
+@startuml
+start
+repeat
+  :a;
+repeat while (c?)
+stop
+@enduml
+''';
+      final s = _layout(plain.replaceFirst('(c?)', '(c?) is (a long yes)'));
+      expect(geometry(s), geometry(_layout(plain)));
+      expect(crossings(s), isEmpty);
+      expectLabelsInsideScene(s);
+    });
+
+    test('a repeat outside a while: the exit passes its `not` label', () {
+      const plain = '''
+@startuml
+start
+repeat
+  :a;
+repeat while (c?)
+:after;
+@enduml
+''';
+      final before = _layout(plain);
+      final s = _layout(plain.replaceFirst('(c?)', '(c?) not (no)'));
+      Rect box(Scene x, String label) => x.shapes
+          .whereType<SceneRoundedBox>()
+          .singleWhere((b) => b.label == label)
+          .rect;
+      final c = s.shapes
+          .whereType<SceneDiamond>()
+          .singleWhere((d) => d.label == 'c?')
+          .rect;
+      expect(box(s, 'a'), box(before, 'a'));
+      // The next node moves down by the label's height (14) plus 2.
+      expect(box(s, 'after'), box(before, 'after').translate(0, 16));
+      final not = textRect(
+          s.shapes.whereType<SceneText>().singleWhere((t) => t.text == 'no'));
+      expect(not.top, greaterThanOrEqualTo(c.bottom));
+      expect(not.bottom, lessThanOrEqualTo(box(s, 'after').top));
+      // The exit edge stays continuous from the diamond to the next node.
+      final lines = s.shapes.whereType<SceneLine>();
+      expect(
+          lines.where((l) =>
+              _isPoint(l.from, c.center.dx, c.bottom) &&
+              _near(l.to.dy, not.bottom)),
+          hasLength(1));
+      expect(
+          lines.where((l) =>
+              _isPoint(l.from, c.center.dx, not.bottom) &&
+              _near(l.to.dy, box(s, 'after').top)),
+          hasLength(1));
+      expect(crossings(s), isEmpty);
+    });
+
+    test('an if outside a while keeps its geometry; labels widen the scene',
+        () {
+      const plain = '''
+@startuml
+start
+if (c?) then (y)
+  :a;
+else (n)
+  :b;
+endif
+stop
+@enduml
+''';
+      final s = _layout(plain.replaceFirst('then (y)', 'then (a very long yes)'));
+      expect(geometry(s), geometry(_layout(plain)));
+      expectLabelsInsideScene(s);
+    });
+
+    test('an if in a fork branch keeps its label clear of the next branch',
+        () {
+      final s = _layout('''
+@startuml
+start
+fork
+  if (c?) then (a very long yes label)
+    :a;
+  endif
+fork again
+  :b;
+end fork
+@enduml
+''');
+      final label = textRect(s.shapes
+          .whereType<SceneText>()
+          .singleWhere((t) => t.text == 'a very long yes label'));
+      final b = s.shapes
+          .whereType<SceneRoundedBox>()
+          .singleWhere((x) => x.label == 'b')
+          .rect;
+      expect(label.right, lessThanOrEqualTo(b.left));
+    });
+  });
 }
