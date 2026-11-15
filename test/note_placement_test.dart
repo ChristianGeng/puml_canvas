@@ -190,4 +190,143 @@ void main() {
       expect(feet.last, greaterThan(msg.from.dy));
     });
   });
+
+  group('sequence note clearance: plan matches emission', () {
+    List<SceneLine> messages(Scene s) =>
+        s.shapes.whereType<SceneLine>().where((l) => l.label != null).toList();
+
+    double feetTop(Scene s) => (s.shapes
+            .whereType<SceneBox>()
+            .where((b) => b.label == 'A')
+            .map((b) => b.rect.top)
+            .toList()
+          ..sort())
+        .last;
+
+    Scene layoutBody(String body) =>
+        _layout('@startuml\nparticipant A\nparticipant B\n$body@enduml\n');
+
+    double lastMessageY(Scene s) =>
+        messages(s).map((m) => m.from.dy).reduce((a, b) => a > b ? a : b);
+
+    const note = 'note over A, B : context\n';
+
+    // What follows the last message (group padding, ...) fixes its distance
+    // to the participant feet; a note above it must not change that
+    // distance unless the plan and emission disagree.
+    void expectConsistent(String body) {
+      final s = layoutBody(body);
+      final plain = layoutBody(body.replaceAll(note, ''));
+      expect(feetTop(s) - lastMessageY(s),
+          closeTo(feetTop(plain) - lastMessageY(plain), 0.5),
+          reason: 'feet gap for:\n$body');
+      for (final m in messages(s)) {
+        expect(m.from.dy, lessThan(feetTop(s)));
+      }
+      for (final x in s.shapes.whereType<SceneBox>()) {
+        expect(x.rect.bottom, lessThanOrEqualTo(s.size.height));
+      }
+    }
+
+    const msg = 'A -> B : hello\n';
+
+    test('activation events between note and message keep the push', () {
+      for (final between in [
+        'activate A\n',
+        'deactivate A\n',
+        'create C\n',
+        'destroy B\n',
+      ]) {
+        final body = (note + between + msg) * 4;
+        expectConsistent(body);
+        final s = layoutBody(body);
+        final notes = s.shapes.whereType<SceneNote>().toList();
+        final ms = messages(s);
+        for (var i = 0; i < notes.length; i++) {
+          // The label is drawn `height + 2` above the arrow.
+          expect(ms[i].from.dy - 14 - 2,
+              greaterThanOrEqualTo(notes[i].rect.bottom),
+              reason: '$between: label $i clears its note');
+        }
+      }
+    });
+
+    test('a dash separator after the note ends its clearance', () {
+      expectConsistent('$note--\n$msg');
+    });
+
+    test('a separator after the note ends its clearance', () {
+      expectConsistent('$note== sep ==\n$msg');
+    });
+
+    test('a skip separator after the note ends its clearance', () {
+      expectConsistent('$note...\n$msg');
+    });
+
+    test('a group starting after the note ends its clearance', () {
+      expectConsistent('${note}group g\n${msg}end\n');
+    });
+
+    test('a group ending after the note ends its clearance', () {
+      expectConsistent('group g\n${note}end\n$msg');
+    });
+
+    test('an else divider after the note ends its clearance', () {
+      expectConsistent('alt a\n${note}else b\n${msg}end\n');
+    });
+
+    test('a synchronized message after a note keeps its pair', () {
+      final s = layoutBody('A -> B : one\n$note& B -> A : two\n');
+      final ms = messages(s);
+      final one = ms.singleWhere((m) => m.label == 'one');
+      final two = ms.singleWhere((m) => m.label == 'two');
+      expect(two.from.dy, closeTo(one.from.dy, 0.5));
+      expect(two.from.dy, lessThan(feetTop(s)));
+    });
+
+    test('an inline note pushes the next label down too', () {
+      final s = _layout('@startuml\n'
+          'A -> B : first\n'
+          'note right : a rather long note\n'
+          'B -> A : a very long response label indeed\n'
+          '@enduml\n');
+      final n = _noteRect(s, 'a rather long note');
+      final reply = messages(s)
+          .singleWhere((l) => l.label == 'a very long response label indeed');
+      expect(reply.from.dy - 14 - 2, greaterThanOrEqualTo(n.bottom));
+      for (final m in messages(s)) {
+        expect(m.from.dy, lessThan(feetTop(s)));
+      }
+    });
+  });
+
+  group('attached class notes never give up overlapping', () {
+    test('a side note slides past a class taller than 600 px', () {
+      final fields = [for (var i = 0; i < 60; i++) '  +field$i : int'];
+      final s = _layout('@startuml\n'
+          'class A\n'
+          'class B {\n${fields.join('\n')}\n}\n'
+          'note right of A : a note wider than the gap\n'
+          '@enduml\n');
+      final b = _classRect(s, 'B');
+      expect(b.height, greaterThan(600));
+      final n = _noteRect(s, 'a note wider than the gap');
+      expect(n.overlaps(b), isFalse);
+      expect(_inside(n, s.size), isTrue);
+    });
+
+    test('two top notes wider than 600 px do not overlap', () {
+      final words = List.filled(100, 'w').join();
+      final s = _layout('@startuml\n'
+          'class A\n'
+          'note top of A : first $words\n'
+          'note top of A : second $words\n'
+          '@enduml\n');
+      final a = _noteRect(s, 'first $words');
+      final b = _noteRect(s, 'second $words');
+      expect(a.width, greaterThan(600));
+      expect(a.overlaps(b), isFalse);
+      expect(_inside(a, s.size) && _inside(b, s.size), isTrue);
+    });
+  });
 }

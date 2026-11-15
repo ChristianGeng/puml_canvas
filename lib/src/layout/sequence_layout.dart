@@ -703,19 +703,33 @@ class SequenceLayout implements DiagramLayout {
     var total = 0.0;
     for (var i = 0; i < events.length; i++) {
       total += _planEventHeight(events[i], measurer, noteStyle);
-      // A labelled message right after a note is pushed down so its label
-      // clears the note (see [_emitEvents]).
-      final next = i + 1 < events.length ? events[i + 1] : null;
-      if (events[i] is Note &&
-          next is Message &&
-          next.label != null &&
-          next.label!.isNotEmpty) {
+      // A labelled message after a note is pushed down so its label clears
+      // the note. Mirrors [_emitEvents]: the pending note survives only
+      // zero-height events and ends with its event list.
+      if (events[i] is! Note) continue;
+      var j = i + 1;
+      while (j < events.length && _isZeroHeight(events[j])) {
+        j++;
+      }
+      final next = j < events.length ? events[j] : null;
+      if (next is Message && _clearsNote(next)) {
         total += _measureMultilineText(next.label!, measurer, _labelStyle)
             .height;
       }
     }
     return total;
   }
+
+  /// Whether [m], emitted right after a note, moves down so its label
+  /// clears that note. A synchronized (`&`) message keeps the start of the
+  /// message it pairs with instead.
+  bool _clearsNote(Message m) =>
+      !m.synchronized && m.label != null && m.label!.isNotEmpty;
+
+  /// Events that take no vertical space and keep a pending note's
+  /// clearance for the message after them.
+  static bool _isZeroHeight(SequenceEvent e) =>
+      e is Activate || e is Deactivate || e is Create || e is Destroy;
 
   double _planEventHeight(
       SequenceEvent event, TextMeasurer measurer, TextStyle noteStyle) {
@@ -799,6 +813,10 @@ class SequenceLayout implements DiagramLayout {
   double _emitEvents(
       List<SequenceEvent> events, double startY, _Ctx ctx) {
     var y = startY;
+    // A note pushes down the next message in the same event list unless an
+    // event with height comes between them; _planHeight budgets exactly
+    // that.
+    ctx.noteBottomY = null;
     for (final event in events) {
       switch (event) {
         case Message():
@@ -814,16 +832,14 @@ class SequenceLayout implements DiagramLayout {
           // PlantUML keeps a message label clear of a note above it. The
           // label is drawn above the arrow, so a labelled message right
           // after a note moves down by the label height.
-          final label = event.label;
           final noteBottomY = ctx.noteBottomY;
-          if (noteBottomY != null && label != null && label.isNotEmpty) {
-            final labelH =
-                _measureMultilineText(label, ctx.measurer, ctx.labelStyle)
-                    .height;
+          if (noteBottomY != null && _clearsNote(event)) {
+            final labelH = _measureMultilineText(
+                    event.label!, ctx.measurer, ctx.labelStyle)
+                .height;
             final need = noteBottomY + labelH + _noteVerticalGap;
             if (y < need) y = need;
           }
-          ctx.noteBottomY = null;
           final messageStartY = y;
           if (event.fromExternal == null &&
               event.toExternal == null &&
@@ -934,8 +950,8 @@ class SequenceLayout implements DiagramLayout {
             if (noteBottomY > y) y = noteBottomY;
           } else {
             y += boxSize.height + _noteVerticalGap * 2;
-            ctx.noteBottomY = rect.bottom;
           }
+          ctx.noteBottomY = rect.bottom;
         case RefBox():
           y = _emitRefBox(event, y, ctx);
         case Activate():
@@ -963,6 +979,7 @@ class SequenceLayout implements DiagramLayout {
         case NewPage():
           y = _emitNewPage(event, y, ctx);
       }
+      if (event is! Note && !_isZeroHeight(event)) ctx.noteBottomY = null;
     }
     return y - startY;
   }
@@ -1581,9 +1598,10 @@ class _Ctx {
   final Map<String, double> createY = {};
   final Map<String, double> destroyY = {};
   double? lastMessageY;
-  // Bottom edge of a note that the next message's label must clear; set by
-  // notes that advance `y` past themselves (not inline notes beside the
-  // previous message) and cleared by the next message.
+  // Bottom edge of the note that the next message's label must clear; set
+  // by every note, kept across zero-height events (activate, deactivate,
+  // create, destroy), cleared by any other event and at the start of each
+  // event list.
   double? noteBottomY;
   // Y coordinate of the most-recently-emitted message's TAIL endpoint. Used
   // by the `&` parallel/sync marker so a `synchronized` message rewinds its

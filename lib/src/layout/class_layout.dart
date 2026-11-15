@@ -199,7 +199,9 @@ class ClassLayout implements DiagramLayout {
       bool hits(Rect c) =>
           boxes.values.any((b) => b.rect.inflate(4).overlaps(c)) ||
           noteRects.values.any((n) => n.inflate(4).overlaps(c));
-      for (var i = 0; i < 50 && hits(r); i++) {
+      // The slide is monotone and every obstacle is finite, so this ends
+      // once the note has passed the last box or note in its way.
+      while (hits(r)) {
         r = r.shift(vertical
             ? const Offset(0, _attachedNoteNudge)
             : const Offset(_attachedNoteNudge, 0));
