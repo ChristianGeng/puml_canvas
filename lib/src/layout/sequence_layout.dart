@@ -230,7 +230,7 @@ class SequenceLayout implements DiagramLayout {
     }
 
     final totalEventsHeight =
-        _planHeight(diagram.events, measurer, noteStyle);
+        _planHeight(diagram.events, _Plan(measurer, noteStyle, labelStyle));
 
     final shapes = <SceneShape>[];
     final eventShapes = <SceneShape>[];
@@ -698,11 +698,10 @@ class SequenceLayout implements DiagramLayout {
     }
   }
 
-  double _planHeight(List<SequenceEvent> events, TextMeasurer measurer,
-      TextStyle noteStyle) {
+  double _planHeight(List<SequenceEvent> events, _Plan plan) {
     var total = 0.0;
     for (var i = 0; i < events.length; i++) {
-      total += _planEventHeight(events[i], measurer, noteStyle);
+      total += _planEventHeight(events[i], plan);
       // A labelled message after a note is pushed down so its label clears
       // the note. Mirrors [_emitEvents]: the pending note survives only
       // zero-height events and ends with its event list.
@@ -712,8 +711,12 @@ class SequenceLayout implements DiagramLayout {
         j++;
       }
       final next = j < events.length ? events[j] : null;
-      if (next is Message && _clearsNote(next)) {
-        total += _measureMultilineText(next.label!, measurer, _labelStyle)
+      // Only zero-height events lie between the note and [next], so
+      // [plan.messageBefore] already holds what it is at [next].
+      if (next is Message &&
+          _clearsNote(next, canSynchronize: plan.messageBefore)) {
+        total += _measureMultilineText(
+                next.label!, plan.measurer, plan.labelStyle)
             .height;
       }
     }
@@ -722,23 +725,32 @@ class SequenceLayout implements DiagramLayout {
 
   /// Whether [m], emitted right after a note, moves down so its label
   /// clears that note. A synchronized (`&`) message keeps the start of the
-  /// message it pairs with instead.
-  bool _clearsNote(Message m) =>
-      !m.synchronized && m.label != null && m.label!.isNotEmpty;
+  /// message it pairs with instead, unless there is no earlier message to
+  /// pair with ([canSynchronize] false).
+  bool _clearsNote(Message m, {required bool canSynchronize}) =>
+      (!m.synchronized || !canSynchronize) &&
+      m.label != null &&
+      m.label!.isNotEmpty;
 
   /// Events that take no vertical space and keep a pending note's
   /// clearance for the message after them.
   static bool _isZeroHeight(SequenceEvent e) =>
       e is Activate || e is Deactivate || e is Create || e is Destroy;
 
-  double _planEventHeight(
-      SequenceEvent event, TextMeasurer measurer, TextStyle noteStyle) {
+  double _planEventHeight(SequenceEvent event, _Plan plan) {
+    final measurer = plan.measurer;
+    final noteStyle = plan.noteStyle;
     switch (event) {
       case Message():
+        // Mirrors [_emitEvents]: only a non-synchronized message gives a
+        // later `&` message a start to pair with.
+        final canSynchronize = plan.messageBefore;
+        if (!event.synchronized) plan.messageBefore = true;
         if (event.from == event.to) {
           final labelH = event.label == null || event.label!.isEmpty
               ? 0.0
-              : _measureMultilineText(event.label!, measurer, _labelStyle)
+              : _measureMultilineText(
+                      event.label!, measurer, plan.labelStyle)
                   .height;
           return _messageGap + _selfMessageHeight + labelH;
         }
@@ -751,7 +763,9 @@ class SequenceLayout implements DiagramLayout {
         final durationPx = event.duration == null
             ? 0.0
             : event.duration! * _durationPixelsPerUnit;
-        if (event.synchronized) {
+        // With nothing to pair with, emission does not rewind and the
+        // message advances like any other.
+        if (event.synchronized && canSynchronize) {
           return durationPx;
         }
         return _messageGap + durationPx;
@@ -773,7 +787,7 @@ class SequenceLayout implements DiagramLayout {
         var inner = 0.0;
         for (var i = 0; i < event.branches.length; i++) {
           if (i > 0) inner += _groupElseDividerGap * 2;
-          inner += _planHeight(event.branches[i].events, measurer, noteStyle);
+          inner += _planHeight(event.branches[i].events, plan);
         }
         return _groupPaddingTop +
             _groupLabelTabHeight +
@@ -833,7 +847,9 @@ class SequenceLayout implements DiagramLayout {
           // label is drawn above the arrow, so a labelled message right
           // after a note moves down by the label height.
           final noteBottomY = ctx.noteBottomY;
-          if (noteBottomY != null && _clearsNote(event)) {
+          if (noteBottomY != null &&
+              _clearsNote(event,
+                  canSynchronize: ctx.previousMessageStartY != null)) {
             final labelH = _measureMultilineText(
                     event.label!, ctx.measurer, ctx.labelStyle)
                 .height;
@@ -1576,6 +1592,21 @@ class SequenceLayout implements DiagramLayout {
       stroke: const Color(0xFF000000),
     ));
   }
+}
+
+/// State of the height plan while it walks the events in emission order.
+class _Plan {
+  final TextMeasurer measurer;
+  final TextStyle noteStyle;
+
+  /// The skin-adjusted message label style emission uses.
+  final TextStyle labelStyle;
+
+  /// Whether a non-synchronized message came earlier, giving a `&` message
+  /// a start to pair with (`_Ctx.previousMessageStartY` during emission).
+  bool messageBefore = false;
+
+  _Plan(this.measurer, this.noteStyle, this.labelStyle);
 }
 
 class _Ctx {

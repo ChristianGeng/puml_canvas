@@ -11,7 +11,9 @@
   often under an unrelated class. `FreeNote` gains a `side` field
   (`NoteSide`).
 - Sequence diagrams: a labelled message right after a note moves down by
-  the label height, so the note no longer covers the label.
+  the label height, so the note no longer covers the label. This also
+  holds with `skinparam defaultFontSize` and for a `&` message with no
+  earlier message to pair with, and the diagram height budgets for both.
 
 ## 0.13.0
 

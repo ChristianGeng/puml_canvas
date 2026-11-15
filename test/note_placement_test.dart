@@ -11,6 +11,15 @@ class _FixedTextMeasurer implements TextMeasurer {
   Size measure(String text, TextStyle style) => Size(text.length * 7.0, 14);
 }
 
+/// Scales with the font size, so a skin font size shows in the layout.
+class _ScaledTextMeasurer implements TextMeasurer {
+  @override
+  Size measure(String text, TextStyle style) {
+    final fs = style.fontSize ?? 14;
+    return Size(text.length * fs * 0.6, fs * 1.25);
+  }
+}
+
 Diagram _parse(String source) => Parser().parse(Lexer().tokenize(source));
 
 Scene _layout(String source) =>
@@ -203,8 +212,11 @@ void main() {
           ..sort())
         .last;
 
-    Scene layoutBody(String body) =>
-        _layout('@startuml\nparticipant A\nparticipant B\n$body@enduml\n');
+    Scene layoutBody(String body, {String skin = ''}) => const AutoLayout()
+        .layout(
+            _parse('@startuml\n${skin}participant A\nparticipant B\n'
+                '$body@enduml\n'),
+            skin.isEmpty ? _FixedTextMeasurer() : _ScaledTextMeasurer());
 
     double lastMessageY(Scene s) =>
         messages(s).map((m) => m.from.dy).reduce((a, b) => a > b ? a : b);
@@ -282,6 +294,54 @@ void main() {
       final two = ms.singleWhere((m) => m.label == 'two');
       expect(two.from.dy, closeTo(one.from.dy, 0.5));
       expect(two.from.dy, lessThan(feetTop(s)));
+    });
+
+    group('with skinparam defaultFontSize 24', () {
+      const skin = 'skinparam defaultFontSize 24\n';
+      // _ScaledTextMeasurer: a 24 px label is 30 px high.
+      const labelH = 30.0;
+
+      test('the participant feet stay below the pushed-down message', () {
+        final s = layoutBody('$note$msg', skin: skin);
+        final plain = layoutBody(msg, skin: skin);
+        final hello = messages(s).single;
+        expect(hello.from.dy - labelH - 2,
+            greaterThanOrEqualTo(s.shapes.whereType<SceneNote>().single.rect
+                .bottom));
+        expect(feetTop(s) - hello.from.dy,
+            closeTo(feetTop(plain) - messages(plain).single.from.dy, 0.5));
+        for (final x in s.shapes.whereType<SceneBox>()) {
+          expect(x.rect.bottom, lessThanOrEqualTo(s.size.height));
+        }
+      });
+
+      test('a self-message label is planned at the skin size', () {
+        const last = 'A -> B : end\n';
+        double gap(Scene s) =>
+            feetTop(s) -
+            messages(s).singleWhere((m) => m.label == 'end').from.dy;
+        expect(gap(layoutBody('A -> A : self\n$last', skin: skin)),
+            closeTo(gap(layoutBody(last, skin: skin)), 0.5));
+      });
+    });
+
+    group('a first synchronized message has nothing to pair with', () {
+      for (final first in ['& B -> A : two\n', '& A -> B : hello\n']) {
+        test('${first.trim()} after a note clears it', () {
+          final s = layoutBody('$note$first');
+          final m = messages(s).single;
+          expect(m.from.dy - 14 - 2,
+              greaterThanOrEqualTo(
+                  s.shapes.whereType<SceneNote>().single.rect.bottom));
+          expectConsistent('$note$first');
+        });
+
+        test('${first.trim()} is planned like a plain message', () {
+          double gap(Scene s) => feetTop(s) - messages(s).single.from.dy;
+          expect(gap(layoutBody(first)),
+              closeTo(gap(layoutBody(first.replaceFirst('& ', ''))), 0.5));
+        });
+      }
     });
 
     test('an inline note pushes the next label down too', () {
