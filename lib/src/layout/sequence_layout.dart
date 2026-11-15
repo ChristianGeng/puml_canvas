@@ -701,8 +701,18 @@ class SequenceLayout implements DiagramLayout {
   double _planHeight(List<SequenceEvent> events, TextMeasurer measurer,
       TextStyle noteStyle) {
     var total = 0.0;
-    for (final e in events) {
-      total += _planEventHeight(e, measurer, noteStyle);
+    for (var i = 0; i < events.length; i++) {
+      total += _planEventHeight(events[i], measurer, noteStyle);
+      // A labelled message right after a note is pushed down so its label
+      // clears the note (see [_emitEvents]).
+      final next = i + 1 < events.length ? events[i + 1] : null;
+      if (events[i] is Note &&
+          next is Message &&
+          next.label != null &&
+          next.label!.isNotEmpty) {
+        total += _measureMultilineText(next.label!, measurer, _labelStyle)
+            .height;
+      }
     }
     return total;
   }
@@ -801,6 +811,19 @@ class SequenceLayout implements DiagramLayout {
             rewoundBy = y - ctx.previousMessageStartY!;
             y = ctx.previousMessageStartY!;
           }
+          // PlantUML keeps a message label clear of a note above it. The
+          // label is drawn above the arrow, so a labelled message right
+          // after a note moves down by the label height.
+          final label = event.label;
+          final noteBottomY = ctx.noteBottomY;
+          if (noteBottomY != null && label != null && label.isNotEmpty) {
+            final labelH =
+                _measureMultilineText(label, ctx.measurer, ctx.labelStyle)
+                    .height;
+            final need = noteBottomY + labelH + _noteVerticalGap;
+            if (y < need) y = need;
+          }
+          ctx.noteBottomY = null;
           final messageStartY = y;
           if (event.fromExternal == null &&
               event.toExternal == null &&
@@ -911,6 +934,7 @@ class SequenceLayout implements DiagramLayout {
             if (noteBottomY > y) y = noteBottomY;
           } else {
             y += boxSize.height + _noteVerticalGap * 2;
+            ctx.noteBottomY = rect.bottom;
           }
         case RefBox():
           y = _emitRefBox(event, y, ctx);
@@ -1557,6 +1581,10 @@ class _Ctx {
   final Map<String, double> createY = {};
   final Map<String, double> destroyY = {};
   double? lastMessageY;
+  // Bottom edge of a note that the next message's label must clear; set by
+  // notes that advance `y` past themselves (not inline notes beside the
+  // previous message) and cleared by the next message.
+  double? noteBottomY;
   // Y coordinate of the most-recently-emitted message's TAIL endpoint. Used
   // by the `&` parallel/sync marker so a `synchronized` message rewinds its
   // start to share the same tail Y as the immediately preceding message.
