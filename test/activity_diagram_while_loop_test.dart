@@ -133,4 +133,174 @@ void main() {
           ls.where((l) => _isPoint(l.from, d.left, d.center.dy)), hasLength(1));
     });
   });
+
+  group('activity while loop extents', () {
+    Rect textRect(SceneText t) =>
+        Rect.fromLTWH(t.offset.dx, t.offset.dy, t.text.length * 7.0, 14);
+
+    void expectInsideScene(Scene s) {
+      for (final l in s.shapes.whereType<SceneLine>()) {
+        for (final p in [l.from, l.to]) {
+          expect(p.dx, greaterThanOrEqualTo(0), reason: 'line $p');
+          expect(p.dx, lessThanOrEqualTo(s.size.width), reason: 'line $p');
+        }
+      }
+      for (final t in s.shapes.whereType<SceneText>()) {
+        final r = textRect(t);
+        expect(r.left, greaterThanOrEqualTo(0), reason: 'label ${t.text}');
+        expect(r.right, lessThanOrEqualTo(s.size.width),
+            reason: 'label ${t.text}');
+      }
+    }
+
+    test('three fork branches with short loops stay inside the scene', () {
+      final s = _layout('''
+@startuml
+start
+fork
+  while (a?) is (y)
+    :x;
+  endwhile (n)
+fork again
+  while (b?) is (y)
+    :x;
+  endwhile (n)
+fork again
+  while (c?) is (y)
+    :x;
+  endwhile (n)
+end fork
+stop
+@enduml
+''');
+      expectInsideScene(s);
+    });
+
+    test('a wide loop body keeps the exit route inside the scene', () {
+      final s = _layout('''
+@startuml
+start
+while (More?) is (yes)
+  :${'w' * 80};
+endwhile (no)
+stop
+@enduml
+''');
+      expectInsideScene(s);
+    });
+
+    test('empty body: the return path passes below the `is` label', () {
+      final s = _layout(
+          '@startuml\nwhile (x?) is (yes)\nendwhile (no)\nstop\n@enduml\n');
+      final label = textRect(
+          s.shapes.whereType<SceneText>().singleWhere((t) => t.text == 'yes'));
+      for (final l in s.shapes.whereType<SceneLine>()) {
+        final r = Rect.fromPoints(l.from, l.to);
+        final crosses = r.left < label.right &&
+            r.right > label.left &&
+            r.top <= label.bottom &&
+            r.bottom >= label.top;
+        expect(crosses, isFalse, reason: 'line ${l.from}->${l.to}');
+      }
+    });
+
+    test('a long `is` label stays clear of the loop-back', () {
+      final s = _layout('''
+@startuml
+while (x?) is (yes keep going)
+  :a;
+endwhile (no)
+stop
+@enduml
+''');
+      final d = s.shapes.whereType<SceneDiamond>().single.rect;
+      final label = textRect(s.shapes
+          .whereType<SceneText>()
+          .singleWhere((t) => t.text == 'yes keep going'));
+      final into = s.shapes
+          .whereType<SceneLine>()
+          .singleWhere((l) => _isPoint(l.to, d.right, d.center.dy));
+      expect(into.from.dx, greaterThan(label.right));
+    });
+
+    test('empty body with an `is` label: the parent attaches at the join', () {
+      final s = _layout('''
+@startuml
+if (c?) then (y)
+  while (x?) is (yes)
+  endwhile
+else (n)
+  :b;
+endif
+@enduml
+''');
+      final d = s.shapes
+          .whereType<SceneDiamond>()
+          .singleWhere((x) => x.label == 'x?')
+          .rect;
+      final lines = s.shapes.whereType<SceneLine>().toList();
+      // The exit edge rejoins the centre line at joinY ...
+      final join = lines.singleWhere((l) =>
+          _near(l.to.dx, d.center.dx) &&
+          l.from.dx < d.left &&
+          _near(l.from.dy, l.to.dy));
+      final joinY = join.to.dy;
+      // ... and the if-merge tail starts exactly there.
+      final tail = lines.where(
+          (l) => !identical(l, join) && _isPoint(l.from, d.center.dx, joinY));
+      expect(tail, isNotEmpty);
+    });
+
+    test('`endwhile` label stays inside an enclosing partition', () {
+      final s = _layout('''
+@startuml
+partition g {
+  while (x?) is (y)
+    :a;
+  endwhile (a rather long label)
+}
+@enduml
+''');
+      final box = s.shapes.whereType<SceneBox>().single.rect;
+      final label = textRect(s.shapes
+          .whereType<SceneText>()
+          .singleWhere((t) => t.text == 'a rather long label'));
+      expect(label.left, greaterThanOrEqualTo(box.left));
+    });
+
+    test('`endwhile` label of a fork branch clears the neighbouring loop', () {
+      final s = _layout('''
+@startuml
+fork
+  while (a?) is (y)
+    :x;
+  endwhile (a rather long label)
+fork again
+  while (b?) is (y)
+    :x;
+  endwhile (a rather long label)
+end fork
+@enduml
+''');
+      Rect diamond(String label) => s.shapes
+          .whereType<SceneDiamond>()
+          .singleWhere((x) => x.label == label)
+          .rect;
+      final a = diamond('a?');
+      final b = diamond('b?');
+      // Loop a's loop-back column is its rightmost edge.
+      final aRight = s.shapes
+          .whereType<SceneLine>()
+          .singleWhere((l) => _isPoint(l.to, a.right, a.center.dy))
+          .from
+          .dx;
+      final bLabel = s.shapes
+          .whereType<SceneText>()
+          .where((t) => t.text == 'a rather long label')
+          .map(textRect)
+          .singleWhere((r) => r.left > a.right);
+      expect(bLabel.right, lessThanOrEqualTo(b.left + 0.5));
+      expect(bLabel.left, greaterThan(aRight));
+    });
+  });
 }
