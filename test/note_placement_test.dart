@@ -212,8 +212,8 @@ void main() {
           ..sort())
         .last;
 
-    Scene layoutBody(String body, {String skin = ''}) => const AutoLayout()
-        .layout(
+    Scene layoutBody(String body, {String skin = ''}) =>
+        const AutoLayout().layout(
             _parse('@startuml\n${skin}participant A\nparticipant B\n'
                 '$body@enduml\n'),
             skin.isEmpty ? _FixedTextMeasurer() : _ScaledTextMeasurer());
@@ -305,9 +305,10 @@ void main() {
         final s = layoutBody('$note$msg', skin: skin);
         final plain = layoutBody(msg, skin: skin);
         final hello = messages(s).single;
-        expect(hello.from.dy - labelH - 2,
-            greaterThanOrEqualTo(s.shapes.whereType<SceneNote>().single.rect
-                .bottom));
+        expect(
+            hello.from.dy - labelH - 2,
+            greaterThanOrEqualTo(
+                s.shapes.whereType<SceneNote>().single.rect.bottom));
         expect(feetTop(s) - hello.from.dy,
             closeTo(feetTop(plain) - messages(plain).single.from.dy, 0.5));
         for (final x in s.shapes.whereType<SceneBox>()) {
@@ -330,7 +331,8 @@ void main() {
         test('${first.trim()} after a note clears it', () {
           final s = layoutBody('$note$first');
           final m = messages(s).single;
-          expect(m.from.dy - 14 - 2,
+          expect(
+              m.from.dy - 14 - 2,
               greaterThanOrEqualTo(
                   s.shapes.whereType<SceneNote>().single.rect.bottom));
           expectConsistent('$note$first');
@@ -354,6 +356,26 @@ void main() {
       final reply = messages(s)
           .singleWhere((l) => l.label == 'a very long response label indeed');
       expect(reply.from.dy - 14 - 2, greaterThanOrEqualTo(n.bottom));
+      for (final m in messages(s)) {
+        expect(m.from.dy, lessThan(feetTop(s)));
+      }
+    });
+
+    test('two inline notes after one message: the next label clears the taller',
+        () {
+      final s = _layout('@startuml\n'
+          'A -> B : first\n'
+          'note right\none\ntwo\nthree\nfour\nfive\nend note\n'
+          'note left : short\n'
+          'B -> A : a very long response label indeed\n'
+          '@enduml\n');
+      final tall = s.shapes
+          .whereType<SceneNote>()
+          .singleWhere((n) => n.text.startsWith('one'))
+          .rect;
+      final reply = messages(s)
+          .singleWhere((l) => l.label == 'a very long response label indeed');
+      expect(reply.from.dy - 14 - 2, greaterThanOrEqualTo(tall.bottom));
       for (final m in messages(s)) {
         expect(m.from.dy, lessThan(feetTop(s)));
       }

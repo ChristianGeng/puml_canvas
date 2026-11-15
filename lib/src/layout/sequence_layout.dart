@@ -967,7 +967,12 @@ class SequenceLayout implements DiagramLayout {
           } else {
             y += boxSize.height + _noteVerticalGap * 2;
           }
-          ctx.noteBottomY = rect.bottom;
+          // Keep the lowest pending note: two inline notes after one
+          // message share a top, and a shorter second one must not hide
+          // the taller first one.
+          final pending = ctx.noteBottomY;
+          ctx.noteBottomY =
+              pending == null ? rect.bottom : math.max(pending, rect.bottom);
         case RefBox():
           y = _emitRefBox(event, y, ctx);
         case Activate():
