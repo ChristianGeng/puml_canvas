@@ -4602,29 +4602,34 @@ class Parser {
       return FreeNote(alias: alias, text: text);
     }
     NotePosition? position;
+    NoteSide? side;
     if (_isKeyword('left')) {
       _advance();
       if (_isKeyword('of')) {
         _advance();
         position = NotePosition.leftOf;
+        side = NoteSide.left;
       }
     } else if (_isKeyword('right')) {
       _advance();
       if (_isKeyword('of')) {
         _advance();
         position = NotePosition.rightOf;
+        side = NoteSide.right;
       }
     } else if (_isKeyword('top')) {
       _advance();
       if (_isKeyword('of')) {
         _advance();
         position = NotePosition.over;
+        side = NoteSide.top;
       }
     } else if (_isKeyword('bottom')) {
       _advance();
       if (_isKeyword('of')) {
         _advance();
         position = NotePosition.over;
+        side = NoteSide.bottom;
       }
     } else if (_isKeyword('over')) {
       _advance();
@@ -4650,7 +4655,8 @@ class Parser {
       return null;
     }
     final alias = '__note_${nextAttachedId()}';
-    return FreeNote(alias: alias, text: text, attachedTo: target);
+    return FreeNote(
+        alias: alias, text: text, attachedTo: target, side: side);
   }
 
   bool _isClassHeaderKeyword() {

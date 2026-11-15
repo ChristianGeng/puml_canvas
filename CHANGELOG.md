@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Class diagrams: an attached note (`note left|right|top|bottom of X`)
+  is now placed on that side of its target, joined by a dashed line and
+  nudged clear of other classes and notes, as in PlantUML. Previously the
+  side was dropped and every note went into a row below all classes,
+  often under an unrelated class. `FreeNote` gains a `side` field
+  (`NoteSide`).
+- Sequence diagrams: a labelled message right after a note moves down by
+  the label height, so the note no longer covers the label. This also
+  holds with `skinparam defaultFontSize` and for a `&` message with no
+  earlier message to pair with, and the diagram height budgets for both.
+
 ## 0.13.0
 
 ### Added
