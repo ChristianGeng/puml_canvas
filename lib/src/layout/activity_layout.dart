@@ -21,6 +21,9 @@ class ActivityLayout implements DiagramLayout {
   static const _diamondMinHeight = 44.0;
   static const _startStopRadius = 10.0;
   static const _branchLabelGap = 4.0;
+  /// Horizontal clearance between a `while` body and its loop-back / exit
+  /// edges.
+  static const _loopGap = 16.0;
   static const _partitionPadding = 12.0;
   static const _partitionLabelHeight = 18.0;
   static const _forkBarHeight = 6.0;
@@ -234,9 +237,10 @@ class ActivityLayout implements DiagramLayout {
         final dh =
             math.max(_diamondMinHeight, s.height + _diamondPaddingY * 2);
         final bodySize = _measureSubtree(node.body, measurer);
-        final w = math.max(dw, bodySize.width);
+        final w = math.max(dw, bodySize.width) + 2 * _loopGap;
         final h = dh +
-            (node.body.isEmpty ? 0 : _vGap + bodySize.height);
+            (node.body.isEmpty ? 0 : _vGap + bodySize.height) +
+            _vGap;
         return Size(w, h);
       case RepeatBlock():
         final entryH = 28.0;
@@ -672,6 +676,14 @@ class ActivityLayout implements DiagramLayout {
     }
   }
 
+  /// Lays out `while (cond) is (yes) ... endwhile (no)`.
+  ///
+  /// PlantUML draws the condition diamond with the body below it (the `is`
+  /// label on the edge into the body), a loop-back edge from the end of the
+  /// body up the right side into the diamond's right corner, and the exit
+  /// edge from the left corner down past the body, rejoining the centre line
+  /// below it (the `endwhile` label beside the left corner). The block's flow
+  /// ends at that join point.
   _Flow _layoutWhile(
     WhileBlock block,
     _LayoutContext ctx,
@@ -690,29 +702,10 @@ class ActivityLayout implements DiagramLayout {
       fill: _diamondFill,
       stroke: _strokeColor,
     ));
-    if (block.isLabel != null && block.isLabel!.isNotEmpty) {
-      ctx.shapes.add(SceneText(
-        offset: Offset(
-          diamondRect.right + _branchLabelGap,
-          diamondRect.bottom - 14,
-        ),
-        text: block.isLabel!,
-        textStyle: _branchLabelStyle,
-      ));
-    }
-    if (block.endLabel != null && block.endLabel!.isNotEmpty) {
-      ctx.shapes.add(SceneText(
-        offset: Offset(
-          diamondRect.left - 40,
-          diamondRect.center.dy - 6,
-        ),
-        text: block.endLabel!,
-        textStyle: _branchLabelStyle,
-      ));
-    }
     final bodyTop = diamondRect.bottom + _vGap;
     final flow = _layoutSequence(block.body, ctx, centerX, bodyTop);
-    if (block.body.isNotEmpty) {
+    final hasBody = block.body.isNotEmpty;
+    if (hasBody) {
       ctx.shapes.add(SceneLine(
         from: Offset(centerX, diamondRect.bottom),
         to: Offset(centerX, flow.topY),
@@ -720,14 +713,55 @@ class ActivityLayout implements DiagramLayout {
         stroke: _strokeColor,
       ));
     }
-    final bottomY = block.body.isEmpty ? diamondRect.bottom : flow.bottomY;
+    final bodyBottom = hasBody ? flow.bottomY : diamondRect.bottom;
+    final halfW = math.max(
+          diamondRect.width / 2,
+          hasBody
+              ? math.max(centerX - flow.left, flow.right - centerX)
+              : 0.0,
+        ) +
+        _loopGap;
+    final rightX = centerX + halfW;
+    final leftX = centerX - halfW;
+    final backY = bodyBottom + _vGap / 2;
+    final joinY = bodyBottom + _vGap;
+    void seg(Offset a, Offset b, {ArrowHead? head}) => ctx.shapes.add(
+        SceneLine(from: a, to: b, head: head, stroke: _strokeColor));
+    if (!hasBody || flow.hasExit) {
+      seg(Offset(centerX, bodyBottom), Offset(centerX, backY));
+      seg(Offset(centerX, backY), Offset(rightX, backY));
+      seg(Offset(rightX, backY), Offset(rightX, diamondRect.center.dy));
+      seg(Offset(rightX, diamondRect.center.dy),
+          Offset(diamondRect.right, diamondRect.center.dy),
+          head: ArrowHead.filled);
+    }
+    seg(Offset(diamondRect.left, diamondRect.center.dy),
+        Offset(leftX, diamondRect.center.dy));
+    seg(Offset(leftX, diamondRect.center.dy), Offset(leftX, joinY));
+    seg(Offset(leftX, joinY), Offset(centerX, joinY));
+    if (block.isLabel != null && block.isLabel!.isNotEmpty) {
+      ctx.shapes.add(SceneText(
+        offset: Offset(centerX + _branchLabelGap, diamondRect.bottom + 1),
+        text: block.isLabel!,
+        textStyle: _branchLabelStyle,
+      ));
+    }
+    if (block.endLabel != null && block.endLabel!.isNotEmpty) {
+      final w = ctx.measurer.measure(block.endLabel!, _branchLabelStyle).width;
+      ctx.shapes.add(SceneText(
+        offset: Offset(diamondRect.left - _branchLabelGap - w,
+            diamondRect.center.dy - 14),
+        text: block.endLabel!,
+        textStyle: _branchLabelStyle,
+      ));
+    }
     return _Flow(
       topY: topY,
-      bottomY: bottomY,
+      bottomY: joinY,
       hasEntry: true,
       hasExit: true,
-      left: math.min(diamondRect.left, flow.left),
-      right: math.max(diamondRect.right, flow.right),
+      left: leftX,
+      right: rightX,
     );
   }
 
