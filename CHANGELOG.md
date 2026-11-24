@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Activity `while` loops now draw the loop-back edge (from the end of the
+  body up the right side into the condition diamond) and the exit edge
+  (from the diamond's left corner down past the body, rejoining below it),
+  as PlantUML does. The `is` label sits under the diamond and the
+  `endwhile` label beside the exit instead of floating at a fixed offset.
+- Activity `repeat` and `if` blocks count their branch labels (`is`,
+  `not`, `then`, `else`) towards their extents, so an enclosing loop-back
+  or a neighbouring branch no longer runs through them. A `not` label
+  below a `repeat` now sits beside the exit edge, above the next node.
+
 ## 0.13.0
 
 ### Added
