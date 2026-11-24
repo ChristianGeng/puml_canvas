@@ -577,15 +577,23 @@ class ClassDiagram extends Diagram {
   });
 }
 
+/// Side of its target that an attached class-diagram note sits on
+/// (`note left|right|top|bottom of X`).
+enum NoteSide { left, right, top, bottom }
+
 class FreeNote {
   final String alias;
   final String text;
   final String? attachedTo;
 
+  /// Side of [attachedTo]; `null` for free-standing notes.
+  final NoteSide? side;
+
   const FreeNote({
     required this.alias,
     required this.text,
     this.attachedTo,
+    this.side,
   });
 }
 
