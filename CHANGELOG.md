@@ -10,6 +10,28 @@
   both the measurer and the renderer so layout and painting agree. With
   no value, output is unchanged.
 
+### Fixed
+
+- Class diagrams: an attached note (`note left|right|top|bottom of X`)
+  is now placed on that side of its target, joined by a dashed line and
+  nudged clear of other classes and notes, as in PlantUML. Previously the
+  side was dropped and every note went into a row below all classes,
+  often under an unrelated class. `FreeNote` gains a `side` field
+  (`NoteSide`).
+- Sequence diagrams: a labelled message right after a note moves down by
+  the label height, so the note no longer covers the label. This also
+  holds with `skinparam defaultFontSize` and for a `&` message with no
+  earlier message to pair with, and the diagram height budgets for both.
+- Activity `while` loops now draw the loop-back edge (from the end of the
+  body up the right side into the condition diamond) and the exit edge
+  (from the diamond's left corner down past the body, rejoining below it),
+  as PlantUML does. The `is` label sits under the diamond and the
+  `endwhile` label beside the exit instead of floating at a fixed offset.
+- Activity `repeat` and `if` blocks count their branch labels (`is`,
+  `not`, `then`, `else`) towards their extents, so an enclosing loop-back
+  or a neighbouring branch no longer runs through them. A `not` label
+  below a `repeat` now sits beside the exit edge, above the next node.
+
 ## 0.13.0
 
 ### Added

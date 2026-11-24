@@ -20,6 +20,13 @@ class ClassLayout implements DiagramLayout {
   static const _stereotypeGap = 2.0;
   static const _colGap = 60.0;
   static const _rowGap = 60.0;
+
+  /// Distance between an attached note and the side of its target class.
+  static const _attachedNoteGap = 24.0;
+
+  /// Step by which an attached note slides along its side while it still
+  /// overlaps a class box or an earlier note.
+  static const _attachedNoteNudge = 12.0;
   static const _minClassWidth = 90.0;
   static const _headerStyle = TextStyle(
     color: Color(0xFF000000),
@@ -162,19 +169,68 @@ class ClassLayout implements DiagramLayout {
       boxes[entry.key]!.rect = entry.value;
     }
 
+    final noteRects = <String, Rect>{};
+    // PlantUML puts an attached note (`note left|right|top|bottom of X`) on
+    // that side of X, joined to it by a dashed line. Each one slides along
+    // its side until it clears every class box and earlier note; the
+    // diagram then shifts so that notes left of / above the leftmost /
+    // topmost class stay inside the padding. Free-standing notes (and
+    // `note over X`, which class diagrams do not position) keep the row
+    // below the classes.
+    var minX = 0.0, minY = 0.0;
+    for (final note in diagram.freeNotes) {
+      final target =
+          note.attachedTo == null ? null : boxes[note.attachedTo!]?.rect;
+      if (target == null || note.side == null) continue;
+      final size = _measureNote(note.text, measurer);
+      const gap = _attachedNoteGap;
+      var r = switch (note.side!) {
+        NoteSide.right => Rect.fromLTWH(target.right + gap,
+            target.center.dy - size.height / 2, size.width, size.height),
+        NoteSide.left => Rect.fromLTWH(target.left - gap - size.width,
+            target.center.dy - size.height / 2, size.width, size.height),
+        NoteSide.top => Rect.fromLTWH(target.center.dx - size.width / 2,
+            target.top - gap - size.height, size.width, size.height),
+        NoteSide.bottom => Rect.fromLTWH(target.center.dx - size.width / 2,
+            target.bottom + gap, size.width, size.height),
+      };
+      final vertical =
+          note.side == NoteSide.left || note.side == NoteSide.right;
+      bool hits(Rect c) =>
+          boxes.values.any((b) => b.rect.inflate(4).overlaps(c)) ||
+          noteRects.values.any((n) => n.inflate(4).overlaps(c));
+      // The slide is monotone and every obstacle is finite, so this ends
+      // once the note has passed the last box or note in its way.
+      while (hits(r)) {
+        r = r.shift(vertical
+            ? const Offset(0, _attachedNoteNudge)
+            : const Offset(_attachedNoteNudge, 0));
+      }
+      noteRects[note.alias] = r;
+      if (r.left - _padding < minX) minX = r.left - _padding;
+      if (r.top - _padding < minY) minY = r.top - _padding;
+    }
+    if (minX < 0 || minY < 0) {
+      final d = Offset(-minX, -minY);
+      for (final b in boxes.values) {
+        b.rect = b.rect.shift(d);
+      }
+      noteRects.updateAll((_, r) => r.shift(d));
+    }
     var width = 0.0;
     var height = 0.0;
-    for (final b in boxes.values) {
-      if (b.rect.right > width) width = b.rect.right;
-      if (b.rect.bottom > height) height = b.rect.bottom;
+    for (final r in [...boxes.values.map((b) => b.rect), ...noteRects.values]) {
+      if (r.right > width) width = r.right;
+      if (r.bottom > height) height = r.bottom;
     }
-
-    final noteRects = <String, Rect>{};
-    if (diagram.freeNotes.isNotEmpty) {
+    final unplaced = diagram.freeNotes
+        .where((n) => !noteRects.containsKey(n.alias))
+        .toList();
+    if (unplaced.isNotEmpty) {
       var nx = _padding;
       var ny = (height > 0 ? height + _rowGap : _padding);
       var rowMaxHeight = 0.0;
-      for (final note in diagram.freeNotes) {
+      for (final note in unplaced) {
         final size = _measureNote(note.text, measurer);
         if (nx > _padding && nx + size.width > width) {
           nx = _padding;
