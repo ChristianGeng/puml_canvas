@@ -4,6 +4,7 @@ import 'package:flutter/painting.dart';
 
 import '../ast/diagram.dart';
 import '../layout/scene.dart';
+import '../text/font_family.dart';
 import '../text/inline_markup.dart';
 
 class Renderer {
@@ -12,7 +13,14 @@ class Renderer {
   static const _dashOn = 6.0;
   static const _dashOff = 4.0;
 
-  const Renderer();
+  /// Font family used for text whose style names none.
+  ///
+  /// Null (the default) keeps the platform's default font. Use the same
+  /// value as the `FlutterTextMeasurer` that laid out the scene, so the
+  /// painted text fits the boxes sized for it.
+  final String? fontFamily;
+
+  const Renderer({this.fontFamily});
 
   void render(Canvas canvas, Scene scene) {
     final bg = scene.background;
@@ -51,6 +59,12 @@ class Renderer {
       }
     }
   }
+
+  /// Parses [text] with [style], filling in [fontFamily] if [style] names
+  /// none. Every label goes through here, so the measurer and the renderer
+  /// agree on the font.
+  TextSpan _span(String text, TextStyle style) =>
+      parseInlineMarkup(text, withDefaultFontFamily(style, fontFamily));
 
   void _drawCrowFoot(Canvas canvas, SceneCrowFoot c) {
     final paint = Paint()
@@ -143,7 +157,7 @@ class Renderer {
     final label = d.label;
     if (label != null && label.isNotEmpty) {
       final painter = TextPainter(
-        text: parseInlineMarkup(label, d.textStyle),
+        text: _span(label, d.textStyle),
         textDirection: TextDirection.ltr,
         textAlign: TextAlign.center,
       )..layout(maxWidth: r.width);
@@ -244,7 +258,7 @@ class Renderer {
     final label = b.label;
     if (label != null && label.isNotEmpty) {
       final painter = TextPainter(
-        text: parseInlineMarkup(label, b.textStyle),
+        text: _span(label, b.textStyle),
         textDirection: TextDirection.ltr,
         textAlign: TextAlign.center,
       )..layout(maxWidth: b.rect.width);
@@ -291,7 +305,7 @@ class Renderer {
   void _paintLabel(Canvas canvas, SceneSymbol s, Rect labelRect,
       {double maxWidth = double.infinity}) {
     final painter = TextPainter(
-      text: parseInlineMarkup(s.label, s.labelStyle),
+      text: _span(s.label, s.labelStyle),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: maxWidth);
     painter.paint(
@@ -548,7 +562,7 @@ class Renderer {
 
   double _measureLabelHeight(SceneSymbol s) {
     final painter = TextPainter(
-      text: parseInlineMarkup(s.label, s.labelStyle),
+      text: _span(s.label, s.labelStyle),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: s.rect.width);
     return painter.height;
@@ -556,7 +570,7 @@ class Renderer {
 
   void _drawText(Canvas canvas, SceneText text) {
     final painter = TextPainter(
-      text: parseInlineMarkup(text.text, text.textStyle),
+      text: _span(text.text, text.textStyle),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: text.maxWidth);
     painter.paint(canvas, text.offset);
@@ -601,7 +615,7 @@ class Renderer {
     );
 
     final painter = TextPainter(
-      text: parseInlineMarkup(note.text, note.textStyle),
+      text: _span(note.text, note.textStyle),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: r.width);
     painter.paint(
@@ -629,7 +643,7 @@ class Renderer {
     final label = box.label;
     if (label != null && label.isNotEmpty) {
       final painter = TextPainter(
-        text: parseInlineMarkup(label, box.textStyle),
+        text: _span(label, box.textStyle),
         textDirection: TextDirection.ltr,
       )..layout();
       final offset = Offset(
@@ -655,7 +669,7 @@ class Renderer {
 
     if (ellipse.label.isNotEmpty) {
       final painter = TextPainter(
-        text: parseInlineMarkup(ellipse.label, ellipse.textStyle),
+        text: _span(ellipse.label, ellipse.textStyle),
         textDirection: TextDirection.ltr,
         textAlign: TextAlign.center,
       )..layout(maxWidth: ellipse.rect.width);
@@ -692,7 +706,7 @@ class Renderer {
     final style = line.labelStyle;
     if (label != null && label.isNotEmpty && style != null) {
       final painter = TextPainter(
-        text: parseInlineMarkup(label, style),
+        text: _span(label, style),
         textDirection: TextDirection.ltr,
       )..layout();
       final midX = (line.from.dx + line.to.dx) / 2;

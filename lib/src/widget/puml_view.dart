@@ -17,12 +17,19 @@ class PumlView extends StatelessWidget {
   /// (default) keeps the existing [StateLayout] path so output is unchanged.
   final bool useSugiyamaForStates;
 
+  /// Font family for diagram text whose style names none, so the diagram
+  /// can match the font of the surrounding page. It goes to both the
+  /// measurer and the renderer, so layout and painting use the same font.
+  /// Null (default) keeps the platform's default font.
+  final String? fontFamily;
+
   const PumlView({
     super.key,
     required this.source,
     this.errorBuilder,
     this.fileLoader,
     this.useSugiyamaForStates = false,
+    this.fontFamily,
   });
 
   @override
@@ -34,7 +41,7 @@ class PumlView extends StatelessWidget {
       final tokens = Lexer().tokenize(pre);
       final diagram = Parser().parse(tokens);
       scene = AutoLayout(useSugiyamaForStates: useSugiyamaForStates)
-          .layout(diagram, const FlutterTextMeasurer());
+          .layout(diagram, FlutterTextMeasurer(fontFamily: fontFamily));
     } catch (e) {
       return errorBuilder?.call(context, e) ??
           _DefaultError(error: e.toString());
@@ -44,23 +51,24 @@ class PumlView extends StatelessWidget {
 
     return CustomPaint(
       size: scene.size,
-      painter: _PumlPainter(scene),
+      painter: _PumlPainter(scene, fontFamily),
     );
   }
 }
 
 class _PumlPainter extends CustomPainter {
   final Scene scene;
-  const _PumlPainter(this.scene);
+  final String? fontFamily;
+  const _PumlPainter(this.scene, this.fontFamily);
 
   @override
   void paint(Canvas canvas, Size size) {
-    const Renderer().render(canvas, scene);
+    Renderer(fontFamily: fontFamily).render(canvas, scene);
   }
 
   @override
   bool shouldRepaint(covariant _PumlPainter old) =>
-      !identical(old.scene, scene);
+      !identical(old.scene, scene) || old.fontFamily != fontFamily;
 }
 
 class _DefaultError extends StatelessWidget {

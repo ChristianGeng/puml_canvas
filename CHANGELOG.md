@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Optional `fontFamily` on `PumlView`, `FlutterTextMeasurer` and
+  `Renderer`, so an app can choose the font of diagram text. It applies
+  only where a text style names no family, and `PumlView` passes it to
+  both the measurer and the renderer so layout and painting agree. With
+  no value, output is unchanged.
+
 ### Fixed
 
 - Class diagrams: an attached note (`note left|right|top|bottom of X`)
