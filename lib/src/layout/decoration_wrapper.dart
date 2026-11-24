@@ -132,7 +132,7 @@ Scene wrapWithDecorations(
   }
 
   for (final shape in innerScene.shapes) {
-    shapes.add(_translate(shape, innerOffsetX, shiftY));
+    shapes.add(translateShape(shape, innerOffsetX, shiftY));
   }
 
   if (dec.legend != null) {
@@ -218,7 +218,8 @@ Size _measureMultiline(String text, TextStyle style, TextMeasurer measurer) {
   return Size(maxWidth, totalHeight);
 }
 
-SceneShape _translate(SceneShape shape, double dx, double dy) {
+/// Returns [shape] moved by ([dx], [dy]).
+SceneShape translateShape(SceneShape shape, double dx, double dy) {
   if (dx == 0 && dy == 0) return shape;
   switch (shape) {
     case SceneBox():
